@@ -114,6 +114,8 @@ pub fn world_from_capture() -> World {
         entities,
         player_entity_id,
         player_index,
+        // The capture carries the adventure hash, not its name.
+        adventure: String::new(),
         transfer_ip: "127.0.0.1".to_owned(),
         transfer_port: 42069,
 
