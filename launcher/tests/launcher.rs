@@ -356,3 +356,55 @@ mod finding_the_client {
         assert_eq!(chosen, Path::new("/build/machine/path"));
     }
 }
+
+// --- reaching a server that is not on this machine -----------------------------------------
+//
+// 127.0.0.1 is right when the client and server share a machine and wrong the moment they do
+// not: in a VM it points at the VM. The client takes the address as launch variables, so the
+// launcher has to be able to set it.
+
+mod server_address {
+    use skysaga_launcher::launch_args_for;
+
+    #[test]
+    fn the_host_reaches_every_variable_that_carries_it() {
+        let args = launch_args_for("Alice", "192.168.122.1");
+
+        // ws_host is the web API; devimip is the same address again, and the client stalls
+        // without it.
+        assert!(args.contains("ws_host=192.168.122.1"), "{args}");
+        assert!(args.contains("devimip=192.168.122.1"), "{args}");
+    }
+
+    #[test]
+    fn the_default_host_is_still_loopback() {
+        assert!(launch_args_for("Alice", "127.0.0.1").contains("ws_host=127.0.0.1"));
+    }
+
+    /// The account has to survive alongside a custom host.
+    #[test]
+    fn the_account_is_kept() {
+        assert!(launch_args_for("Alice", "10.0.2.2").contains("auth=Alice"));
+    }
+
+    /// A blank host would produce `ws_host=` and the client would have nowhere to go, so it
+    /// falls back rather than emitting an empty one.
+    #[test]
+    fn a_blank_host_falls_back_to_loopback() {
+        for blank in ["", "   "] {
+            assert!(
+                launch_args_for("Alice", blank).contains("ws_host=127.0.0.1"),
+                "a blank host must fall back",
+            );
+        }
+    }
+
+    /// The ports do not change with the host.
+    #[test]
+    fn the_ports_are_unchanged() {
+        let args = launch_args_for("Alice", "10.0.2.2");
+
+        assert!(args.contains("ws_port=5164"), "{args}");
+        assert!(args.contains("manport=5164"), "{args}");
+    }
+}

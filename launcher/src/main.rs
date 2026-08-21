@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 use skysaga_launcher::{
-    client_paths, database_url, is_valid_account, launch_command, missing_database, options,
-    AccountOption, Platform,
+    client_paths, database_url, is_valid_account, launch_command_for, missing_database, options,
+    server_host, AccountOption, Platform,
 };
 use skysaga_store::{SqliteStore, Store};
 use tracing::{error, info};
@@ -96,6 +96,9 @@ struct Launcher {
     problem: Option<String>,
     /// What was launched, so pressing Play twice is visibly a second client.
     launched: Vec<String>,
+
+    /// Where the server is. Loopback is wrong as soon as the client is in a VM.
+    host: String,
 }
 
 impl Launcher {
@@ -108,6 +111,7 @@ impl Launcher {
             typed: String::new(),
             problem: None,
             launched: Vec::new(),
+            host: server_host(),
         }
     }
 
@@ -137,7 +141,7 @@ impl Launcher {
     fn play(&mut self) {
         let account = self.account();
         let platform = Platform::host();
-        let launch = launch_command(platform, &client_paths(), &account);
+        let launch = launch_command_for(platform, &client_paths(), &account, &self.host);
 
         if !launch.program.exists() {
             self.problem = Some(match platform {
@@ -235,6 +239,13 @@ impl eframe::App for Launcher {
                     ui.label(format!("Character: {}", account.summary()));
                 }
             }
+
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Server:");
+                ui.text_edit_singleline(&mut self.host);
+            });
 
             ui.add_space(16.0);
 

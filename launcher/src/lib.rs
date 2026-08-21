@@ -15,6 +15,17 @@ use skysaga_state::AccountRecord;
 pub const BASE_ARGS: &str =
     "ws_host=127.0.0.1 ws_port=5164 allowim=1 devimip=127.0.0.1 manport=5164 multiApp=1 useAnalytics=0";
 
+/// Where the server is, when it is not on this machine.
+///
+/// Loopback is right for a client and server sharing a machine and wrong the moment they do
+/// not: inside a VM it points at the VM. `SKYSAGA_HOST` sets it, and the launcher offers it
+/// as a field.
+pub const DEFAULT_HOST: &str = "127.0.0.1";
+
+pub fn server_host() -> String {
+    std::env::var("SKYSAGA_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_owned())
+}
+
 /// An account as the launcher offers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountOption {
@@ -67,13 +78,27 @@ pub fn options(accounts: Vec<AccountRecord>) -> Vec<AccountOption> {
 /// A blank account means "leave it alone", which reproduces the old behaviour rather than
 /// sending an empty `auth=`.
 pub fn launch_args(account: &str) -> String {
-    let account = account.trim();
+    launch_args_for(account, &server_host())
+}
 
-    if account.is_empty() {
-        return BASE_ARGS.to_owned();
+/// The launch variables for signing in as `account` against a server at `host`.
+///
+/// Both `ws_host` and `devimip` carry the address. They are not interchangeable: the client
+/// reaches the web API through the first and stalls on a black screen without the second.
+pub fn launch_args_for(account: &str, host: &str) -> String {
+    let host = match host.trim() {
+        "" => DEFAULT_HOST,
+        host => host,
+    };
+
+    let base = BASE_ARGS
+        .replace("ws_host=127.0.0.1", &format!("ws_host={host}"))
+        .replace("devimip=127.0.0.1", &format!("devimip={host}"));
+
+    match account.trim() {
+        "" => base,
+        account => format!("{base} auth={account}"),
     }
-
-    format!("{BASE_ARGS} auth={account}")
 }
 
 /// Whether a typed account name can be used.
@@ -180,7 +205,17 @@ pub struct LaunchCommand {
 /// running natively or under Wine, which is what lets one launcher serve both. Keeping it out
 /// of the command line also means a name cannot be re-split by a shell on the way through.
 pub fn launch_command(platform: Platform, paths: &ClientPaths, account: &str) -> LaunchCommand {
-    let env = vec![("SKYSAGA_ARGS".to_owned(), launch_args(account))];
+    launch_command_for(platform, paths, account, &server_host())
+}
+
+/// As [`launch_command`], against a server at `host`.
+pub fn launch_command_for(
+    platform: Platform,
+    paths: &ClientPaths,
+    account: &str,
+    host: &str,
+) -> LaunchCommand {
+    let env = vec![("SKYSAGA_ARGS".to_owned(), launch_args_for(account, host))];
 
     match platform {
         // PatchedLaunch resolves SkySaga.exe and Patches.dll relative to its own working
