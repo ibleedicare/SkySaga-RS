@@ -275,3 +275,84 @@ mod platform {
         assert_eq!(Platform::host(), expected);
     }
 }
+
+// --- finding the client --------------------------------------------------------------------
+//
+// The compiled-in fallback is a path on the machine that built the launcher, which is useless
+// once the binary is copied anywhere else -- a Windows VM, or a friend's computer. A launcher
+// dropped into the game folder has to find the game beside it.
+
+mod finding_the_client {
+    use skysaga_launcher::choose_client_dir;
+    use std::path::{Path, PathBuf};
+
+    /// Stands in for the filesystem: these directories "contain" the client.
+    fn holds_client<'a>(real: &'a [&'a str]) -> impl Fn(&Path) -> bool + 'a {
+        move |path| real.iter().any(|r| Path::new(r) == path)
+    }
+
+    fn dirs(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    /// Shipped next to the game: the launcher's own directory is where the client is.
+    #[test]
+    fn the_directory_beside_the_launcher_is_used() {
+        let chosen = choose_client_dir(
+            dirs(&["/games/SkySaga/Client"]),
+            holds_client(&["/games/SkySaga/Client"]),
+            PathBuf::from("/build/machine/path"),
+        );
+
+        assert_eq!(chosen, Path::new("/games/SkySaga/Client"));
+    }
+
+    /// An explicit setting wins over anything found by looking around.
+    #[test]
+    fn an_earlier_candidate_wins() {
+        let chosen = choose_client_dir(
+            dirs(&["/explicit", "/beside/launcher"]),
+            holds_client(&["/explicit", "/beside/launcher"]),
+            PathBuf::from("/build/machine/path"),
+        );
+
+        assert_eq!(chosen, Path::new("/explicit"));
+    }
+
+    /// A candidate that does not actually hold the client is skipped rather than used and
+    /// then failed on.
+    #[test]
+    fn a_candidate_without_the_client_is_skipped() {
+        let chosen = choose_client_dir(
+            dirs(&["/somewhere/else", "/games/SkySaga/Client"]),
+            holds_client(&["/games/SkySaga/Client"]),
+            PathBuf::from("/build/machine/path"),
+        );
+
+        assert_eq!(chosen, Path::new("/games/SkySaga/Client"));
+    }
+
+    /// With nothing found, the fallback is returned so the error message can name a real
+    /// path rather than nothing at all.
+    #[test]
+    fn the_fallback_is_used_when_nothing_holds_the_client() {
+        let chosen = choose_client_dir(
+            dirs(&["/nope", "/also/nope"]),
+            holds_client(&[]),
+            PathBuf::from("/build/machine/path"),
+        );
+
+        assert_eq!(chosen, Path::new("/build/machine/path"));
+    }
+
+    #[test]
+    fn no_candidates_at_all_falls_back() {
+        let chosen = choose_client_dir(
+            Vec::new(),
+            holds_client(&[]),
+            PathBuf::from("/build/machine/path"),
+        );
+
+        assert_eq!(chosen, Path::new("/build/machine/path"));
+    }
+}

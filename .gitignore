@@ -11,3 +11,5 @@ skysaga.db-wal
 
 # the launcher is its own workspace
 /launcher/target
+# a rustup toolchain, if one was ever installed here by mistake
+/launcher/.rustup

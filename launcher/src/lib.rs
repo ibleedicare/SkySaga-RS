@@ -209,14 +209,65 @@ pub fn launch_command(platform: Platform, paths: &ClientPaths, account: &str) ->
 /// `SKYSAGA_DIR` overrides it, matching the Wine script's own variable.
 pub fn client_paths() -> ClientPaths {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let developing = repo.join("SkySaga Infinite Isles").join("Client");
 
-    let client_dir = std::env::var_os("SKYSAGA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo.join("SkySaga Infinite Isles"))
-        .join("Client");
+    let mut candidates = Vec::new();
+
+    // Explicit wins.
+    if let Some(dir) = std::env::var_os("SKYSAGA_DIR") {
+        let dir = PathBuf::from(dir);
+
+        // Accept either the install root or the Client directory inside it.
+        candidates.push(dir.join("Client"));
+        candidates.push(dir);
+    }
+
+    // Then beside the launcher, which is how it ships: dropped into the game folder.
+    if let Some(dir) = executable_dir() {
+        candidates.push(dir.join("Client"));
+        candidates.push(dir);
+    }
+
+    // Then the tree this was built from, for running out of a checkout.
+    candidates.push(developing.clone());
 
     ClientPaths {
-        client_dir,
+        client_dir: choose_client_dir(candidates, holds_client, developing),
         script: client_script(),
     }
+}
+
+/// Pick the directory holding the client, from candidates in order of preference.
+///
+/// The first candidate that actually holds the client wins; `fallback` is returned when none
+/// do, so the resulting error can name a path rather than nothing.
+///
+/// This exists because the compiled-in path points at the machine that built the launcher.
+/// That is right during development and wrong everywhere else: copied into a Windows VM or
+/// onto another computer, the only sensible place to look is beside the executable.
+pub fn choose_client_dir(
+    candidates: Vec<PathBuf>,
+    holds_client: impl Fn(&Path) -> bool,
+    fallback: PathBuf,
+) -> PathBuf {
+    candidates
+        .into_iter()
+        .find(|candidate| holds_client(candidate))
+        .unwrap_or(fallback)
+}
+
+/// Whether a directory holds the game client.
+///
+/// `PatchedLaunch.exe` is what the launcher actually starts, and `SkySaga.exe` is accepted
+/// too so an install without the patched launcher is still recognised.
+pub fn holds_client(dir: &Path) -> bool {
+    dir.join("PatchedLaunch.exe").exists() || dir.join("SkySaga.exe").exists()
+}
+
+/// The directory containing this executable.
+fn executable_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
 }
