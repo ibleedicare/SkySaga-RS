@@ -1,0 +1,13 @@
+# Link the C runtime into the launcher on Windows.
+#
+# The MSVC toolchain links VCRUNTIME140.dll and MSVCP140.dll dynamically by default, and a
+# clean Windows install does not have them: they come with the Visual C++ Redistributable.
+# The launcher is the first thing a player runs, so "install a redistributable first" is a
+# poor greeting, and a launcher that cannot start cannot explain itself either.
+#
+# Costs a few megabytes of binary. Worth it for something handed to people.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

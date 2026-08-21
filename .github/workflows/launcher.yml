@@ -1,0 +1,83 @@
+# Builds and tests the launcher on real Windows and real Linux.
+#
+# The launcher is the one part of this repository that has to work on both: Linux runs the
+# client through Wine, Windows runs it directly. Its platform split is a value rather than a
+# `#[cfg]` so both branches are unit-tested everywhere, but that only proves the *decision*.
+# This proves it compiles and its tests pass on a machine that actually is Windows.
+#
+# Only the launcher is built. The server needs libRakNet.so, which is built from SLikeNet
+# source, and Entities.json, which is the game's own data; neither can be published here, so
+# the server cannot be built by CI. The launcher's dependency chain
+# (skysaga-store -> skysaga-state/proto -> skysaga-core/world) touches neither.
+
+name: launcher
+
+on:
+  push:
+    paths:
+      - "launcher/**"
+      - "crates/skysaga-store/**"
+      - "crates/skysaga-state/**"
+      - "crates/skysaga-proto/**"
+      - "crates/skysaga-core/**"
+      - "crates/skysaga-world/**"
+      - ".github/workflows/launcher.yml"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      # Both matter independently: a Windows failure should not hide a Linux one.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own workspace, so its lockfile is the cache key rather than the server's.
+          workspaces: launcher
+
+      # eframe links against these on Linux. Windows needs nothing extra: it uses win32 and
+      # Direct3D, which is part of why the launcher is portable at all.
+      - name: Install the Linux GUI libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+                                  libxcursor-dev libxrandr-dev libxi-dev
+
+      # Builds the binary too, not just the library, so the egui code is compiled on both.
+      - name: Test
+        working-directory: launcher
+        run: cargo test --all-targets
+
+      - name: Check formatting
+        working-directory: launcher
+        run: cargo fmt --check
+        continue-on-error: true
+
+      # A Windows binary built on Windows, by the native toolchain.
+      #
+      # Cross-building one from NixOS runs into a mismatch between nixpkgs' mingw (which uses
+      # the mcf threading model) and Rust's prebuilt windows-gnu std (which does not), so this
+      # is both easier and more representative: it is what a Windows user would actually run.
+      - name: Build the release binary
+        if: runner.os == 'Windows'
+        working-directory: launcher
+        run: cargo build --release
+
+      - name: Upload the launcher
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skysaga-launcher-windows
+          path: launcher/target/release/skysaga-launcher.exe
+          if-no-files-found: error
