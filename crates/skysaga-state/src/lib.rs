@@ -128,6 +128,9 @@ struct Inner {
 
     /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
     photos: HashMap<String, Photo>,
+
+    /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
+    snapshot: ServerSnapshot,
 }
 
 /// One account and the character it owns, for loading and storing.
@@ -151,6 +154,56 @@ pub enum Change {
     Character { account: String, character: Character },
     DeleteCharacter { account: String },
     Photo { id: String, photo: Photo },
+}
+
+/// A view of what the game server is doing right now.
+///
+/// The world and the connected sessions live on the game server's own thread. Rather than
+/// plumbing a reply channel through every read, that thread publishes one of these each tick
+/// and readers take the most recent. It is therefore stale by up to one tick (30ms), which is
+/// far cheaper than making the game loop answer questions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerSnapshot {
+    pub world: WorldSummary,
+    pub players: Vec<PlayerSummary>,
+}
+
+impl ServerSnapshot {
+    /// One player, by account name, matched the way accounts are matched everywhere else.
+    pub fn player(&self, account: &str) -> Option<&PlayerSummary> {
+        let wanted = account.trim().to_ascii_lowercase();
+
+        self.players.iter().find(|player| {
+            player
+                .account
+                .as_deref()
+                .is_some_and(|name| name.to_ascii_lowercase() == wanted)
+        })
+    }
+}
+
+/// The world as served. Zeroed before the first tick, which is how "not started yet" reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorldSummary {
+    pub adventure: String,
+    pub biome: String,
+    pub chunks: usize,
+    pub entities: usize,
+}
+
+/// One connected client.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlayerSummary {
+    /// `None` when the connection has not been attributed to an account.
+    pub account: Option<String>,
+    /// `None` until the creator has run.
+    pub character: Option<String>,
+    pub entity_id: u32,
+    /// How far through the handshake, as the game server names it.
+    pub stage: String,
+    pub inventory_slots: u8,
+    /// Entity ids of the items held. Empty until something gives the player items.
+    pub inventory_items: Vec<u32>,
 }
 
 /// Somewhere for changes to go.
@@ -394,6 +447,20 @@ impl AppState {
         }
 
         self.create_character(account, None)
+    }
+
+    /// Publish what the game server is doing, replacing the previous snapshot.
+    ///
+    /// Called every tick. Deliberately not reported to the [`ChangeSink`]: this is a view of
+    /// live state, not a change worth writing down, and recording it would write to the
+    /// database thirty times a second.
+    pub fn publish_snapshot(&self, snapshot: ServerSnapshot) {
+        self.write().snapshot = snapshot;
+    }
+
+    /// The most recent snapshot. Empty before the game thread has ticked.
+    pub fn snapshot(&self) -> ServerSnapshot {
+        self.read().snapshot.clone()
     }
 
     /// Store an uploaded photo under the id the game server issued.

@@ -45,6 +45,7 @@ pub fn router(state: Arc<AppState>, config: WebConfig) -> Router {
     Router::new()
         .route("/ping", axum::routing::get(|| async { axum::http::StatusCode::OK }))
         .merge(endpoints::account::router())
+        .merge(endpoints::admin::router(api.config.admin_token.as_deref()))
         .merge(endpoints::authentication::router())
         .merge(endpoints::binary_storage::router())
         .merge(endpoints::debug::router())
