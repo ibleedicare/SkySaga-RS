@@ -886,3 +886,158 @@ async fn ratings_and_reports_are_acknowledged() {
         assert_eq!(status, StatusCode::OK, "{path}");
     }
 }
+
+// --- the admin API -------------------------------------------------------------------------
+//
+// Read-only, and guarded by a shared token. These routes report what the server is doing;
+// nothing here changes it.
+
+mod admin {
+    use super::*;
+
+    use skysaga_state::{PlayerSummary, ServerSnapshot, WorldSummary};
+
+    const TOKEN: &str = "s3cret";
+
+    fn api() -> Api {
+        let state = Arc::new(AppState::new(CredentialPolicy::AnyNonEmpty));
+
+        state.publish_snapshot(ServerSnapshot {
+            world: WorldSummary {
+                adventure: "Home_Island_Adventure".into(),
+                biome: "Sky_Island".into(),
+                chunks: 16,
+                entities: 10,
+            },
+            players: vec![PlayerSummary {
+                account: Some("Alice".into()),
+                character: Some("Rowan".into()),
+                entity_id: 10,
+                stage: "Playing".into(),
+                inventory_slots: 36,
+                inventory_items: vec![101, 102],
+            }],
+        });
+
+        Api {
+            router: skysaga_web::router(
+                Arc::clone(&state),
+                skysaga_web::WebConfig {
+                    admin_token: Some(TOKEN.to_owned()),
+                    ..Default::default()
+                },
+            ),
+            state,
+        }
+    }
+
+    async fn get_with_token(api: &Api, path: &str, token: Option<&str>) -> (StatusCode, Value) {
+        let mut request = Request::get(path);
+
+        if let Some(token) = token {
+            request = request.header("x-admin-token", token);
+        }
+
+        api.send(request.body(Body::empty()).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn players_reports_who_is_connected() {
+        let (status, body) = get_with_token(&api(), "/admin/players", Some(TOKEN)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["players"][0]["account"], "Alice");
+        assert_eq!(body["players"][0]["character"], "Rowan");
+        assert_eq!(body["players"][0]["entityId"], 10);
+        assert_eq!(body["players"][0]["stage"], "Playing");
+    }
+
+    #[tokio::test]
+    async fn world_reports_what_is_being_served() {
+        let (status, body) = get_with_token(&api(), "/admin/world", Some(TOKEN)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["adventure"], "Home_Island_Adventure");
+        assert_eq!(body["biome"], "Sky_Island");
+        assert_eq!(body["chunks"], 16);
+        assert_eq!(body["entities"], 10);
+    }
+
+    #[tokio::test]
+    async fn inventory_reports_a_players_rucksack() {
+        let (status, body) = get_with_token(&api(), "/admin/inventory/Alice", Some(TOKEN)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["slots"], 36);
+        assert_eq!(body["items"], serde_json::json!([101, 102]));
+    }
+
+    /// Matched the way accounts are matched everywhere else.
+    #[tokio::test]
+    async fn inventory_finds_a_player_whatever_the_casing() {
+        let (status, _) = get_with_token(&api(), "/admin/inventory/alice", Some(TOKEN)).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_player_is_not_found() {
+        let (status, _) = get_with_token(&api(), "/admin/inventory/nobody", Some(TOKEN)).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // --- the guard ------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_wrong_token_is_refused() {
+        let (status, _) = get_with_token(&api(), "/admin/players", Some("wrong")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn no_token_is_refused() {
+        let (status, _) = get_with_token(&api(), "/admin/players", None).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Every admin route is guarded, not just the first one. A route added later that forgot
+    /// the guard would be the whole point of this test.
+    #[tokio::test]
+    async fn every_admin_route_is_guarded() {
+        let api = api();
+
+        for path in [
+            "/admin/players",
+            "/admin/world",
+            "/admin/inventory/Alice",
+        ] {
+            let (status, _) = get_with_token(&api, path, None).await;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} is unguarded");
+        }
+    }
+
+    /// With no token configured the admin API is not there at all. A server started normally
+    /// has no admin surface, rather than one that anybody can call.
+    #[tokio::test]
+    async fn without_a_configured_token_the_routes_do_not_exist() {
+        let state = Arc::new(AppState::new(CredentialPolicy::AnyNonEmpty));
+        let api = Api {
+            router: skysaga_web::router(Arc::clone(&state), Default::default()),
+            state,
+        };
+
+        let (_, body) = get_with_token(&api, "/admin/players", Some(TOKEN)).await;
+
+        // The unimplemented-route catch-all answers 200 with an empty result, so the status
+        // says nothing. What matters is that no admin data comes back: the route is not
+        // mounted, and even the correct token does not conjure it.
+        assert!(
+            body.get("players").is_none(),
+            "admin must be off without a configured token, got {body}",
+        );
+    }
+}

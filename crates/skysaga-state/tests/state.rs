@@ -753,3 +753,139 @@ mod persistence {
         );
     }
 }
+
+// --- the live snapshot ---------------------------------------------------------------------
+//
+// The world and the connected sessions live on the game server's own thread, not in AppState.
+// Rather than plumbing a reply channel through every read, the game thread publishes a small
+// snapshot each tick and anything that wants to look reads the last one. Stale by up to one
+// tick, which is 30ms, and nothing here is worth blocking a game loop for.
+
+mod snapshot {
+    use skysaga_state::{AppState, CredentialPolicy, PlayerSummary, ServerSnapshot, WorldSummary};
+
+    fn world() -> WorldSummary {
+        WorldSummary {
+            adventure: "Home_Island_Adventure".into(),
+            biome: "Sky_Island".into(),
+            chunks: 16,
+            entities: 10,
+        }
+    }
+
+    fn player(account: &str, entity_id: u32) -> PlayerSummary {
+        PlayerSummary {
+            account: Some(account.into()),
+            character: Some("Rowan".into()),
+            entity_id,
+            stage: "Playing".into(),
+            inventory_slots: 36,
+            inventory_items: Vec::new(),
+        }
+    }
+
+    /// Before the game thread has ticked there is nothing to report, and asking must not be an
+    /// error: the server is simply still starting.
+    #[test]
+    fn there_is_an_empty_snapshot_before_the_first_tick() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        let snapshot = state.snapshot();
+
+        assert!(snapshot.players.is_empty());
+        assert_eq!(snapshot.world.chunks, 0, "no world reported yet");
+    }
+
+    #[test]
+    fn a_published_snapshot_can_be_read_back() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.publish_snapshot(ServerSnapshot {
+            world: world(),
+            players: vec![player("alice", 10)],
+        });
+
+        let snapshot = state.snapshot();
+
+        assert_eq!(snapshot.world.biome, "Sky_Island");
+        assert_eq!(snapshot.players.len(), 1);
+        assert_eq!(snapshot.players[0].entity_id, 10);
+    }
+
+    /// Each tick replaces the last. A snapshot that accumulated would report players who left.
+    #[test]
+    fn publishing_replaces_the_previous_snapshot() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.publish_snapshot(ServerSnapshot {
+            world: world(),
+            players: vec![player("alice", 10), player("bob", 11)],
+        });
+
+        state.publish_snapshot(ServerSnapshot {
+            world: world(),
+            players: vec![player("alice", 10)],
+        });
+
+        assert_eq!(
+            state.snapshot().players.len(),
+            1,
+            "bob left, so bob is not in the snapshot",
+        );
+    }
+
+    /// Publishing is what the game loop does every tick, so it must not be reported as a
+    /// change worth writing to the database.
+    #[test]
+    fn publishing_a_snapshot_is_not_a_persistable_change() {
+        use std::sync::{Arc, Mutex};
+
+        use skysaga_state::{Change, ChangeSink};
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<Change>>);
+
+        impl ChangeSink for Recorder {
+            fn record(&self, change: Change) {
+                self.0.lock().unwrap().push(change);
+            }
+        }
+
+        let recorder = Arc::new(Recorder::default());
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::clone(&recorder) as _);
+
+        state.publish_snapshot(ServerSnapshot {
+            world: world(),
+            players: vec![player("alice", 10)],
+        });
+
+        assert!(
+            recorder.0.lock().unwrap().is_empty(),
+            "a snapshot is a view of live state, not a change to store",
+        );
+    }
+
+    /// Looking up one player by account, which is what `skysagactl inventory <account>` needs.
+    #[test]
+    fn a_player_can_be_found_by_account() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.publish_snapshot(ServerSnapshot {
+            world: world(),
+            players: vec![player("alice", 10), player("bob", 11)],
+        });
+
+        let snapshot = state.snapshot();
+        let found = snapshot.player("Bob").expect("found by any casing");
+
+        assert_eq!(found.entity_id, 11);
+    }
+
+    #[test]
+    fn an_absent_player_is_not_found() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        assert!(state.snapshot().player("nobody").is_none());
+    }
+}
