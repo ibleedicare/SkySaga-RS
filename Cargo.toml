@@ -17,6 +17,7 @@ skysaga-proto = { path = "crates/skysaga-proto" }
 raknet-sys = { path = "crates/raknet-sys" }
 raknet = { path = "crates/raknet" }
 skysaga-game = { path = "crates/skysaga-game" }
+skysaga-world = { path = "crates/skysaga-world" }
 
 anyhow = "1"
 axum = "0.8"

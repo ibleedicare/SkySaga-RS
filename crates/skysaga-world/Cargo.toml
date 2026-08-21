@@ -1,0 +1,18 @@
+[package]
+name = "skysaga-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Entity definitions, components and terrain — the world model, with no I/O beyond loading its data."
+
+[dependencies]
+skysaga-core = { workspace = true }
+skysaga-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
