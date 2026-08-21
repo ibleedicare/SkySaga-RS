@@ -8,7 +8,7 @@
 //!
 //! This crate does no I/O, so all of it is testable without a socket. See `tests/state.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::RwLock;
 
@@ -55,6 +55,9 @@ impl CredentialPolicy {
         Self::parse(&std::env::var("SKYSAGA_ACCOUNTS").unwrap_or_default())
     }
 }
+
+/// How many pending reservations are kept. See [`AppState::reserve_slot`].
+const MAX_RESERVATIONS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LoginError {
@@ -131,6 +134,10 @@ struct Inner {
 
     /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
     snapshot: ServerSnapshot,
+
+    /// Accounts that have asked the conductor where to connect and have not connected yet.
+    /// See [`AppState::reserve_slot`].
+    reservations: VecDeque<String>,
 }
 
 /// One account and the character it owns, for loading and storing.
@@ -447,6 +454,40 @@ impl AppState {
         }
 
         self.create_character(account, None)
+    }
+
+    /// Record that `account` is about to open a game connection.
+    ///
+    /// A RakNet connection carries no account: `ClientConnected` holds a client version string
+    /// and nothing else, so the game server cannot ask the client who it is. Attributing by the
+    /// most recent sign-in works for one player and gives two players the same account.
+    ///
+    /// The conductor is where the answer is. `game-conductor/retrieve` is an HTTP call, and
+    /// HTTP is identifiable by the client token; the client opens its RakNet connection
+    /// immediately afterwards. Recording who is expected, and claiming it when a connection
+    /// arrives, ties the two together.
+    ///
+    /// This is ordering, not identity. Two clients that call retrieve and then connect in the
+    /// opposite order would swap. That is a narrow window, against being wrong every time.
+    pub fn reserve_slot(&self, account: &str) {
+        let mut inner = self.write();
+
+        inner.reservations.push_back(account.to_owned());
+
+        // A client that asks where to connect and never arrives would otherwise leave a
+        // reservation behind forever, and the next player would claim the stale one and play
+        // as somebody else. Keeping only the newest few bounds how wrong that can get.
+        while inner.reservations.len() > MAX_RESERVATIONS {
+            inner.reservations.pop_front();
+        }
+    }
+
+    /// Take the account of the next expected connection, if there is one.
+    ///
+    /// `None` when nothing is pending, which is normal: the probe and the capture tool connect
+    /// without ever calling the conductor.
+    pub fn claim_slot(&self) -> Option<String> {
+        self.write().reservations.pop_front()
     }
 
     /// Publish what the game server is doing, replacing the previous snapshot.

@@ -1095,6 +1095,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "skysaga-probe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "raknet",
+ "skysaga-game",
+ "skysaga-proto",
+ "skysaga-state",
+ "skysaga-world",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "skysaga-proto"
 version = "0.1.0"
 dependencies = [

@@ -889,3 +889,102 @@ mod snapshot {
         assert!(state.snapshot().player("nobody").is_none());
     }
 }
+
+// --- claiming a game connection -------------------------------------------------------------
+//
+// A RakNet connection carries no account: `ClientConnected` holds only a client version string.
+// So the game server cannot ask the client who it is, and using the most recent sign-in gives
+// every connection the same account the moment two players are on.
+//
+// The conductor is where the answer is. `game-conductor/retrieve` is an HTTP call, identifiable
+// by the client's token, and it happens immediately before the client opens its RakNet
+// connection. Recording who is about to connect, and claiming that when a connection arrives,
+// is how the two are tied together.
+
+mod reservations {
+    use skysaga_state::{AppState, CredentialPolicy};
+
+    #[test]
+    fn a_reservation_is_claimed_by_the_next_connection() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.reserve_slot("Alice");
+
+        assert_eq!(state.claim_slot().as_deref(), Some("Alice"));
+    }
+
+    /// Claimed once. A second connection must not be handed the same reservation, which would
+    /// put two players on one account again.
+    #[test]
+    fn a_reservation_is_claimed_only_once() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.reserve_slot("Alice");
+
+        assert_eq!(state.claim_slot().as_deref(), Some("Alice"));
+        assert_eq!(state.claim_slot(), None);
+    }
+
+    /// Two players connecting in order get their own reservations, which is the whole point.
+    #[test]
+    fn two_reservations_are_claimed_in_order() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.reserve_slot("Alice");
+        state.reserve_slot("Bob");
+
+        assert_eq!(state.claim_slot().as_deref(), Some("Alice"));
+        assert_eq!(state.claim_slot().as_deref(), Some("Bob"));
+    }
+
+    /// A connection with nothing pending is not an error: the probe and the capture tool
+    /// connect without ever calling the conductor.
+    #[test]
+    fn claiming_with_nothing_reserved_gives_nothing() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        assert_eq!(state.claim_slot(), None);
+    }
+
+    /// Reserving twice for one account leaves two, because a player who reconnects really does
+    /// connect twice. Character creation ends with exactly that.
+    #[test]
+    fn reserving_twice_leaves_two() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.reserve_slot("Alice");
+        state.reserve_slot("Alice");
+
+        assert_eq!(state.claim_slot().as_deref(), Some("Alice"));
+        assert_eq!(state.claim_slot().as_deref(), Some("Alice"));
+        assert_eq!(state.claim_slot(), None);
+    }
+
+    /// Reservations are not unbounded. A client that calls retrieve and never connects would
+    /// otherwise leave one behind forever, and the next player would claim the stale one and
+    /// play as somebody else.
+    #[test]
+    fn stale_reservations_do_not_pile_up() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        for _ in 0..50 {
+            state.reserve_slot("Ghost");
+        }
+
+        state.reserve_slot("Alice");
+
+        let claimed: Vec<String> = std::iter::from_fn(|| state.claim_slot()).collect();
+
+        assert!(
+            claimed.len() <= 8,
+            "expected old reservations to be dropped, kept {}",
+            claimed.len(),
+        );
+
+        assert_eq!(
+            claimed.last().map(String::as_str),
+            Some("Alice"),
+            "the most recent reservation must survive",
+        );
+    }
+}

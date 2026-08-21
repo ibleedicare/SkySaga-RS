@@ -133,6 +133,30 @@ impl SetClientEntity {
     }
 }
 
+/// `EntityRemoved` — this entity is gone.
+///
+/// Sent when a player disconnects, so the others stop drawing their body. Without it the
+/// departed player stands there until the client is restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityRemoved {
+    pub entity_id: u32,
+}
+
+impl EntityRemoved {
+    pub const ID: u16 = 103;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_u32(self.entity_id);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            entity_id: reader.read_u32()?,
+        })
+    }
+}
+
 /// `ClientEntitiesSyncFinished` — no body; the id is the whole message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientEntitiesSyncFinished;
