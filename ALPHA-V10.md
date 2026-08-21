@@ -168,6 +168,58 @@ Entry records are 40 bytes: `+0x00` a shared vtable, `+0x04` a per-entry object 
 id at `+0x10`, `+0x0a` flags, `+0x0f` the state. On a fresh client 43 entries are ready and the
 rest were never requested.
 
+## Why the client stops in LOAD_GAME_OBJECTS: the whole chain
+
+Traced end to end, each step read out of the client rather than inferred:
+
+```text
+FUN_0080d320   requests DOWNLOAD_WORLD only when [[this+0x38]+0xA4] == 5
+               that object is a ModeLevelBase; live it reads 2
+
+FUN_004d7750   drives +0xA4 through 0..5. Only case 4 sets 5, so 2 must reach 3 first.
+               case 2 (where we are) ticks vtable+0xA0 then vtable+0xBC every frame
+
+vtable+0xBC    opens with `call vtable+0x10C; test al,al; je done` -- it does nothing
+               at all unless that predicate returns true
+
+FUN_007a19d0   that predicate returns the byte at ModeLevelBase+0x51A4; live it reads 0
+
+FUN_007a4800   computes that byte: assume 1, then walk the list at
+               [DAT_0143785c+0x12A8 .. +0x12AC] (stride 12) and clear it if any entry
+               is unfinished
+```
+
+Reading that list live (`tools/level-pending-b36731.py`) gives twelve loaders:
+
+```text
+ 0 w_Effects           2      6 w_EntitiesCreatures  2
+ 1 w_Resources         2      7 w_EntitiesDevices    2
+ 2 w_ScatterAssets     2      8 w_EntitiesProps      2
+ 3 w_Trees             1 <--  9 w_Players            2
+ 4 w_Tools             2     10 w_BehaviourSets      2
+ 5 w_CharacterParts    2     11 w_Actions            2
+```
+
+**`w_Trees` is stuck at state 1** while the other eleven reached 2. One unfinished loader clears
+the readiness byte, and everything above follows from that.
+
+Not yet established: why `w_Trees` alone fails to finish. It reached state 1, so it *started*.
+Worth testing whether it correlates with what the map names, since the run above had
+`terrainGenerator` at the "none" sentinel (`SKYSAGA_MAPSPEC_FILL` was off).
+
+Driven past this point by hand the client behaves perfectly: it requests terrain, accepts all
+144 chunks, and reaches POPULATE_WORLD. Nothing else in the handshake is known to be broken.
+
+### Driving it by hand
+
+```bash
+uv run tools/loading-stage-b36731.py --object 0x10232f90 --request 7 --watch 20
+```
+
+A transition is *requested*, not assigned: `+0xD35` is the wanted stage and `+0xD36` a pending
+flag that the per-frame tick consumes. Writing `+0xD34` directly only changes the text on the
+loading screen, which is a good way to mislead yourself for ten minutes.
+
 ## Where to look next
 
 The client is idle in `LOAD_GAME_OBJECTS`, sending nothing over RakNet and making no HTTP calls,

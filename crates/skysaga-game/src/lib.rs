@@ -177,6 +177,31 @@ impl Session {
                     }));
                 }
 
+                // EXPERIMENT: send bare packets by 36731 id, to find what the client waits for.
+                //
+                // Three packets exist in 36731 and in neither 10414 nor Alpha 03, and all three
+                // sit between `MapDefinition` (8) and `BeginSync` (12): `FrameTimeSyncCheck` (9),
+                // `ResourceCheck` (10) and `SetConnectionTimeout` (11). The client reaches
+                // `LOAD_GAME_OBJECTS` and then never attempts a send, so it is waiting to be
+                // told something, and these are the only candidates the protocol adds.
+                //
+                // Their payloads are unknown, so these go out with an id and nothing else. That
+                // is a real possibility of a short read on the client, which is itself a result:
+                // a client that reacts at all tells us the id matters.
+                //
+                //     SKYSAGA_B36731_SEND_BARE=9,10
+                if build == ClientBuild::B36731 {
+                    for id in std::env::var("SKYSAGA_B36731_SEND_BARE")
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter_map(|value| value.trim().parse::<u16>().ok())
+                    {
+                        info!(id, "sending a bare 36731 packet (experiment)");
+
+                        out.push(encode(build, |w| w.write_native_packet_id(id)));
+                    }
+                }
+
                 // EXPERIMENT, off by default: push the terrain instead of waiting to be asked.
                 //
                 // Under the 10414 sequence the *client* asks with `ClientReadyToSync`. The 2017
