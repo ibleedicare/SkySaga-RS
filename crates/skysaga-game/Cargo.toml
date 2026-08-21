@@ -1,0 +1,24 @@
+[package]
+name = "skysaga-game"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The RakNet game server: world handshake, connection lifecycle, packet dispatch."
+
+[[bin]]
+name = "skysaga-game"
+path = "src/main.rs"
+
+[dependencies]
+skysaga-core = { workspace = true }
+skysaga-proto = { workspace = true }
+skysaga-state = { workspace = true }
+raknet = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
