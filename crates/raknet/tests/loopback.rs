@@ -53,7 +53,7 @@ fn connected_pair() -> (Peer, Peer, Guid) {
 
     let client = Peer::new();
     client.startup(0, 1).expect("client starts");
-    client.connect("127.0.0.1", port, "").expect("connect issued");
+    client.connect("127.0.0.1", port, b"").expect("connect issued");
 
     let mut accepted = false;
     let mut client_guid = None;
@@ -95,7 +95,7 @@ fn the_server_sees_a_new_incoming_connection_with_a_usable_guid() {
 
     let client = Peer::new();
     client.startup(0, 1).expect("client starts");
-    client.connect("127.0.0.1", port, "").expect("connect issued");
+    client.connect("127.0.0.1", port, b"").expect("connect issued");
 
     let guid = pump([&server, &client], Duration::from_secs(10), |index, packet| {
         (index == 0 && packet.message_id() == message_id::NEW_INCOMING_CONNECTION)

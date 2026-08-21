@@ -141,16 +141,18 @@ impl Peer {
         unsafe { raknet_sys::CSharp_RakPeerInterface_SetMaximumIncomingConnections(self.raw, count) }
     }
 
-    /// The password incoming connections must present. An interior NUL truncates it, which is
-    /// what RakNet would do with a C string anyway.
-    pub fn set_incoming_password(&self, password: &str) {
-        let bytes = CString::new(password).unwrap_or_default();
-
-        // SAFETY: the string outlives the call; RakNet copies it.
+    /// The password incoming connections must present.
+    ///
+    /// Bytes, not `&str`: RakNet takes a pointer and a length, and the emulator's own
+    /// password is `b"Something about penguins\0"` -- an interior NUL that no C string type
+    /// can carry. It is compared verbatim, so the NUL is part of it.
+    pub fn set_incoming_password(&self, password: &[u8]) {
+        // SAFETY: `password` is read for exactly `password.len()` bytes and copied by RakNet
+        // before the call returns.
         unsafe {
             raknet_sys::CSharp_RakPeerInterface_SetIncomingPassword__SWIG_0(
                 self.raw,
-                bytes.as_ptr(),
+                password.as_ptr() as *const c_char,
                 password.len() as i32,
             )
         }
@@ -158,17 +160,16 @@ impl Peer {
 
     /// Begin connecting to a listening peer. Returns as soon as the attempt is *started*;
     /// success arrives later as [`message_id::CONNECTION_REQUEST_ACCEPTED`].
-    pub fn connect(&self, host: &str, port: u16, password: &str) -> Result<(), ConnectError> {
+    pub fn connect(&self, host: &str, port: u16, password: &[u8]) -> Result<(), ConnectError> {
         let host = CString::new(host).map_err(|_| ConnectError::BadHost)?;
-        let password_bytes = CString::new(password).unwrap_or_default();
 
-        // SAFETY: both strings outlive the call.
+        // SAFETY: the host string and `password` both outlive the call.
         let result = unsafe {
             raknet_sys::CSharp_RakPeerInterface_Connect__SWIG_0(
                 self.raw,
                 host.as_ptr(),
                 port,
-                password_bytes.as_ptr(),
+                password.as_ptr() as *const c_char,
                 password.len() as i32,
                 std::ptr::null_mut(),
                 0,

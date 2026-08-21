@@ -130,6 +130,11 @@ impl BitWriter {
         self.write_bits(&value.to_be_bytes(), 32);
     }
 
+    /// A 16-bit value, big-endian -- RakNet `Write<uint16>`, used for `ChatPort`.
+    pub fn write_u16(&mut self, value: u16) {
+        self.write_bits(&value.to_be_bytes(), 16);
+    }
+
     /// Write the low `bits` bits of `value` using the C# emulator's
     /// `WriteBits(BitConverter.GetBytes(value), bits, rightAligned: true)` idiom.
     ///
@@ -303,6 +308,11 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(u32::from_be_bytes(bytes))
+    }
+
+    /// The inverse of [`BitWriter::write_u16`] -- 16 bits, big-endian.
+    pub fn read_u16(&mut self) -> Result<u16, BitError> {
+        Ok(u16::from_be_bytes([self.read_u8()?, self.read_u8()?]))
     }
 
     /// The inverse of [`BitWriter::write_bits_le`].
