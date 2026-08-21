@@ -31,8 +31,10 @@ pub use server::{GameServer, GameServerConfig};
 pub use world::{World, WorldConfig};
 
 use skysaga_proto::bitstream::{BitWriter, ID_USER_PACKET_ENUM};
+use skysaga_proto::client_build::ClientBuild;
 use skysaga_proto::packets::{
     BeginSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, SetClientEntity,
+    SetConnectionTimeout,
 };
 use tracing::{debug, info, warn};
 
@@ -57,7 +59,23 @@ pub enum ClientPacket {
 impl ClientPacket {
     /// Classify by *wire* id, as it appears in `packet.data()[0]`.
     pub fn from_wire_id(wire_id: u16) -> Self {
-        match wire_id {
+        Self::from_wire_id_for(wire_id, ClientBuild::B10414)
+    }
+
+    /// Classify by wire id as `build` numbers them.
+    ///
+    /// 36731 renumbered every shared packet, so the same ordinal means something different in
+    /// each build — `ClientConnected` is 1 to us and 3 to a 2017 client. Translating here, at
+    /// the one point ids arrive, keeps the match arms below in our own numbering.
+    pub fn from_wire_id_for(wire_id: u16, build: ClientBuild) -> Self {
+        let Some(ordinal) = wire_id
+            .checked_sub(ID_USER_PACKET_ENUM)
+            .and_then(|theirs| build.from_wire(theirs))
+        else {
+            return Self::Unknown(wire_id);
+        };
+
+        match ordinal + ID_USER_PACKET_ENUM {
             135 => Self::ClientConnected,
             136 => Self::ClientReadyToSync,
             137 => Self::ClientReadyToPlay,
@@ -90,6 +108,7 @@ pub enum Stage {
 pub struct Session {
     stage: Stage,
     player_entity_id: u32,
+    build: ClientBuild,
 }
 
 impl Session {
@@ -97,7 +116,21 @@ impl Session {
         Self {
             stage: Stage::Connected,
             player_entity_id,
+            build: ClientBuild::B10414,
         }
+    }
+
+    /// A session with a client of `build`. Every packet it emits is numbered in that build's
+    /// ids; the handshake logic is unchanged, because only the ids differ.
+    pub fn new_for(player_entity_id: u32, build: ClientBuild) -> Self {
+        Self {
+            build,
+            ..Self::new(player_entity_id)
+        }
+    }
+
+    pub fn build(&self) -> ClientBuild {
+        self.build
     }
 
     pub fn stage(&self) -> Stage {
@@ -114,16 +147,72 @@ impl Session {
     /// re-sending the world — resending 16 chunks on demand would be an amplification vector,
     /// and the client does not expect it.
     pub fn handle(&mut self, packet: ClientPacket, world: &World) -> Vec<Vec<u8>> {
+        let build = self.build;
+
         match (packet, self.stage) {
             (ClientPacket::ClientConnected, Stage::Connected) => {
                 self.stage = Stage::SentWorldInfo;
 
                 info!(stage = ?self.stage, "sending world info");
 
-                vec![
-                    encode(|w| world.server_info.encode(w)),
-                    encode(|w| world.map.encode(w)),
-                ]
+                let mut out = vec![
+                    encode(build, |w| world.server_info.encode(w)),
+                    encode(build, |w| world.map.encode(w)),
+                ];
+
+                // 36731 has three packets between `MapDefinition` and `BeginSync` that 10414
+                // does not, and `SetConnectionTimeout` (id 11) is the only server->client one
+                // of them: the receive map resolves 11 to a handler, while 9 and 10 do not
+                // resolve, which in that range means they are client->server.
+                //
+                // The client reaches "Loading game object" and then sends nothing, so it is not
+                // waiting on any reply the 10414 sequence owes it. This is the packet it has
+                // not been given.
+                if build == ClientBuild::B36731 {
+                    out.push(encode(build, |w| {
+                        SetConnectionTimeout {
+                            millis: SetConnectionTimeout::MAX_MILLIS,
+                        }
+                        .encode(w)
+                    }));
+                }
+
+                // EXPERIMENT, off by default: push the terrain instead of waiting to be asked.
+                //
+                // Under the 10414 sequence the *client* asks with `ClientReadyToSync`. The 2017
+                // client never sends it: it sits at "Loading game object", busy rather than
+                // blocked, having parsed both world packets correctly, and sends nothing at all.
+                // One reading is that this build's server pushes terrain unprompted, and the
+                // client is waiting for chunks that never arrive. `BeginSync` sitting at id 12,
+                // right after `SetConnectionTimeout` at 11, is consistent with that ordering.
+                //
+                // Unproven, so it is opt-in: SKYSAGA_B36731_PUSH_TERRAIN=1.
+                if build == ClientBuild::B36731
+                    && std::env::var("SKYSAGA_B36731_PUSH_TERRAIN").as_deref() == Ok("1")
+                {
+                    info!(
+                        chunks = world.chunks.len(),
+                        "pushing terrain unprompted (experiment)",
+                    );
+
+                    self.stage = Stage::SentChunks;
+
+                    out.push(encode(build, |w| {
+                        BeginSync {
+                            chunk_count: world.chunks.len() as u32,
+                        }
+                        .encode(w)
+                    }));
+
+                    out.extend(
+                        world
+                            .chunks
+                            .iter()
+                            .map(|chunk| encode(build, |w| chunk.encode(w))),
+                    );
+                }
+
+                out
             }
 
             (ClientPacket::ClientReadyToSync, Stage::SentWorldInfo) => {
@@ -131,14 +220,14 @@ impl Session {
 
                 info!(chunks = world.chunks.len(), "sending terrain");
 
-                let mut out = vec![encode(|w| {
+                let mut out = vec![encode(build, |w| {
                     BeginSync {
                         chunk_count: world.chunks.len() as u32,
                     }
                     .encode(w)
                 })];
 
-                out.extend(world.chunks.iter().map(|chunk| encode(|w| chunk.encode(w))));
+                out.extend(world.chunks.iter().map(|chunk| encode(build, |w| chunk.encode(w))));
 
                 out
             }
@@ -151,10 +240,10 @@ impl Session {
                 let mut out: Vec<Vec<u8>> = world
                     .entities
                     .iter()
-                    .map(|entity| encode(|w| entity.encode(w)))
+                    .map(|entity| encode(build, |w| entity.encode(w)))
                     .collect();
 
-                out.push(encode(|w| ClientEntitiesSyncFinished.encode(w)));
+                out.push(encode(build, |w| ClientEntitiesSyncFinished.encode(w)));
 
                 out
             }
@@ -165,7 +254,7 @@ impl Session {
                 info!(entity = self.player_entity_id, "handing over the player entity");
 
                 vec![
-                    encode(|w| {
+                    encode(build, |w| {
                         SetClientEntity {
                             entity_id: self.player_entity_id,
                         }
@@ -173,7 +262,7 @@ impl Session {
                     }),
                     // Without this the client stays in tutorial mode and spills hint text
                     // into the chat log.
-                    encode(|w| DebugRequestFinishTutorial.encode(w)),
+                    encode(build, |w| DebugRequestFinishTutorial.encode(w)),
                 ]
             }
 
@@ -199,10 +288,21 @@ impl Session {
     }
 }
 
-fn encode(write: impl FnOnce(&mut BitWriter)) -> Vec<u8> {
-    let mut writer = BitWriter::new();
+/// Encode one packet in `build`'s ids.
+///
+/// A packet the build has no id for comes back **empty**, and the caller drops it. Sending it
+/// with our own id would be worse than sending nothing: the client dispatches on the id alone,
+/// so it would parse the body as whichever packet that id names in *its* enum.
+fn encode(build: ClientBuild, write: impl FnOnce(&mut BitWriter)) -> Vec<u8> {
+    let mut writer = BitWriter::for_build(build);
 
     write(&mut writer);
+
+    if let Some(ordinal) = writer.unmapped() {
+        warn!(ordinal, ?build, "packet has no id in this build — not sent");
+
+        return Vec::new();
+    }
 
     writer.into_bytes()
 }

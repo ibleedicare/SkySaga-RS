@@ -2,6 +2,42 @@
 
 use crate::bitstream::{BitError, BitReader, BitWriter};
 
+/// A hyphenated uuid string as the client reads it: **.NET `Guid.ToByteArray()` order**.
+///
+/// The first three fields are little-endian and the trailing eight bytes are verbatim, which is
+/// *not* RFC 4122 order. Build 36731's `ServerInfo` carries three of these as raw 16-byte
+/// fields, and the wrong order would still parse cleanly while scrambling every uuid's first
+/// eight bytes.
+///
+/// `None` for anything that is not a uuid. The C# used `Guid.TryParse` and sent `Guid.Empty` on
+/// failure, which is indistinguishable on the wire from a real all-zero uuid; leaving the choice
+/// to the caller keeps "we had no uuid" visible.
+pub fn uuid_to_wire_bytes(value: &str) -> Option<[u8; 16]> {
+    let digits: Vec<u8> = value
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| c.to_digit(16).map(|d| d as u8))
+        .collect::<Option<_>>()?;
+
+    if digits.len() != 32 || value.len() != 36 {
+        return None;
+    }
+
+    let mut rfc = [0u8; 16];
+
+    for (index, pair) in digits.chunks_exact(2).enumerate() {
+        rfc[index] = pair[0] << 4 | pair[1];
+    }
+
+    let mut wire = rfc;
+
+    wire[0..4].copy_from_slice(&rfc[0..4].iter().rev().copied().collect::<Vec<_>>());
+    wire[4..6].copy_from_slice(&rfc[4..6].iter().rev().copied().collect::<Vec<_>>());
+    wire[6..8].copy_from_slice(&rfc[6..8].iter().rev().copied().collect::<Vec<_>>());
+
+    Some(wire)
+}
+
 /// `ItemSpec` — identifies an item and its materials.
 ///
 /// A default one is 171 bits, which is how it was confirmed: every other parameter of the

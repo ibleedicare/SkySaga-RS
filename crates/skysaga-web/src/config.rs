@@ -26,6 +26,13 @@ pub struct WebConfig {
 
     /// Datacentre name reported by `/api/game-conductor/geonode`.
     pub datacentre: String,
+
+    /// True on the https listener's copy of this config.
+    ///
+    /// `geonode` hands the client the port to keep talking to, and the answer differs by
+    /// listener: a 36731 client arrived over https and must be pointed back at the https
+    /// port, not at the http one a 10414 client would get.
+    pub secure: bool,
 }
 
 impl Default for WebConfig {
@@ -36,6 +43,7 @@ impl Default for WebConfig {
             public_ip: "127.0.0.1".to_owned(),
             game_port: DEFAULT_GAME_PORT,
             datacentre: "UK".to_owned(),
+            secure: false,
         }
     }
 }
@@ -58,6 +66,24 @@ impl WebConfig {
             public_ip: std::env::var("SKYSAGA_PUBLIC_IP").unwrap_or(default.public_ip),
             game_port: port("SKYSAGA_GAME_PORT", default.game_port),
             datacentre: std::env::var("SKYSAGA_DATACENTRE").unwrap_or(default.datacentre),
+            secure: false,
+        }
+    }
+
+    /// The same configuration as seen by the https listener.
+    pub fn secure(&self) -> Self {
+        Self {
+            secure: true,
+            ..self.clone()
+        }
+    }
+
+    /// The port `geonode` tells the client to keep using.
+    pub fn advertised_port(&self) -> u16 {
+        if self.secure {
+            self.https_port
+        } else {
+            self.http_port
         }
     }
 

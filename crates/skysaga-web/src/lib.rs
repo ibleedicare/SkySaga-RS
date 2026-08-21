@@ -28,6 +28,7 @@ use skysaga_state::AppState;
 
 pub mod config;
 pub mod endpoints;
+pub mod tls;
 
 pub use config::WebConfig;
 

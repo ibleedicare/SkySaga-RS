@@ -18,5 +18,5 @@ pub use character_creation::{
 };
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
-    MapDefinition, ServerInfo, SetClientEntity, SyncData,
+    MapDefinition, MapSpec, ServerInfo, SetClientEntity, SetConnectionTimeout, SyncData,
 };

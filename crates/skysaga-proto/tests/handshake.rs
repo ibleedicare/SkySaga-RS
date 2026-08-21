@@ -54,6 +54,7 @@ fn map_definition_matches_the_capture() {
             size_chunks: [4, 4, 4],
             biome: Some(name_hash("Sky_Island")),
             game_mode: 1,
+            ..Default::default()
         }
         .encode(w)
     });
@@ -67,6 +68,7 @@ fn map_definition_is_sixty_two_bits() {
         size_chunks: [4, 4, 4],
         biome: Some(name_hash("Sky_Island")),
         game_mode: 1,
+            ..Default::default()
     }
     .encode(&mut writer);
 
@@ -84,6 +86,7 @@ fn map_definition_without_a_biome_omits_the_hash() {
         size_chunks: [4, 4, 4],
         biome: None,
         game_mode: 1,
+            ..Default::default()
     }
     .encode(&mut writer);
 
@@ -96,6 +99,7 @@ fn map_definition_round_trips() {
         size_chunks: [4, 8, 16],
         biome: Some(name_hash("Sky_Island")),
         game_mode: 2,
+            ..Default::default()
     };
 
     let mut writer = BitWriter::new();

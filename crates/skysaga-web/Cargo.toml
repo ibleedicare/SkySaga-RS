@@ -8,6 +8,7 @@ description = "Account, character, matchmaking and game-conductor HTTP API."
 
 [dependencies]
 skysaga-state = { workspace = true }
+anyhow = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +16,8 @@ tokio = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
+rcgen = "0.14.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
