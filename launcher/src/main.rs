@@ -16,6 +16,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 use eframe::egui;
+
+mod theme;
 use skysaga_launcher::{
     client_paths, database_url, is_valid_account, launch_command_for, missing_database, options,
     server_host, AccountOption, Platform,
@@ -38,7 +40,7 @@ fn main() -> eframe::Result<()> {
         "SkySaga: Infinite Isles",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([420.0, 320.0])
+                .with_inner_size([430.0, 470.0])
                 .with_resizable(false),
             ..Default::default()
         },
@@ -188,89 +190,193 @@ impl Launcher {
     }
 }
 
+/// A teal header bar, as the game draws its section labels.
+fn section(ui: &mut egui::Ui, label: &str) {
+    egui::Frame::new()
+        .fill(theme::TEAL)
+        .corner_radius(theme::ROUND)
+        .inner_margin(egui::Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(label.to_uppercase())
+                    .color(egui::Color32::WHITE)
+                    .strong()
+                    .size(13.0),
+            );
+        });
+}
+
 impl eframe::App for Launcher {
     // egui 0.36 hands the app a `Ui` directly; the central panel is already open.
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        {
-            ui.add_space(8.0);
-            ui.heading("SkySaga: Infinite Isles");
-            ui.add_space(12.0);
+        style(ui);
 
-            if self.accounts.is_empty() {
-                ui.label("No accounts yet. Type a name to create one.");
-            } else {
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.use_typed, false, "Existing account");
-                    ui.radio_value(&mut self.use_typed, true, "New name");
-                });
+        // Sky behind the panel, as in the creator.
+        ui.painter()
+            .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, theme::SKY);
 
-                ui.add_space(4.0);
-            }
+        egui::Frame::new()
+            .fill(theme::PARCHMENT)
+            .stroke(theme::edge())
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(18))
+            .outer_margin(egui::Margin::same(10))
+            .show(ui, |ui| self.panel(ui));
+    }
+}
 
-            if self.use_typed || self.accounts.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label("Account:");
-                    ui.text_edit_singleline(&mut self.typed);
-                });
+/// Applied every frame; egui keeps no state we would be fighting.
+fn style(ui: &mut egui::Ui) {
+    let visuals = &mut ui.visuals_mut();
 
-                if !self.typed.is_empty() && !is_valid_account(&self.typed) {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 120, 80),
-                        "No spaces or '=' — the name is passed as a launch variable.",
-                    );
-                }
-            } else {
-                let selected = self
-                    .accounts
-                    .get(self.selected)
-                    .map(|account| account.name.clone())
-                    .unwrap_or_default();
+    visuals.override_text_color = Some(theme::INK);
+    visuals.widgets.inactive.bg_fill = egui::Color32::WHITE;
+    visuals.widgets.hovered.bg_fill = egui::Color32::WHITE;
+    visuals.widgets.active.bg_fill = egui::Color32::WHITE;
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::WHITE;
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::WHITE;
+    visuals.widgets.active.weak_bg_fill = egui::Color32::WHITE;
+    visuals.extreme_bg_color = egui::Color32::WHITE;
+    visuals.selection.bg_fill = theme::TEAL;
+    visuals.widgets.inactive.bg_stroke = theme::edge();
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, theme::TEAL);
+}
 
-                egui::ComboBox::from_label("Account")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for (index, account) in self.accounts.iter().enumerate() {
-                            ui.selectable_value(&mut self.selected, index, &account.name);
-                        }
-                    });
+impl Launcher {
+    fn panel(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("SKYSAGA")
+                    .size(34.0)
+                    .strong()
+                    .color(theme::TEAL_DARK),
+            );
 
-                if let Some(account) = self.accounts.get(self.selected) {
-                    ui.add_space(6.0);
-                    ui.label(format!("Character: {}", account.summary()));
-                }
-            }
+            ui.label(
+                egui::RichText::new("INFINITE ISLES")
+                    .size(13.0)
+                    .color(theme::INK_MUTED),
+            );
+        });
 
-            ui.add_space(10.0);
+        ui.add_space(14.0);
 
+        section(ui, "Adventurer");
+        ui.add_space(6.0);
+
+        if !self.accounts.is_empty() {
             ui.horizontal(|ui| {
-                ui.label("Server:");
-                ui.text_edit_singleline(&mut self.host);
+                ui.selectable_value(&mut self.use_typed, false, "Choose");
+                ui.selectable_value(&mut self.use_typed, true, "New");
             });
 
-            ui.add_space(16.0);
+            ui.add_space(6.0);
+        }
 
-            let ready = is_valid_account(&self.account());
+        if self.use_typed || self.accounts.is_empty() {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.typed)
+                    .hint_text("name")
+                    .desired_width(f32::INFINITY),
+            );
 
-            ui.add_enabled_ui(ready, |ui| {
-                if ui
-                    .add_sized([120.0, 32.0], egui::Button::new("Play"))
-                    .clicked()
-                {
-                    self.play();
-                }
-            });
-
-            if let Some(problem) = &self.problem {
-                ui.add_space(12.0);
-                ui.colored_label(egui::Color32::from_rgb(220, 120, 80), problem);
+            if !self.typed.is_empty() && !is_valid_account(&self.typed) {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("No spaces or '=' in a name.")
+                        .color(theme::WARNING)
+                        .size(12.0),
+                );
+            } else if self.accounts.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("No adventurers here yet. Name one.")
+                        .color(theme::INK_MUTED)
+                        .size(12.0),
+                );
             }
+        } else {
+            let selected = self
+                .accounts
+                .get(self.selected)
+                .map(|account| account.name.clone())
+                .unwrap_or_default();
 
-            if !self.launched.is_empty() {
-                ui.add_space(12.0);
-                ui.separator();
-                ui.label(format!("Launched: {}", self.launched.join(", ")));
-                ui.label("Leave this window open to start another player.");
+            egui::ComboBox::from_id_salt("account")
+                .selected_text(egui::RichText::new(selected).color(theme::ORANGE).strong())
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for (index, account) in self.accounts.iter().enumerate() {
+                        ui.selectable_value(&mut self.selected, index, &account.name);
+                    }
+                });
+
+            if let Some(account) = self.accounts.get(self.selected) {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(account.summary())
+                        .color(theme::INK_MUTED)
+                        .size(13.0),
+                );
             }
+        }
+
+        ui.add_space(14.0);
+
+        section(ui, "Server");
+        ui.add_space(6.0);
+
+        ui.add(
+            egui::TextEdit::singleline(&mut self.host)
+                .hint_text("127.0.0.1")
+                .desired_width(f32::INFINITY),
+        );
+
+        ui.add_space(18.0);
+
+        let ready = is_valid_account(&self.account());
+
+        ui.vertical_centered(|ui| {
+            let button = egui::Button::new(
+                egui::RichText::new("PLAY")
+                    .size(19.0)
+                    .strong()
+                    .color(egui::Color32::WHITE),
+            )
+            .fill(if ready { theme::GREEN } else { theme::GREEN_DARK.gamma_multiply(0.5) })
+            .corner_radius(theme::ROUND)
+            .stroke(egui::Stroke::new(1.0, theme::GREEN_DARK));
+
+            if ui
+                .add_enabled(ready, button.min_size(egui::vec2(180.0, 40.0)))
+                .clicked()
+            {
+                self.play();
+            }
+        });
+
+        if let Some(problem) = &self.problem {
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(problem)
+                    .color(theme::WARNING)
+                    .size(12.0),
+            );
+        }
+
+        if !self.launched.is_empty() {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!("Playing: {}", self.launched.join(", ")))
+                    .color(theme::INK_MUTED)
+                    .size(12.0),
+            );
+            ui.label(
+                egui::RichText::new("Leave this open to start another adventurer.")
+                    .color(theme::INK_MUTED)
+                    .size(11.0),
+            );
         }
     }
 }
