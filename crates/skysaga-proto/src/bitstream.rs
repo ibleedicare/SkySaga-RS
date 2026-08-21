@@ -215,6 +215,25 @@ impl BitWriter {
         }
     }
 
+    /// A length-optimised unsigned int: one flag bit, then 7 or 32 bits.
+    ///
+    /// Values below `0x80` take the short form, which is 8 bits in total instead of 33. The
+    /// boundary matters: the reader takes its bit count from the flag alone, so writing the
+    /// wrong form desynchronises everything after it in the packet rather than just
+    /// corrupting this value.
+    ///
+    /// Both forms are little-endian ([`Self::write_bits_le`]), not the big-endian
+    /// [`Self::write_u32`] — see the module docs on the two disagreeing 32-bit writes.
+    pub fn write_compressed_u32(&mut self, value: u32) {
+        if value < 0x80 {
+            self.write_bit(false);
+            self.write_bits_le(value, 7);
+        } else {
+            self.write_bit(true);
+            self.write_bits_le(value, 32);
+        }
+    }
+
     /// `hasData` bit, `largeLength` bit, an 8-bit length, then the UTF-8 bytes.
     ///
     /// An empty string is a single `0` bit — the client reads that back as empty, so the
@@ -439,6 +458,26 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(out)
+    }
+
+    /// Step over `bits` without decoding them.
+    ///
+    /// For fields a packet carries but the server has no use for. Skipping is not the same as
+    /// ignoring: the count has to be exact, or everything after it reads as noise.
+    pub fn skip_bits(&mut self, bits: u32) -> Result<(), BitError> {
+        let bits = bits as usize;
+
+        self.require(bits)?;
+        self.offset += bits;
+
+        Ok(())
+    }
+
+    /// The inverse of [`BitWriter::write_compressed_u32`].
+    pub fn read_compressed_u32(&mut self) -> Result<u32, BitError> {
+        let large = self.read_bit()?;
+
+        self.read_bits_le(if large { 32 } else { 7 })
     }
 
     pub fn read_string(&mut self) -> Result<String, BitError> {

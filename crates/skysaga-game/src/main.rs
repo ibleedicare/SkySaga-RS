@@ -71,7 +71,12 @@ fn main() -> anyhow::Result<()> {
         "built the home island",
     );
 
-    let mut server = GameServer::bind(&GameServerConfig::from_env(), world)?;
+    // Standalone: its own state, not shared with a web server. Prefer `skysaga-server`, which
+    // runs auth, web and game over one AppState -- character creation happens over RakNet but
+    // is read back over HTTP, so they have to agree.
+    let state = std::sync::Arc::new(skysaga_state::AppState::default());
+
+    let mut server = GameServer::bind(&GameServerConfig::from_env(), world, state)?;
 
     loop {
         server.tick();

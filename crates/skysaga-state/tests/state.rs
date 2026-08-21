@@ -452,3 +452,68 @@ fn letters_digits_and_underscore_are_allowed() {
         assert!(state.check_character_name(name).is_ok(), "{name:?}");
     }
 }
+
+// --- resetting a character ---------------------------------------------------------------
+//
+// State is in-memory, so a character outlives every client run until the server restarts.
+// Once `home_biome` is set the client skips its creator entirely and drops into the world,
+// which makes the creator impossible to exercise twice against one running server. Deleting
+// the character puts `characters/list` back to the no-character envelope the creator needs.
+
+#[test]
+fn deleting_a_character_sends_the_client_back_to_the_creator() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+    state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    assert!(state.delete_character("Alice").unwrap());
+
+    assert_eq!(state.character("Alice"), None);
+}
+
+/// Idempotent: resetting twice is not an error, it just reports that there was nothing to do.
+#[test]
+fn deleting_a_character_twice_reports_no_second_deletion() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+
+    assert!(state.delete_character("Alice").unwrap());
+    assert!(!state.delete_character("Alice").unwrap());
+}
+
+/// The account itself survives -- the player stays signed in, so the client can reconnect
+/// and create afresh without going back through the launcher.
+#[test]
+fn deleting_a_character_keeps_the_account_signed_in() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    let session = state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+
+    state.delete_character("Alice").unwrap();
+
+    assert_eq!(state.account_for_token(&session.token).as_deref(), Some("Alice"));
+}
+
+#[test]
+fn deleting_a_character_for_an_unknown_account_fails() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    assert_eq!(state.delete_character("Nobody"), Err(LoginError::NoSuchAccount));
+}
+
+/// One player's reset must not disturb another's character.
+#[test]
+fn deleting_one_players_character_leaves_the_others_alone() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.authenticate("Bob", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+    state.create_character("Bob", None).unwrap();
+
+    state.delete_character("Alice").unwrap();
+
+    assert_eq!(state.character("Alice"), None);
+    assert!(state.character("Bob").is_some());
+}

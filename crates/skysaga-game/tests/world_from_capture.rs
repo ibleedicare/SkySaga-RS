@@ -101,12 +101,26 @@ pub fn world_from_capture() -> World {
         }
     }
 
+    // Which captured entity is the player, by the id SetClientEntity named.
+    let player_index = entities
+        .iter()
+        .position(|entity| entity.id == player_entity_id)
+        .unwrap_or(entities.len().saturating_sub(1));
+
     World {
         server_info: server_info.expect("the capture contains ServerInfo"),
         map: map.expect("the capture contains MapDefinition"),
         chunks,
         entities,
         player_entity_id,
+        player_index,
+        transfer_ip: "127.0.0.1".to_owned(),
+        transfer_port: 42069,
+
+        // A capture holds encoded EntityAdds, not components, so there is nothing to
+        // re-encode from. The captured bytes are replayed verbatim -- which is the whole
+        // point of this world: it is the oracle, and must not be re-derived.
+        player_template: None,
     }
 }
 

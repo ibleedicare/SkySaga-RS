@@ -521,3 +521,80 @@ fn every_component_the_player_needs_is_implemented() {
     assert!(unimplemented.is_empty(), "not implemented: {unimplemented:?}");
     assert!(needed.len() >= used.len());
 }
+
+// --- ClientCharacterCustomisationComponent ------------------------------------------------
+//
+// The appearance the player chose in the creator. Sync index 19 on `Player`.
+//
+// This is the component the C# emulator never had: it resolves component classes by
+// reflection over their names, and a class that does not exist is skipped silently, so the
+// parameter simply never replicated and every character rendered with the client's defaults
+// no matter what was chosen in the creator.
+
+mod character_customisation {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
+    use skysaga_world::{CharacterCustomisationComponent, Component};
+
+    fn appearance() -> CustomisationData {
+        CustomisationData {
+            gender: Gender::Female,
+            tribe: Some(0x1111_1111),
+            materials: vec![Some(0x2222_2222), Some(0x3333_3333), Some(0x4444_4444)],
+            attachments: vec![Attachment {
+                attachment: Some(0x5555_5555),
+                material: Some(0x6666_6666),
+            }],
+        }
+    }
+
+    #[test]
+    fn it_is_named_as_entities_json_names_it() {
+        let component = Component::CharacterCustomisation(CharacterCustomisationComponent::default());
+
+        assert_eq!(component.name(), "clientcharactercustomisationcomponent");
+    }
+
+    /// The bytes must be exactly what `CustomisationData` writes on its own -- the component
+    /// is a carrier, and any framing it added would desynchronise the whole entity.
+    #[test]
+    fn customisationdata_writes_the_appearance_verbatim() {
+        let data = appearance();
+
+        let mut direct = BitWriter::new();
+        data.encode(&mut direct);
+
+        let mut through_component = BitWriter::new();
+        let wrote = Component::CharacterCustomisation(CharacterCustomisationComponent {
+            customisation: data,
+        })
+        .sync("customisationdata", &mut through_component);
+
+        assert!(wrote, "customisationdata must report that it wrote");
+        assert_eq!(through_component.into_bytes(), direct.into_bytes());
+    }
+
+    /// Parameter names are matched case-insensitively, as every other component does.
+    #[test]
+    fn the_parameter_name_is_case_insensitive() {
+        let mut writer = BitWriter::new();
+
+        assert!(Component::CharacterCustomisation(CharacterCustomisationComponent::default())
+            .sync("CustomisationData", &mut writer));
+    }
+
+    /// A parameter it does not own must leave the writer untouched, or the flag bit and the
+    /// payload disagree.
+    #[test]
+    fn an_unknown_parameter_writes_nothing() {
+        let mut writer = BitWriter::new();
+
+        let wrote = Component::CharacterCustomisation(CharacterCustomisationComponent {
+            customisation: appearance(),
+        })
+        .sync("playername", &mut writer);
+
+        assert!(!wrote);
+        assert!(writer.into_bytes().is_empty());
+    }
+}

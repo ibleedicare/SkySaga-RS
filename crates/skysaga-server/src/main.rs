@@ -23,8 +23,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use skysaga_auth::AuthConfig;
+use skysaga_game::{GameServer, GameServerConfig, World, WorldConfig};
 use skysaga_state::{AppState, CredentialPolicy};
 use skysaga_web::WebConfig;
+use skysaga_world::{default_entities_path, EntityDefinitions};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -77,11 +79,54 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_task = tokio::spawn(skysaga_auth::serve(auth, Arc::clone(&state)));
 
-    tokio::select! {
-        result = web_task => result.context("web task panicked")?.context("web server failed")?,
-        result = auth_task => result.context("auth task panicked")?.context("auth server failed")?,
-        _ = tokio::signal::ctrl_c() => info!("shutting down"),
-    }
+    // The game server, over the *same* AppState. Character creation happens on this socket
+    // but is read back over HTTP, so the two have to agree -- run as separate processes, the
+    // client finishes creating a character, characters/list still reports no biome, and it
+    // loops straight back into the creator.
+    //
+    // RakNet has its own threads and a blocking tick, so it gets a plain thread rather than a
+    // tokio task.
+    let definitions = EntityDefinitions::load(default_entities_path())
+        .with_context(|| "loading entity definitions")?;
 
-    Ok(())
+    let world = World::home_island(&definitions, &WorldConfig::default());
+
+    info!(
+        chunks = world.chunks.len(),
+        entities = world.entities.len(),
+        "built the home island",
+    );
+
+    let mut game = GameServer::bind(&GameServerConfig::from_env(), world, Arc::clone(&state))?;
+
+    std::thread::spawn(move || loop {
+        game.tick();
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    });
+
+    // Any arm finishing ends the process, so each one says why. A server task that returns
+    // Ok is *not* success -- axum::serve and the auth loop are supposed to run forever, so
+    // returning at all means the listener went away. Previously this fell through to Ok(())
+    // and the process exited silently with status 0, which is indistinguishable from a clean
+    // shutdown and impossible to diagnose after the fact.
+    tokio::select! {
+        result = web_task => {
+            result.context("web task panicked")?.context("web server failed")?;
+
+            anyhow::bail!("the web server stopped serving unexpectedly");
+        }
+
+        result = auth_task => {
+            result.context("auth task panicked")?.context("auth server failed")?;
+
+            anyhow::bail!("the auth server stopped serving unexpectedly");
+        }
+
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutting down");
+
+            Ok(())
+        }
+    }
 }

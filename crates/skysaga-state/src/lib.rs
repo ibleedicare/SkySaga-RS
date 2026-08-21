@@ -125,6 +125,20 @@ struct Inner {
     peers: HashMap<IpAddr, String>,
     /// Lowercased name of the account that signed in most recently, as a fallback.
     most_recent: Option<String>,
+
+    /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
+    photos: HashMap<String, Photo>,
+}
+
+/// An uploaded image.
+///
+/// Held in memory with everything else. Photos are the only binary payload the server keeps,
+/// and the client fetches them straight back by id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Photo {
+    pub bytes: Vec<u8>,
+    /// Unix milliseconds, for ordering an album.
+    pub captured_at: u64,
 }
 
 /// All mutable server state, shared between the auth, web and game servers.
@@ -281,6 +295,50 @@ impl AppState {
         }
 
         self.create_character(account, None)
+    }
+
+    /// Store an uploaded photo under the id the game server issued.
+    ///
+    /// Replaces any existing image for that id: the client only uploads once per validated
+    /// capture, so a second upload is a retry rather than a second photo.
+    pub fn save_photo(&self, id: &str, bytes: Vec<u8>, captured_at: u64) {
+        self.write()
+            .photos
+            .insert(id.to_owned(), Photo { bytes, captured_at });
+    }
+
+    /// A stored photo, if it was uploaded.
+    pub fn photo(&self, id: &str) -> Option<Photo> {
+        self.read().photos.get(id).cloned()
+    }
+
+    /// How many photos are stored.
+    pub fn photo_count(&self) -> usize {
+        self.read().photos.len()
+    }
+
+    /// Discard the account's character, sending the client back to its creator.
+    ///
+    /// Returns whether there was one to delete, so a reset is idempotent rather than an
+    /// error the second time.
+    ///
+    /// This exists because state is in-memory and per-process: a character outlives every
+    /// client run until the server is restarted, and once `home_biome` is set
+    /// `characters/list` reports a finished character, so the client skips its creator and
+    /// drops straight into the world. Without a reset the creator can only ever be exercised
+    /// once per server start.
+    ///
+    /// The *account* is deliberately kept: the player stays signed in, so they can reconnect
+    /// and create afresh without going back through the launcher.
+    pub fn delete_character(&self, account: &str) -> Result<bool, LoginError> {
+        let mut inner = self.write();
+
+        let entry = inner
+            .accounts
+            .get_mut(&account.to_ascii_lowercase())
+            .ok_or(LoginError::NoSuchAccount)?;
+
+        Ok(entry.character.take().is_some())
     }
 
     // --- the character profile ---------------------------------------------------------

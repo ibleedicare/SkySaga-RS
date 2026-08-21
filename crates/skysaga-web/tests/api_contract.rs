@@ -626,3 +626,263 @@ async fn a_character_with_no_biome_yet_is_reported_as_null() {
 
     assert_eq!(body["result"]["characters"][0]["homeBiome"], "Sky_Island");
 }
+
+// --- photos ------------------------------------------------------------------------------------
+
+/// The loading screen's vote. `results` must be **present and empty**, not absent.
+///
+/// The client reads `results` off the `result` object; a missing key yields the RPC layer's
+/// default rather than an empty list, which is not the same thing. The catch-all
+/// `{"result":{}}` was answering this route, and the client sat on the loading screen it is
+/// shown on.
+#[tokio::test]
+async fn the_photo_vote_returns_an_empty_list_not_an_absent_one() {
+    let api = Api::new();
+
+    let (status, body) = api
+        .post(
+            "/api/binary-storage/photos/_whichIsCooler",
+            json!({"size": 2}),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let results = &body["result"]["results"];
+
+    assert!(results.is_array(), "results must be an array, got {results}");
+    assert_eq!(results.as_array().unwrap().len(), 0, "no photos stored yet");
+}
+
+/// It must not fall through to the catch-all, which answers `{"result":{}}`.
+#[tokio::test]
+async fn the_photo_vote_is_not_the_unimplemented_fallback() {
+    let api = Api::new();
+
+    let (_, body) = api
+        .post("/api/binary-storage/photos/_whichIsCooler", json!({}))
+        .await;
+
+    assert!(
+        body["result"].get("results").is_some(),
+        "the fallback would have no results key",
+    );
+}
+
+// --- the reset route ---------------------------------------------------------------------
+//
+// Emulator-local, not a route the client knows about. It exists because state is in-memory:
+// a finished character outlives every client run, and `characters/list` then reports a
+// complete character, so the client skips its creator. Resetting is the only way to exercise
+// character creation twice against one running server.
+
+#[tokio::test]
+async fn resetting_sends_characters_list_back_to_the_no_character_envelope() {
+    let api = Api::new();
+    api.state.authenticate("Alice", "x").unwrap();
+    api.state.create_character("Alice", None).unwrap();
+    api.state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    // Precondition: the client would skip its creator on this.
+    let (_, before) = api.get("/api/persistent-record/characters/list").await;
+    assert_eq!(before["result"]["characters"][0]["homeBiome"], "Sky_Island");
+
+    let (status, body) = api.post("/debug/reset-character", json!({})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["reset"], true);
+    assert_eq!(body["account"], "Alice");
+
+    // The client now runs its creator again.
+    let (_, after) = api.get("/api/persistent-record/characters/list").await;
+    assert!(
+        after.get("Error").is_some(),
+        "expected the no-character error envelope, got {after}"
+    );
+}
+
+#[tokio::test]
+async fn resetting_twice_is_not_an_error() {
+    let api = Api::new();
+    api.state.authenticate("Alice", "x").unwrap();
+    api.state.create_character("Alice", None).unwrap();
+
+    let (_, first) = api.post("/debug/reset-character", json!({})).await;
+    let (status, second) = api.post("/debug/reset-character", json!({})).await;
+
+    assert_eq!(first["reset"], true);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["reset"], false);
+}
+
+/// Naming an account explicitly, for resetting from a shell that is not the game client.
+#[tokio::test]
+async fn resetting_can_name_the_account() {
+    let api = Api::new();
+    api.state.authenticate("Alice", "x").unwrap();
+    api.state.authenticate("Bob", "x").unwrap();
+    api.state.create_character("Alice", None).unwrap();
+    api.state.create_character("Bob", None).unwrap();
+
+    let (status, body) = api.post("/debug/reset-character?account=Alice", json!({})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["account"], "Alice");
+    assert_eq!(api.state.character("Alice"), None);
+    assert!(
+        api.state.character("Bob").is_some(),
+        "resetting Alice must not disturb Bob"
+    );
+}
+
+#[tokio::test]
+async fn resetting_an_unknown_account_reports_it() {
+    let api = Api::new();
+
+    let (status, body) = api.post("/debug/reset-character?account=Nobody", json!({})).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["reset"], false);
+}
+
+// --- photo upload and download -----------------------------------------------------------
+//
+// The client captures the character portrait as the last step of character creation, is told
+// where to put it by the RakNet `PhotoValidated`, and uploads it here. It does not leave the
+// creator until that upload succeeds -- a 404 strands it on "Waiting for Server".
+
+#[tokio::test]
+async fn an_uploaded_photo_can_be_fetched_back() {
+    let api = Api::new();
+
+    let (status, body) = api
+        .send(
+            Request::post("/api/binary-storage/photos/photo-1/_upload")
+                .header("content-type", "image/jpeg")
+                .body(Body::from(vec![0xff, 0xd8, 0xff, 0xe0]))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["result"]["officialUUID"], "photo-1",
+        "the client matches the reply by the id it uploaded to",
+    );
+
+    let response = api
+        .router
+        .clone()
+        .oneshot(
+            Request::get("/api/binary-storage/photos/photo-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "image/jpeg",
+    );
+
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+
+    assert_eq!(bytes.as_ref(), &[0xff, 0xd8, 0xff, 0xe0]);
+}
+
+/// The album fetches images from `/photos/<id>`, having dropped the `/api/binary-storage`
+/// prefix when it parsed the authority out of the url it was given.
+#[tokio::test]
+async fn a_photo_is_also_served_from_the_short_path() {
+    let api = Api::new();
+
+    api.state.save_photo("photo-2", vec![1, 2, 3], 0);
+
+    let response = api
+        .router
+        .clone()
+        .oneshot(Request::get("/photos/photo-2").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_unknown_photo_is_not_found() {
+    let api = Api::new();
+
+    let response = api
+        .router
+        .clone()
+        .oneshot(Request::get("/photos/nope").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// A multipart body must be unwrapped: storing the boundary and part headers along with the
+/// JPEG yields a file the client cannot display when it fetches the photo back.
+#[tokio::test]
+async fn a_multipart_upload_stores_only_the_image() {
+    let api = Api::new();
+
+    let image: &[u8] = &[0xff, 0xd8, 0xde, 0xad, 0xbe, 0xef];
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--BOUND\r\n");
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\n");
+    body.extend_from_slice(b"Content-Type: image/jpeg\r\n\r\n");
+    body.extend_from_slice(image);
+    body.extend_from_slice(b"\r\n--BOUND--\r\n");
+
+    let (status, _) = api
+        .send(
+            Request::post("/api/binary-storage/photos/photo-3/_upload")
+                .header("content-type", "multipart/form-data; boundary=BOUND")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let stored = api.state.photo("photo-3").expect("stored");
+
+    assert_eq!(stored.bytes, image, "the framing must not be stored");
+}
+
+/// `access` tells the client where to fetch a photo from.
+#[tokio::test]
+async fn access_returns_the_fetch_url() {
+    let api = Api::new();
+
+    let (status, body) = api
+        .post("/api/binary-storage/photos/photo-4/access", json!({}))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["result"]["url"],
+        "/api/binary-storage/photos/photo-4",
+    );
+}
+
+/// Ratings and reports must not 404; nothing reads them.
+#[tokio::test]
+async fn ratings_and_reports_are_acknowledged() {
+    let api = Api::new();
+
+    for path in [
+        "/api/binary-storage/photos/photo-5/rating/up",
+        "/api/binary-storage/photos/photo-5/rating/down",
+        "/api/binary-storage/photos/_report",
+    ] {
+        let (status, _) = api.post(path, json!({})).await;
+
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+}

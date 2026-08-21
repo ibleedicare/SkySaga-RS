@@ -7,7 +7,8 @@
 use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
 use skysaga_world::terrain::CHUNK_SIZE;
 use skysaga_world::{
-    Component, Entity, EntityDefinitions, HealthComponent, InteractionComponent,
+    Component, Entity, EntityDefinition, EntityDefinitions,
+    HealthComponent, InteractionComponent,
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
     TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLinkComponent,
 };
@@ -26,6 +27,61 @@ pub struct World {
 
     /// Which of `entities` is this connection's player. Sent as `SetClientEntity`.
     pub player_entity_id: u32,
+
+    /// Where the player sits in `entities`, so its burst entry can be replaced.
+    pub player_index: usize,
+
+    /// Where a client is sent once it has finished creating its homeworld. See
+    /// [`WorldConfig::public_ip`].
+    pub transfer_ip: String,
+    pub transfer_port: u16,
+
+    /// The player entity before serialisation, with the definition needed to re-encode it.
+    ///
+    /// The world is built once at startup, but a character's name and appearance are not
+    /// known then — they arrive over RakNet during character creation, long after this
+    /// entity was first serialised. Re-encoding from the template is what lets the burst
+    /// carry *this* player's character rather than the defaults the world was built with.
+    ///
+    /// `None` for a world decoded from a capture: a capture holds encoded `EntityAdd`s and
+    /// not components, so there is nothing to re-encode *from*. Such a world replays the
+    /// captured bytes verbatim, which is exactly what makes it usable as an oracle.
+    pub player_template: Option<(Entity, EntityDefinition)>,
+}
+
+impl World {
+    /// The player's `EntityAdd`, carrying the character in `profile`.
+    ///
+    /// Falls back to the template's defaults for anything the profile does not set, so a
+    /// player who has never opened the creator still replicates a complete entity.
+    pub fn player_entity_add(&self, profile: &crate::CharacterProfile) -> EntityAdd {
+        // A capture-built world has no template; replay what was captured.
+        let Some((template, definition)) = &self.player_template else {
+            return self.entities[self.player_index].clone();
+        };
+
+        let mut player = template.clone();
+
+        for component in &mut player.components {
+            match component {
+                Component::CharacterCustomisation(customisation) => {
+                    if let Some(appearance) = &profile.appearance {
+                        customisation.customisation = appearance.clone();
+                    }
+                }
+
+                Component::PlayerName(player_name) => {
+                    if let Some(name) = &profile.name {
+                        player_name.player_name = name.clone();
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        player.to_entity_add(definition)
+    }
 }
 
 /// Knobs the home island is built with.
@@ -68,6 +124,15 @@ pub struct WorldConfig {
     /// the character customiser. Only a home world may be edited, which is what lets crafting
     /// stations be placed.
     pub world_type: u32,
+
+    /// Where to send a client that has just created its homeworld.
+    ///
+    /// Character creation ends with the client idle and still connected: it has unloaded the
+    /// creator's world and is waiting to be told where its own world is. This is the address
+    /// `TransferToServer` carries, and it is the same one `game-conductor/retrieve` hands out
+    /// over HTTP — one server, so a client is transferred back to this one.
+    pub public_ip: String,
+    pub game_port: u16,
 }
 
 impl Default for WorldConfig {
@@ -85,6 +150,8 @@ impl Default for WorldConfig {
             spawn_clearance: 25,
             adventure: "Home_Island_Adventure".to_owned(),
             world_type: 1,
+            public_ip: "127.0.0.1".to_owned(),
+            game_port: crate::server::DEFAULT_PORT,
         }
     }
 }
@@ -185,7 +252,16 @@ impl World {
             );
         }
 
+        // The player is added last, and kept un-encoded as well: its name and appearance are
+        // filled in per connection, once the player has been through the creator.
+        let player_definition = definitions
+            .get("Player")
+            .expect("Entities.json defines Player")
+            .clone();
+
         let player_entity_id = add("Player", player_components(config)).unwrap_or(0);
+        let player_index = entities.len() - 1;
+        let player_template = Entity::new(player_entity_id, player_components(config));
 
         Self {
             server_info: ServerInfo {
@@ -211,6 +287,10 @@ impl World {
             chunks: terrain_chunks(&config.terrain),
             entities,
             player_entity_id,
+            player_index,
+            transfer_ip: config.public_ip.clone(),
+            transfer_port: config.game_port,
+            player_template: Some((player_template, player_definition)),
         }
     }
 }
@@ -233,6 +313,11 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
     let spawn = (spawn.0, spawn.1 + config.spawn_clearance - 3, spawn.2);
 
     vec![
+        // Sync index 19. Attached unconditionally, even before the player has chosen
+        // anything: an *absent* parameter is what makes the client fall back to its built-in
+        // defaults, so a default value has to be replicated rather than nothing at all. The
+        // real appearance is filled in per connection by `World::player_entity_add`.
+        Component::CharacterCustomisation(CharacterCustomisationComponent::default()),
         Component::PlayerAspects(PlayerAspectsComponent {
             // Without these the player cannot build, which is most of the game.
             can_edit_map: true,

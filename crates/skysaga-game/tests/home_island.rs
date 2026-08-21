@@ -160,7 +160,22 @@ fn the_player_entity_is_well_formed() {
     let sync = SyncData::decode(&mut reader, player.synced_parameter_count()).expect("parses");
 
     assert_eq!(sync.present.len(), 89);
-    assert_eq!(sync.present_indices().count(), 28, "the same 28 the C# sends");
+
+    // 28 of these are the ones the C# sends. The 29th is `customisationdata` at index 19,
+    // a deliberate divergence: the C# has no ClientCharacterCustomisationComponent class and
+    // resolves components by reflection over their names, so that parameter silently never
+    // replicated and every character rendered with the client's built-in defaults no matter
+    // what was chosen in the creator.
+    assert_eq!(
+        sync.present_indices().count(),
+        29,
+        "the C#'s 28, plus the customisationdata it never sent",
+    );
+
+    assert!(
+        sync.present[19],
+        "customisationdata must replicate, or the client renders a default character",
+    );
 
     // Nothing left over: flags + length field + payload account for the whole blob.
     assert_eq!(
@@ -252,7 +267,7 @@ fn begin_sync_counts_the_chunks_actually_sent() {
 fn the_player_spawns_in_world_units_above_the_terrain() {
     use skysaga_game::world::POSITION_SCALE;
     use skysaga_proto::bitstream::BitReader;
-    use skysaga_world::{TerrainGenerator, TransformComponent};
+    use skysaga_world::TerrainGenerator;
 
     assert_eq!(POSITION_SCALE, 32);
 

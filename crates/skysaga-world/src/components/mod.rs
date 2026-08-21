@@ -26,6 +26,7 @@
 //! `write_u32`. The two are easy to confuse and the difference is invisible below 8 bits —
 //! see the `bitstream` module docs.
 
+pub mod character_customisation;
 pub mod health;
 pub mod interaction;
 pub mod inventory;
@@ -39,6 +40,7 @@ pub mod time_of_day;
 pub mod transform;
 pub mod voxel_link;
 
+pub use character_customisation::CharacterCustomisationComponent;
 pub use health::HealthComponent;
 pub use interaction::InteractionComponent;
 pub use inventory::InventoryComponent;
@@ -68,6 +70,8 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Component {
     /// `clientcharacterphysicscomponent`
+    /// `clientcharactercustomisationcomponent` -- the appearance chosen in the creator.
+    CharacterCustomisation(CharacterCustomisationComponent),
     CharacterPhysics(PhysicsComponent),
     CraftingDropSlots(CraftingDropSlotsComponent),
     FeatureUnlock(FeatureUnlockComponent),
@@ -92,6 +96,7 @@ impl Component {
     /// The component's name as it appears in `Entities.json` — lower-case, no separators.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::CharacterCustomisation(_) => "clientcharactercustomisationcomponent",
             Self::CharacterPhysics(_) => "clientcharacterphysicscomponent",
             Self::CraftingDropSlots(_) => "clientcraftingdropslotscomponent",
             Self::FeatureUnlock(_) => "clientfeatureunlockcomponent",
@@ -118,6 +123,7 @@ impl Component {
     /// caller uses it to decide whether to set the parameter's flag bit.
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match self {
+            Self::CharacterCustomisation(component) => component.sync(parameter, writer),
             Self::CharacterPhysics(component) => component.sync(parameter, writer),
             Self::CraftingDropSlots(component) => component.sync(parameter, writer),
             Self::FeatureUnlock(component) => component.sync(parameter, writer),

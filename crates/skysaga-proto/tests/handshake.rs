@@ -646,3 +646,65 @@ fn the_captured_airship_does_not_sync_yaw_degrees() {
         assert_eq!(sync.present[index], expected, "{parameter}");
     }
 }
+
+// --- compressed unsigned ints -------------------------------------------------------------
+//
+// One flag bit, then either 7 or 32 bits little-endian. Used by the photo packets to carry
+// `clientPhotoID`, which is a small counter in practice and so almost always takes the short
+// form. From the C#'s BitStreamExtensions.WriteCompressedUInt.
+
+mod compressed_uint {
+    use skysaga_proto::bitstream::{BitReader, BitWriter};
+
+    fn round_trip(value: u32) -> u32 {
+        let mut writer = BitWriter::new();
+        writer.write_compressed_u32(value);
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::from_bytes(&bytes);
+
+        reader.read_compressed_u32().expect("decodes")
+    }
+
+    #[test]
+    fn small_values_round_trip() {
+        for value in [0, 1, 2, 0x7e, 0x7f] {
+            assert_eq!(round_trip(value), value, "value {value}");
+        }
+    }
+
+    #[test]
+    fn large_values_round_trip() {
+        for value in [0x80, 0xff, 0x1234, u32::MAX] {
+            assert_eq!(round_trip(value), value, "value {value:#x}");
+        }
+    }
+
+    /// The short form is 8 bits: one flag plus seven payload. The boundary is `< 0x80`, so
+    /// 0x7f is short and 0x80 is long -- an off-by-one here silently corrupts every id above
+    /// it, because the reader would take the wrong number of bits and desynchronise the rest
+    /// of the packet.
+    #[test]
+    fn the_short_form_is_eight_bits_and_the_long_form_thirty_three() {
+        let mut short = BitWriter::new();
+        short.write_compressed_u32(0x7f);
+
+        let mut long = BitWriter::new();
+        long.write_compressed_u32(0x80);
+
+        assert_eq!(short.bits_used(), 8);
+        assert_eq!(long.bits_used(), 33);
+    }
+
+    /// The flag is the *first* bit: 0 for short, 1 for long.
+    #[test]
+    fn the_flag_bit_selects_the_form() {
+        let mut writer = BitWriter::new();
+        writer.write_compressed_u32(1);
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::from_bytes(&bytes);
+
+        assert!(!reader.read_bit().expect("a flag bit"), "small values flag 0");
+    }
+}

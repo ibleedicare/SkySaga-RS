@@ -12,10 +12,14 @@
 
 pub mod character_creation;
 pub mod handshake;
+pub mod photo;
+pub mod transfer;
 
 pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
+pub use photo::{NotifyPhotoCaptured, PhotoValidated};
+pub use transfer::TransferToServer;
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     MapDefinition, ServerInfo, SetClientEntity, SyncData,

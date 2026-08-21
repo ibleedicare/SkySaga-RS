@@ -1,7 +1,9 @@
 //! One module per API area. Each exposes `router() -> Router<Api>`.
 
 pub mod account;
+pub mod binary_storage;
 pub mod authentication;
+pub mod debug;
 pub mod game_conductor;
 pub mod matchmaking;
 pub mod persistent_record;
