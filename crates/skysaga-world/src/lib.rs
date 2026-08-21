@@ -5,6 +5,11 @@
 
 pub mod components;
 pub mod definitions;
+pub mod entity;
 
-pub use components::{Component, TimeOfDayComponent};
+pub use components::{
+    Component, InteractionComponent, OwnerComponent, PickupComponent, TimeOfDayComponent,
+    TransformComponent, VoxelLink, VoxelLinkComponent,
+};
+pub use entity::Entity;
 pub use definitions::{default_entities_path, EntityDefinition, EntityDefinitions, LoadError};

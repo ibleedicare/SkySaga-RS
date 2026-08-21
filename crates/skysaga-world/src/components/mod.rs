@@ -4,27 +4,41 @@
 //!
 //! An entity declares parameters with sync indices; each index names a
 //! `(component, parameter)` pair (see [`crate::definitions`]). When an entity is serialised,
-//! every index is visited in order and its component asked to write that parameter. Whether
-//! it wrote anything is what sets the flag bit, so a component that declines a parameter
-//! silently removes it from the packet.
+//! every index is visited in order and its component asked to write that parameter. **Whether
+//! it wrote anything is what sets the flag bit**, so a component that declines a parameter
+//! silently removes it from the packet — which is deliberate in at least two places
+//! (`TransformComponent::yawdegrees`, an empty `VoxelLinkComponent::voxels`).
 //!
 //! # Adding a component
 //!
-//! One struct, one variant on [`Component`], one arm in [`Component::sync`]. The `match` is
-//! exhaustive, so a missing arm is a compile error rather than a parameter that quietly stops
-//! replicating. No reflection, no registry keyed by string — the C# uses
-//! `Activator.CreateInstance` over class names, which is why a missing class there is a
-//! silent no-op (that is the reason `clientcharactercustomisationcomponent` never attaches).
+//! One struct, one variant on [`Component`], one arm in [`Component::sync`] and one in
+//! [`Component::name`]. Both matches are exhaustive, so a missing arm is a compile error
+//! rather than a parameter that quietly stops replicating.
+//!
+//! Contrast the C#, which resolves component classes by reflection over their names: a class
+//! that does not exist is skipped with a `Debug.WriteLine` invisible in a release build. That
+//! is exactly how `clientcharactercustomisationcomponent` came to never attach.
 //!
 //! # Bit widths
 //!
-//! Almost every field is a *ranged* integer: `32 - num_bits_required(max)` bits, written with
-//! the little-endian `write_bits_le` idiom. The declared maximum is part of the protocol, so
-//! it is named as a constant next to each field rather than inlined.
+//! Most fields are *ranged* integers of `32 - num_bits_required(max)` bits, written with the
+//! little-endian `write_bits_le` idiom. Whole words (`Write(int)`) are big-endian
+//! `write_u32`. The two are easy to confuse and the difference is invisible below 8 bits —
+//! see the `bitstream` module docs.
 
+pub mod interaction;
+pub mod owner;
+pub mod pickup;
 pub mod time_of_day;
+pub mod transform;
+pub mod voxel_link;
 
+pub use interaction::InteractionComponent;
+pub use owner::OwnerComponent;
+pub use pickup::PickupComponent;
 pub use time_of_day::TimeOfDayComponent;
+pub use transform::TransformComponent;
+pub use voxel_link::{VoxelLink, VoxelLinkComponent};
 
 use skysaga_proto::bitstream::BitWriter;
 
@@ -38,24 +52,39 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 /// Every component the server implements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Component {
+    Interaction(InteractionComponent),
+    Owner(OwnerComponent),
+    Pickup(PickupComponent),
     TimeOfDay(TimeOfDayComponent),
+    Transform(TransformComponent),
+    VoxelLink(VoxelLinkComponent),
 }
 
 impl Component {
     /// The component's name as it appears in `Entities.json` — lower-case, no separators.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Interaction(_) => "clientinteractioncomponent",
+            Self::Owner(_) => "clientownercomponent",
+            Self::Pickup(_) => "clientpickupcomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
+            Self::Transform(_) => "transformcomponent",
+            Self::VoxelLink(_) => "clientvoxellinkcomponent",
         }
     }
 
     /// Write `parameter` to `writer`, reporting whether it was written.
     ///
-    /// `false` means "not mine", and leaves the writer untouched — the caller uses that to
-    /// decide whether to set the parameter's flag bit.
+    /// `false` means "not mine, or not sent", and must leave the writer untouched — the
+    /// caller uses it to decide whether to set the parameter's flag bit.
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match self {
+            Self::Interaction(component) => component.sync(parameter, writer),
+            Self::Owner(component) => component.sync(parameter, writer),
+            Self::Pickup(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
+            Self::Transform(component) => component.sync(parameter, writer),
+            Self::VoxelLink(component) => component.sync(parameter, writer),
         }
     }
 }

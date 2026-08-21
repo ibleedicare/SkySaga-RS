@@ -163,3 +163,117 @@ fn the_component_name_matches_the_data_file() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+// --- Airship: a whole entity ---------------------------------------------------------------------
+
+/// Build the Airship the way the C# seeds it and reproduce its captured `EntityAdd` payload.
+///
+/// The budget adds up before any byte is compared: 1 + 1 + 32 + 1 + 32 + 1 + 1 + 1 + 1 + 51 +
+/// 12 = 134 bits, which is exactly what the capture recorded. That total is only reachable
+/// with both strings empty, so the capture also tells us `owner` and `placedbyuuid` are
+/// unset — the C# never assigns them.
+#[test]
+fn the_airship_reproduces_its_captured_sync_data() {
+    use skysaga_world::{
+        Component, Entity, InteractionComponent, OwnerComponent, PickupComponent,
+        TransformComponent, VoxelLinkComponent,
+    };
+
+    let definitions = definitions();
+    let definition = definitions.get("Airship").expect("Airship");
+
+    let airship = Entity::new(
+        1,
+        vec![
+            Component::Transform(TransformComponent {
+                // Server.cs seeds exactly this.
+                position: [2000, 70, 629],
+                ..Default::default()
+            }),
+            Component::Interaction(InteractionComponent::default()),
+            Component::Owner(OwnerComponent::default()),
+            Component::Pickup(PickupComponent::default()),
+            Component::VoxelLink(VoxelLinkComponent::default()),
+        ],
+    );
+
+    let ours = airship.sync_data(definition);
+    let theirs = sync_data_for("Airship");
+
+    assert_eq!(
+        ours.present, theirs.present,
+        "a different set of parameters was flagged",
+    );
+
+    assert_eq!(
+        ours.parameters.len(),
+        theirs.parameters.len(),
+        "payload width differs",
+    );
+
+    assert_eq!(
+        hex(ours.parameters.bytes()),
+        hex(theirs.parameters.bytes()),
+        "payload bytes differ from the C#'s",
+    );
+}
+
+/// The captured Airship's payload is 134 bits, and that total is only consistent with both
+/// strings being empty. Stated separately so a width change is diagnosed as a width change.
+#[test]
+fn the_airship_payload_is_one_hundred_and_thirty_four_bits() {
+    assert_eq!(sync_data_for("Airship").parameters.len(), 134);
+}
+
+/// A parameter whose component declines it is not flagged, even though it has an index.
+///
+/// `TransformComponent` refuses `yawdegrees`; an empty voxel list refuses `voxels`. Both are
+/// deliberate in the C#, and both must stay refused or the payload gains bits the client is
+/// not expecting.
+#[test]
+fn declined_parameters_are_not_flagged() {
+    use skysaga_world::{Component, Entity, TransformComponent, VoxelLinkComponent};
+
+    let definitions = definitions();
+    let definition = definitions.get("Airship").unwrap();
+
+    let entity = Entity::new(
+        1,
+        vec![
+            Component::Transform(TransformComponent::default()),
+            Component::VoxelLink(VoxelLinkComponent::default()),
+        ],
+    );
+
+    let sync = entity.sync_data(definition);
+
+    let yaw = definition.sync_index("transformcomponent", "yawdegrees").unwrap();
+    let voxels = definition.sync_index("clientvoxellinkcomponent", "voxels").unwrap();
+
+    assert!(!sync.present[yaw], "yawdegrees is never written");
+    assert!(!sync.present[voxels], "an empty voxel list is not written");
+
+    // ...while the ones it does own are.
+    let position = definition.sync_index("transformcomponent", "position").unwrap();
+    assert!(sync.present[position]);
+}
+
+/// A parameter whose component the entity does not carry is simply absent, rather than
+/// panicking or writing zeros.
+#[test]
+fn parameters_without_a_component_are_absent() {
+    use skysaga_world::{Component, Entity, TransformComponent};
+
+    let definitions = definitions();
+    let definition = definitions.get("Airship").unwrap();
+
+    // Transform only: everything owned by the other four components must be unflagged.
+    let entity = Entity::new(1, vec![Component::Transform(TransformComponent::default())]);
+
+    let sync = entity.sync_data(definition);
+
+    let owner = definition.sync_index("clientownercomponent", "owner").unwrap();
+
+    assert!(!sync.present[owner], "no owner component, so no owner parameter");
+    assert_eq!(sync.present_indices().count(), 2, "only position and size");
+}
