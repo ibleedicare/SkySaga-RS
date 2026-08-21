@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{Api, Peer};
+use crate::{Api, Caller};
 
 /// "No character" as the client's own error code. Build 10414 takes this as its cue to go to
 /// character creation.
@@ -79,11 +79,6 @@ impl ErrorEnvelope {
     }
 }
 
-/// The account this request belongs to. Unknown peers fall back to the most recent sign-in.
-fn account(api: &Api, peer: std::net::IpAddr) -> Option<String> {
-    api.state.account_for_peer(peer)
-}
-
 #[derive(Debug, Serialize)]
 struct Guid {
     /// Upper-case. The client reads this key verbatim.
@@ -97,8 +92,8 @@ struct Guid {
 /// `game-conductor/reserve`), and the game server itself, filling in the player entity's
 /// owner component. The game server's call comes from an address that never signed in, which
 /// is why the peer lookup falls back to the most recent account rather than failing.
-async fn get_guid(State(api): State<Api>, Peer(peer): Peer) -> Json<impl Serialize> {
-    let uuid = account(&api, peer)
+async fn get_guid(State(api): State<Api>, Caller(caller): Caller) -> Json<impl Serialize> {
+    let uuid = caller
         .and_then(|account| api.state.character(&account))
         .map(|character| character.uuid)
         .unwrap_or(Uuid::nil());
@@ -109,8 +104,8 @@ async fn get_guid(State(api): State<Api>, Peer(peer): Peer) -> Json<impl Seriali
 }
 
 /// Build 10414's character select.
-async fn list(State(api): State<Api>, Peer(peer): Peer) -> Response {
-    let character = account(&api, peer).and_then(|account| api.state.character(&account));
+async fn list(State(api): State<Api>, Caller(caller): Caller) -> Response {
+    let character = caller.and_then(|account| api.state.character(&account));
 
     match character {
         Some(character) => Json(Wrapped {
@@ -145,8 +140,8 @@ struct ActiveCharacter {
 /// enters the world with no character at all and drops the connection after the first world
 /// packets. So a character is provisioned here on demand instead: this build expects to be
 /// handed one, and character creation is a separate flow.
-async fn active(State(api): State<Api>, Peer(peer): Peer) -> Response {
-    let Some(account) = account(&api, peer) else {
+async fn active(State(api): State<Api>, Caller(caller): Caller) -> Response {
+    let Some(account) = caller else {
         return Json(ErrorEnvelope::new(NO_CHARACTER)).into_response();
     };
 
@@ -178,10 +173,10 @@ struct Created {
     character_uuid: Uuid,
 }
 
-async fn create(State(api): State<Api>, Peer(peer): Peer, body: String) -> Response {
+async fn create(State(api): State<Api>, Caller(caller): Caller, body: String) -> Response {
     let request: CreateCharacter = serde_json::from_str(&body).unwrap_or_default();
 
-    let Some(account) = account(&api, peer) else {
+    let Some(account) = caller else {
         return Json(ErrorEnvelope::new(NO_CHARACTER)).into_response();
     };
 
