@@ -5,9 +5,23 @@
 //! game client uses — `RELIABLE_ORDERED` on channel 0, which is the only combination SkySaga
 //! ever sends.
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use raknet::{message_id, Guid, Peer};
+
+/// Serialises the tests in this file.
+///
+/// Every test here starts real RakNet peers, each of which binds a socket and spawns its own
+/// threads. Run all eight at once -- alongside the rest of the workspace -- and `startup`
+/// intermittently fails. That is a genuine resource limit, not a bug in the wrapper, so the
+/// tests take a lock rather than pretending to be independent.
+fn serialised() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    // A poisoned lock only means some earlier test panicked; the peers are gone either way.
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Pump both peers until `f` is satisfied, or give up.
 ///
@@ -78,6 +92,8 @@ fn connected_pair() -> (Peer, Peer, Guid) {
 
 #[test]
 fn a_client_peer_connects_to_a_server_peer() {
+    let _guard = serialised();
+
     let (server, client, _) = connected_pair();
 
     assert_eq!(client.connection_count(), 1);
@@ -87,6 +103,8 @@ fn a_client_peer_connects_to_a_server_peer() {
 /// The server learns the client's guid from the connection packet, and can address it.
 #[test]
 fn the_server_sees_a_new_incoming_connection_with_a_usable_guid() {
+    let _guard = serialised();
+
     let server = Peer::new();
     server.set_maximum_incoming_connections(4);
     server.startup(0, 4).expect("server starts");
@@ -110,6 +128,8 @@ fn the_server_sees_a_new_incoming_connection_with_a_usable_guid() {
 /// The one that matters: an arbitrary payload survives the round trip byte for byte.
 #[test]
 fn a_payload_survives_the_round_trip() {
+    let _guard = serialised();
+
     let (server, client, _) = connected_pair();
 
     // A game packet id (anything at or above ID_USER_PACKET_ENUM) followed by a body.
@@ -129,6 +149,8 @@ fn a_payload_survives_the_round_trip() {
 /// Addressed send, rather than broadcast — this is what a per-connection reply uses.
 #[test]
 fn a_payload_can_be_addressed_to_one_guid() {
+    let _guard = serialised();
+
     let (server, client, guid) = connected_pair();
 
     let sent = [0xF3u8, 1, 2, 3];
@@ -146,6 +168,8 @@ fn a_payload_can_be_addressed_to_one_guid() {
 /// is on the critical route into the world.
 #[test]
 fn a_large_payload_is_split_and_reassembled() {
+    let _guard = serialised();
+
     let (server, client, _) = connected_pair();
 
     let mut sent = vec![0xF3u8];
@@ -164,6 +188,8 @@ fn a_large_payload_is_split_and_reassembled() {
 /// Ordering is what the game relies on; `RELIABLE_ORDERED` must not reorder.
 #[test]
 fn payloads_arrive_in_order() {
+    let _guard = serialised();
+
     let (server, client, _) = connected_pair();
 
     for index in 0..32u8 {
@@ -186,6 +212,8 @@ fn payloads_arrive_in_order() {
 /// An empty receive queue is `None`, not a blocking call or a panic.
 #[test]
 fn receive_returns_none_when_idle() {
+    let _guard = serialised();
+
     let peer = Peer::new();
     peer.startup(0, 1).expect("starts");
 
@@ -195,6 +223,8 @@ fn receive_returns_none_when_idle() {
 /// Starting twice on the same port must be reported, not panic.
 #[test]
 fn a_port_clash_is_an_error() {
+    let _guard = serialised();
+
     let first = Peer::new();
     first.startup(0, 1).expect("starts");
 

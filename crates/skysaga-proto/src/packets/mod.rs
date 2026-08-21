@@ -17,6 +17,6 @@ pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
 pub use handshake::{
-    BeginSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, MapDefinition, ServerInfo,
-    SetClientEntity,
+    BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
+    MapDefinition, ServerInfo, SetClientEntity, SyncData,
 };

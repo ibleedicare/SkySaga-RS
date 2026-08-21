@@ -218,3 +218,240 @@ impl ServerInfo {
         })
     }
 }
+
+/// The 18-bit length field used for both `EntityAdd`'s sync data and the parameter payload
+/// inside it: `32 - NumBitsRequired(0x20000)`.
+const LENGTH_BITS: u32 = ranged_bits(0x2_0000);
+
+/// An opaque run of bits, carried and re-emitted unchanged.
+///
+/// Used where this crate frames a payload it does not (yet) interpret — an entity's parameter
+/// data, a chunk's voxels. Keeping it opaque is what lets the framing be tested byte-exactly
+/// against a capture before a single component exists.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Bits {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl Bits {
+    pub fn new(bytes: Vec<u8>, len: usize) -> Self {
+        Self { bytes, len }
+    }
+
+    /// Take the contents of a writer as an opaque payload.
+    pub fn from_writer(writer: &BitWriter) -> Self {
+        Self {
+            bytes: writer.as_bytes().to_vec(),
+            len: writer.bits_used(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn encode(&self, writer: &mut BitWriter) {
+        writer.write_bits_msb(&self.bytes, self.len);
+    }
+
+    fn decode(reader: &mut BitReader, len: usize) -> Result<Self, BitError> {
+        Ok(Self {
+            bytes: reader.read_bits_msb(len)?,
+            len,
+        })
+    }
+}
+
+/// `EntityAdd` — "this entity now exists, and here is its state".
+///
+/// One per world entity during the initial sync, and again whenever something spawns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityAdd {
+    /// `CRC32` of an `Entities.json > Entities > Name`.
+    pub name_hash: Option<u32>,
+    pub id: u32,
+    pub parent_id: Option<u32>,
+
+    /// The entity's synced parameters. See [`SyncData`] for its internal shape; `EntityAdd`
+    /// itself only frames it with an 18-bit length.
+    pub sync_data: Bits,
+}
+
+impl EntityAdd {
+    pub const ID: u16 = 100;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+
+        writer.write_optional_u32(self.name_hash);
+        writer.write_u32(self.id);
+        writer.write_optional_u32(self.parent_id);
+
+        writer.write_bits_le(self.sync_data.len() as u32, LENGTH_BITS);
+
+        self.sync_data.encode(writer);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        let name_hash = reader.read_optional_u32()?;
+        let id = reader.read_u32()?;
+        let parent_id = reader.read_optional_u32()?;
+
+        let len = reader.read_bits_le(LENGTH_BITS)? as usize;
+
+        Ok(Self {
+            name_hash,
+            id,
+            parent_id,
+            sync_data: Bits::decode(reader, len)?,
+        })
+    }
+}
+
+/// The body of an entity's sync: which parameters are present, then their values.
+///
+/// ```text
+/// flags       one bit per synced parameter (the entity's declared count)
+/// length      18 bits -- how many bits of parameter data follow
+/// parameters  the values, in ascending parameter index
+/// ```
+///
+/// The flag block is written as whole 32-bit words in **big-endian order**. The C# builds it
+/// with `BitArray.CopyTo`, which lays the words out little-endian, and then reverses each
+/// four-byte group to undo that — so the wire order is most-significant-word-first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncData {
+    /// One entry per synced parameter the entity declares — `Player` has 89.
+    pub present: Vec<bool>,
+    pub parameters: Bits,
+}
+
+impl SyncData {
+    pub fn encode(&self, writer: &mut BitWriter) {
+        for &flag in &self.present {
+            writer.write_bit(flag);
+        }
+
+        writer.write_bits_le(self.parameters.len() as u32, LENGTH_BITS);
+
+        self.parameters.encode(writer);
+    }
+
+    /// `count` is the entity's declared synced-parameter count, which the reader cannot infer
+    /// from the stream — it comes from `Entities.json`.
+    pub fn decode(reader: &mut BitReader, count: usize) -> Result<Self, BitError> {
+        let mut present = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            present.push(reader.read_bit()?);
+        }
+
+        let len = reader.read_bits_le(LENGTH_BITS)? as usize;
+
+        Ok(Self {
+            present,
+            parameters: Bits::decode(reader, len)?,
+        })
+    }
+
+    /// Indices of the parameters that carry a value.
+    pub fn present_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.present
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &flag)| flag.then_some(index))
+    }
+}
+
+/// `ChunkSync` — one chunk of terrain.
+///
+/// The bulk of the handshake: 16 of these at ~32 KB each on the home island. The two data
+/// arrays are written with `WriteAlignedBytes`, so each is preceded by zero padding up to a
+/// byte boundary — which is why the packet is a whole number of bytes rather than the tight
+/// bit packing everything else uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChunkSync {
+    /// Chunk coordinates, 6 bits each (max 32 per axis, as in [`MapDefinition`]).
+    pub coords: [u32; 3],
+
+    /// Voxel data. Contents are not interpreted here.
+    pub data1: Option<Vec<u8>>,
+    pub data2: Option<Vec<u8>>,
+
+    /// Which neighbouring chunks exist, as a 7-bit mask
+    /// (`8 - NumBitsRequiredByte(64)`).
+    pub adjacent_chunks: Option<u8>,
+}
+
+impl ChunkSync {
+    pub const ID: u16 = 8;
+
+    const MAX_CHUNKS: u32 = 32;
+    /// `8 - num_bits_required_byte(64)` — the neighbour mask's width.
+    const ADJACENT_BITS: u32 = 8 - 64u8.leading_zeros();
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+
+        for axis in self.coords {
+            writer.write_bits_le(axis, ranged_bits(Self::MAX_CHUNKS));
+        }
+
+        for data in [&self.data1, &self.data2] {
+            writer.write_bit(data.is_some());
+
+            if let Some(data) = data {
+                writer.write_u32(data.len() as u32);
+                writer.write_aligned_bytes(data);
+            }
+        }
+
+        writer.write_bit(self.adjacent_chunks.is_some());
+
+        if let Some(mask) = self.adjacent_chunks {
+            writer.write_bits_le(u32::from(mask), Self::ADJACENT_BITS);
+        }
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        let mut coords = [0u32; 3];
+
+        for axis in &mut coords {
+            *axis = reader.read_bits_le(ranged_bits(Self::MAX_CHUNKS))?;
+        }
+
+        let mut arrays = [None, None];
+
+        for slot in &mut arrays {
+            if reader.read_bit()? {
+                let len = reader.read_u32()? as usize;
+
+                *slot = Some(reader.read_aligned_bytes(len)?);
+            }
+        }
+
+        let [data1, data2] = arrays;
+
+        let adjacent_chunks = if reader.read_bit()? {
+            Some(reader.read_bits_le(Self::ADJACENT_BITS)? as u8)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            coords,
+            data1,
+            data2,
+            adjacent_chunks,
+        })
+    }
+}

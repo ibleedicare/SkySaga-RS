@@ -267,3 +267,255 @@ fn server_info_decodes_to_plausible_values() {
     // Everything was consumed but RakNet's padding.
     assert!(reader.bits_remaining() < 8);
 }
+
+// --- EntityAdd (234) -------------------------------------------------------------------------
+
+/// Every captured `EntityAdd` decodes and re-encodes byte for byte.
+///
+/// The sync payload stays **opaque** here. That is the point: `EntityAdd`'s own framing —
+/// optional name hash, id, optional parent, 18-bit length — can be proven correct against the
+/// real server before a single component exists, and the component work then only has to
+/// produce the right payload rather than the right packet.
+#[test]
+fn every_captured_entity_add_round_trips() {
+    use skysaga_proto::packets::EntityAdd;
+
+    let labels = handshake_golden::labels_for_wire_id(234);
+
+    assert!(labels.len() >= 11, "expected the world entities, got {}", labels.len());
+
+    for label in labels {
+        let expected = capture(&label);
+        let mut reader = BitReader::from_bytes(&expected.bytes);
+
+        assert_eq!(reader.read_packet_id().unwrap(), EntityAdd::ID, "{label}");
+
+        let packet = EntityAdd::decode(&mut reader).unwrap_or_else(|e| panic!("{label}: {e}"));
+
+        let mut writer = BitWriter::new();
+        packet.encode(&mut writer);
+
+        // Compare whole bytes; the capture's last byte carries RakNet's padding.
+        let whole = writer.bits_used() / 8;
+
+        assert_eq!(
+            to_hex(&writer.as_bytes()[..whole]),
+            to_hex(&expected.bytes[..whole]),
+            "{label}: re-encoded EntityAdd differs"
+        );
+    }
+}
+
+/// The fields have to be sensible, not just round-trippable.
+#[test]
+fn captured_entity_adds_have_plausible_fields() {
+    use skysaga_proto::packets::EntityAdd;
+
+    let mut ids = Vec::new();
+
+    for label in handshake_golden::labels_for_wire_id(234) {
+        let expected = capture(&label);
+        let mut reader = BitReader::from_bytes(&expected.bytes);
+
+        reader.read_packet_id().unwrap();
+
+        let packet = EntityAdd::decode(&mut reader).unwrap();
+
+        assert!(packet.name_hash.is_some(), "{label}: every entity is named");
+        assert!(packet.id > 0, "{label}: ids start at 1");
+        assert!(
+            packet.sync_data.len() > 0,
+            "{label}: a new entity carries its state"
+        );
+
+        // The length field is 18 bits, so no payload can exceed that.
+        assert!(packet.sync_data.len() < (1 << 18), "{label}");
+
+        ids.push(packet.id);
+    }
+
+    ids.sort_unstable();
+    ids.dedup();
+
+    assert_eq!(
+        ids.len(),
+        handshake_golden::labels_for_wire_id(234).len(),
+        "entity ids are unique"
+    );
+
+    // SetClientEntity named entity 12, so the player must be among the entities added.
+    assert!(ids.contains(&12), "the player entity was added, got {ids:?}");
+}
+
+/// One of the captured entities *is* the player, and its name hash must be `CRC32("Player")`.
+/// This ties the id from `SetClientEntity` to a named entity, independently of the C# source.
+#[test]
+fn the_player_entity_is_named_player() {
+    use skysaga_proto::packets::EntityAdd;
+
+    let player = handshake_golden::labels_for_wire_id(234)
+        .into_iter()
+        .map(|label| {
+            let expected = capture(&label);
+            let mut reader = BitReader::from_bytes(&expected.bytes);
+            reader.read_packet_id().unwrap();
+            EntityAdd::decode(&mut reader).unwrap()
+        })
+        .find(|packet| packet.id == 12)
+        .expect("entity 12 was added");
+
+    assert_eq!(player.name_hash, Some(name_hash("Player")));
+}
+
+// --- SyncData --------------------------------------------------------------------------------
+
+/// The player's sync data, parsed with its declared parameter count.
+///
+/// `Player` declares 89 synced parameters (`Entities.json`), so the flag block is 89 bits.
+/// If that count is wrong the length field is read from the wrong offset and the payload
+/// length comes out absurd — which is exactly what this asserts against.
+#[test]
+fn the_player_sync_data_parses_with_eighty_nine_flags() {
+    use skysaga_proto::packets::{EntityAdd, SyncData};
+
+    const PLAYER_SYNCED_PARAMETERS: usize = 89;
+
+    let player = handshake_golden::labels_for_wire_id(234)
+        .into_iter()
+        .map(|label| {
+            let expected = capture(&label);
+            let mut reader = BitReader::from_bytes(&expected.bytes);
+            reader.read_packet_id().unwrap();
+            EntityAdd::decode(&mut reader).unwrap()
+        })
+        .find(|packet| packet.id == 12)
+        .expect("entity 12");
+
+    let mut reader = BitReader::new(player.sync_data.bytes(), player.sync_data.len());
+
+    let sync = SyncData::decode(&mut reader, PLAYER_SYNCED_PARAMETERS)
+        .expect("sync data parses with 89 flags");
+
+    assert_eq!(sync.present.len(), PLAYER_SYNCED_PARAMETERS);
+
+    // Everything in the blob is accounted for: flags + 18-bit length + payload.
+    assert_eq!(
+        PLAYER_SYNCED_PARAMETERS + 18 + sync.parameters.len(),
+        player.sync_data.len(),
+        "the payload length field agrees with what is actually there"
+    );
+
+    assert!(
+        sync.present_indices().count() > 0,
+        "a new entity syncs at least one parameter"
+    );
+
+    // Re-encoding the sync body reproduces the blob exactly.
+    let mut writer = BitWriter::new();
+    sync.encode(&mut writer);
+
+    assert_eq!(writer.bits_used(), player.sync_data.len());
+    assert_eq!(to_hex(writer.as_bytes()), to_hex(player.sync_data.bytes()));
+}
+
+// --- ChunkSync (142) -------------------------------------------------------------------------
+
+/// All 16 captured chunks round-trip byte for byte.
+///
+/// This is the one packet where alignment matters: the two data arrays are written with
+/// `WriteAlignedBytes`, so each is preceded by zero padding to a byte boundary. Getting that
+/// wrong shifts ~32 KB of terrain by a few bits, which the client renders as garbage rather
+/// than rejecting.
+#[test]
+fn every_captured_chunk_sync_round_trips() {
+    use skysaga_proto::packets::ChunkSync;
+
+    let labels = handshake_golden::labels_for_wire_id(142);
+
+    assert_eq!(labels.len(), 16, "the home island is 16 chunks");
+
+    for label in labels {
+        let expected = capture(&label);
+        let mut reader = BitReader::from_bytes(&expected.bytes);
+
+        assert_eq!(reader.read_packet_id().unwrap(), ChunkSync::ID, "{label}");
+
+        let chunk = ChunkSync::decode(&mut reader).unwrap_or_else(|e| panic!("{label}: {e}"));
+
+        let mut writer = BitWriter::new();
+        chunk.encode(&mut writer);
+
+        assert_eq!(
+            to_hex(writer.as_bytes()),
+            to_hex(&expected.bytes),
+            "{label}: re-encoded ChunkSync differs"
+        );
+    }
+}
+
+/// The decoded chunks describe the home island: a 4x4 grid on one layer, each carrying a
+/// single 32769-byte voxel array.
+///
+/// 32769 is 32^3 + 1 — one byte per voxel in a 32-cube chunk, plus a leading byte. Only
+/// `data1` is sent; `data2` and the adjacency mask are absent, so the optional-none path is
+/// the one the client actually takes here.
+#[test]
+fn the_captured_chunks_describe_the_home_island() {
+    use skysaga_proto::packets::ChunkSync;
+
+    const VOXELS_PER_CHUNK: usize = 32 * 32 * 32;
+
+    let mut coords = Vec::new();
+
+    for label in handshake_golden::labels_for_wire_id(142) {
+        let expected = capture(&label);
+        let mut reader = BitReader::from_bytes(&expected.bytes);
+
+        reader.read_packet_id().unwrap();
+
+        let chunk = ChunkSync::decode(&mut reader).unwrap();
+
+        let data1 = chunk.data1.as_ref().expect("voxel data present");
+
+        assert_eq!(data1.len(), VOXELS_PER_CHUNK + 1, "{label}");
+        assert_eq!(chunk.data2, None, "{label}: the emulator sends one array");
+        assert_eq!(chunk.adjacent_chunks, None, "{label}");
+
+        assert_eq!(chunk.coords[1], 0, "{label}: all on the y=0 layer");
+
+        for axis in chunk.coords {
+            assert!(axis < 32, "{label}: coordinate {axis} is inside the map");
+        }
+
+        coords.push(chunk.coords);
+    }
+
+    coords.sort_unstable();
+    coords.dedup();
+
+    assert_eq!(coords.len(), 16, "a 4x4 grid, each chunk once");
+}
+
+/// Alignment padding is real: the encoder must not simply concatenate.
+#[test]
+fn aligned_arrays_are_padded_to_a_byte_boundary() {
+    use skysaga_proto::packets::ChunkSync;
+
+    let mut writer = BitWriter::new();
+
+    ChunkSync {
+        coords: [1, 2, 3],
+        data1: Some(vec![0xAB; 4]),
+        data2: None,
+        adjacent_chunks: None,
+    }
+    .encode(&mut writer);
+
+    // 8 id + 18 coords + 1 flag + 32 length = 59 bits, padded to 64, then 4 bytes, then two
+    // more flag bits.
+    assert_eq!(writer.bits_used(), 64 + 32 + 2);
+
+    let bytes = writer.as_bytes();
+
+    assert_eq!(&bytes[8..12], &[0xAB; 4], "the payload starts on byte 8");
+}

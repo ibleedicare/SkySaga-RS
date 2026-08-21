@@ -169,6 +169,44 @@ impl BitWriter {
         }
     }
 
+    /// Pad with zero bits up to the next byte boundary.
+    ///
+    /// RakNet does this by advancing its bit counter; the bits it skips are zero because the
+    /// buffer is zeroed, so writing zeros explicitly is byte-identical and does not depend on
+    /// that.
+    pub fn align_to_byte(&mut self) {
+        while self.bits % 8 != 0 {
+            self.write_bit(false);
+        }
+    }
+
+    /// `WriteAlignedBytes`: align, then copy the bytes verbatim.
+    ///
+    /// Used for bulk payloads -- a chunk's voxel arrays -- where the alignment lets RakNet
+    /// memcpy instead of shifting every byte.
+    pub fn write_aligned_bytes(&mut self, bytes: &[u8]) {
+        self.align_to_byte();
+
+        for &byte in bytes {
+            self.write_u8(byte);
+        }
+    }
+
+    /// Append `bits` bits taken from the top of `bytes`, in order.
+    ///
+    /// The exact inverse of [`BitReader::read_bits_msb`], and *not* the same as
+    /// [`Self::write_bits`]: that one takes a trailing partial byte from its **low** bits
+    /// (RakNet's "right aligned"), whereas this takes it from the high bits, which is where a
+    /// bit-by-bit read leaves it. Use this pair for opaque payloads that must be reproduced
+    /// exactly -- an entity's sync data, a chunk's voxels.
+    pub fn write_bits_msb(&mut self, bytes: &[u8], bits: usize) {
+        for index in 0..bits {
+            let byte = bytes.get(index / 8).copied().unwrap_or(0);
+
+            self.write_bit(byte & (0x80 >> (index % 8)) != 0);
+        }
+    }
+
     /// `hasData` bit, `largeLength` bit, an 8-bit length, then the UTF-8 bytes.
     ///
     /// An empty string is a single `0` bit — the client reads that back as empty, so the
@@ -341,6 +379,47 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Skip to the next byte boundary. The inverse of [`BitWriter::align_to_byte`].
+    pub fn align_to_byte(&mut self) -> Result<(), BitError> {
+        while self.offset % 8 != 0 {
+            self.read_bit()?;
+        }
+
+        Ok(())
+    }
+
+    /// The inverse of [`BitWriter::write_aligned_bytes`].
+    pub fn read_aligned_bytes(&mut self, count: usize) -> Result<Vec<u8>, BitError> {
+        self.align_to_byte()?;
+        self.require(count * 8)?;
+
+        let mut out = Vec::with_capacity(count.min(1 << 16));
+
+        for _ in 0..count {
+            out.push(self.read_u8()?);
+        }
+
+        Ok(out)
+    }
+
+    /// Read `bits` bits into a byte vector, packed most-significant-first.
+    ///
+    /// The exact inverse of [`BitWriter::write_bits_msb`]. Used for payloads this crate does
+    /// not interpret, so they can be carried and re-emitted unchanged.
+    pub fn read_bits_msb(&mut self, bits: usize) -> Result<Vec<u8>, BitError> {
+        self.require(bits)?;
+
+        let mut out = vec![0u8; bits.div_ceil(8)];
+
+        for index in 0..bits {
+            if self.read_bit()? {
+                out[index / 8] |= 0x80 >> (index % 8);
+            }
+        }
+
+        Ok(out)
     }
 
     pub fn read_string(&mut self) -> Result<String, BitError> {

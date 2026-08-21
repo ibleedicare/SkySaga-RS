@@ -67,3 +67,25 @@ fn from_hex(hex: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
         .collect()
 }
+
+/// Every capture label for a given wire id, in capture order.
+pub fn labels_for_wire_id(id: u16) -> Vec<String> {
+    let prefix = format!("server_{id}_");
+
+    let mut labels: Vec<String> = captures()
+        .keys()
+        .filter(|label| label.starts_with(&prefix))
+        .cloned()
+        .collect();
+
+    // server_234_2 must sort after server_234_10's *numeric* predecessor, not lexically.
+    labels.sort_by_key(|label| {
+        label
+            .rsplit('_')
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0)
+    });
+
+    labels
+}
