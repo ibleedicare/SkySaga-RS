@@ -1,20 +1,54 @@
-# SkySaga server emulator — Rust port
+# SkySaga server emulator — Rust
 
-A rewrite of the C# emulator in `../server/Servers/`. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for the design and why it is shaped the way it is.
+A server emulator for **SkySaga: Infinite Isles**, a voxel MMO that was cancelled in 2017 and
+never released. The game's servers are gone; this is a reimplementation of them, reverse
+engineered from the client, so the game can be played again.
 
-**Status: stage 1 complete — a client logs in and reaches the world against this server.**
-Verified with the real client (build 10414) on 2026-08-21, with the C# web and auth servers
-stopped. The game server (RakNet, UDP :42069) is still the C# one; that is stage 2.
+**Status: a real client logs in, creates a character, and plays.** Verified end to end against
+retail build 10414 on 2026-08-21: account login, character creation with appearance and name,
+terrain, entities, and world entry — all served by this code, with no C# server running.
+
+It is a rewrite of an earlier C# emulator, which is kept as a reference implementation and as
+a test oracle (see [Tests](#tests)).
+
+## Before you clone
+
+**This repository does not build on its own.** It is one directory inside a larger working
+tree, and it needs two things from outside itself:
+
+| Needed | Why | Where it comes from |
+|---|---|---|
+| `Entities.json` | every entity's components and sync indices; the world cannot be built without it | the C# emulator's `Data/` directory — point `SKYSAGA_DATA_DIR` at a copy |
+| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from SLikeNet source — `nix build .#raknet` in the parent tree, or set `SKYSAGA_RAKNET_LIB` |
+
+Neither is redistributable here — `Entities.json` is the game's own data, and the RakNet build
+is a native library, not source. `cargo build` fails at the `raknet-sys` build script if it
+cannot find the library, and the server exits at startup if it cannot find `Entities.json`.
+
+You also need the game client itself, which is not public. This is emulator source, not a way
+to obtain the game.
+
+## Layout
 
 ```
 crates/
-  skysaga-core/     name hashing, bit maths, fixed-width strings, byte reader   (pure)
-  skysaga-state/    accounts, sessions, characters                              (pure)
-  skysaga-auth/     Smilegate login   TCP :10106
-  skysaga-web/      account / characters / conductor / social   HTTP :5164
-  skysaga-server/   one binary running them all over one shared state
+  skysaga-core/     name hashing, bit maths, fixed-width strings          (pure)
+  skysaga-state/    accounts, sessions, characters, photos                (pure)
+  skysaga-proto/    packet wire formats and the RakNet BitStream codec    (pure)
+  skysaga-world/    entity definitions, components, terrain generation    (pure)
+  skysaga-auth/     Smilegate login                          TCP  :10106
+  skysaga-web/      account / characters / conductor / social / photos
+                                                             HTTP :5164
+  skysaga-game/     the RakNet game server and session state machine
+                                                             UDP  :42069
+  skysaga-server/   one binary running all of them over one shared state
+  raknet/           safe wrapper over…
+  raknet-sys/       …the SLikeNet C API
 ```
+
+The four `(pure)` crates do no I/O at all, which is why most of the test suite needs neither a
+socket nor a running server. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules and
+the reasoning behind them.
 
 ## Running it
 
@@ -22,88 +56,123 @@ crates/
 cargo run --release -p skysaga-server
 ```
 
-Then start the C# game server and launch the client as usual:
+That one process serves everything the client needs. Then launch the client pointed at
+`127.0.0.1`; any non-empty account name is accepted by default.
 
-```bash
-cd ../server/Servers/SkySaga.Game/bin/Release/net9.0 && dotnet SkySaga.Game.dll
-nix run ..#sky-saga
-```
+There is also a `skysaga-game` binary that runs *only* the game server, for working on the
+world without the web stack. Note that the world-shaping variables below are read by that
+binary alone — `skysaga-server` currently builds its world from the defaults and ignores them.
 
-Environment variables are unchanged from the C#, so the existing scripts work as they are:
+### Configuration
+
+Read by `skysaga-server`:
 
 | Variable | Default | |
 |---|---|---|
 | `SKYSAGA_ACCOUNTS` | *(unset)* | `user:pass,other:pass` to restrict logins; unset accepts any non-empty name |
-| `SKYSAGA_PUBLIC_IP` | `127.0.0.1` | address advertised to the client — set it when the client is not on this host |
+| `SKYSAGA_PUBLIC_IP` | `127.0.0.1` | the address handed to the client — set this when the client is not on this host |
 | `SKYSAGA_WEB_PORT` | `5164` | |
 | `SKYSAGA_AUTH_PORT` | `10106` | |
-| `SKYSAGA_GAME_PORT` | `42069` | address handed out by `game-conductor/retrieve` |
-| `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to see every request body |
+| `SKYSAGA_GAME_PORT` | `42069` | |
+| `SKYSAGA_DATA_DIR` | *(the C# tree)* | directory holding `Entities.json` |
+| `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
+| `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
+
+Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORLD_TYPE`,
+`SKYSAGA_WORLD_SEED`, `SKYSAGA_WORLD_CHUNKS`, `SKYSAGA_SPAWN_CLEARANCE`,
+`SKYSAGA_TIME_OF_DAY`, `SKYSAGA_PLAYER_NAME`.
+
+### Starting character creation again
+
+Server state is in memory, so a finished character outlives every client run. Once it has a
+home biome, `characters/list` reports a *complete* character and the client skips its creator
+entirely — which looks exactly like a broken creator when nothing is wrong. To go through it
+again:
+
+```bash
+curl -X POST 'http://127.0.0.1:5164/debug/reset-character'
+```
+
+The account stays signed in; only the character is discarded.
 
 ## Tests
 
 ```bash
-cargo test --workspace          # 72 tests, no network, no fixtures directory to prepare
+cargo test --workspace          # 280 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
 
 **The C# server is the oracle, not this code's own opinion.** The fixtures under
-`crates/*/tests/golden/` were captured by running the real C# servers and recording what they
-put on the wire — `scripts/capture-auth-golden.py` for the binary login protocol, `curl` for
-the HTTP API. A test passes when this server's output matches *the C#'s*, not when it matches
-what the port's author believed the format to be.
+`crates/*/tests/` were captured by running the real C# servers and recording what they put on
+the wire — including a full RakNet handshake, replayed byte for byte. A test passes when this
+server's output matches *the C#'s*, not when it matches what the author believed the format
+to be.
 
-That distinction caught real things. `LoginRequest`'s layout is confirmed because the C#
-server parsed a packet this crate encoded and echoed the username back; had a field offset
-been wrong, it would have echoed garbage.
+That distinction has caught real bugs, including one that would otherwise have been invisible:
+a golden-vector generator asked the C# for the wrong operation, so the C# obligingly
+reproduced the mistake and every test passed. It was caught by decoding a capture from the
+live client, where big-endian ids resolved to real entity names and little-endian ones
+resolved to nothing.
 
-**Response keys are compared, not just values.** The client reads `GUID`, `RESERVED_NAME` and
-`Error` case-sensitively while everything around them is lower-case — the C# had to disable
-ASP.NET's camelCase policy wholesale after `RESERVED_NAME` went out as `reserveD_NAME`. A
-test that only checked values would not notice.
+**Where this server deliberately differs from the C#, a test asserts the C#'s behaviour too**,
+so the divergence stays deliberate. Two examples: the C# places a tree at the origin because
+it looks the position up on a component the entity does not have, and it never replicates a
+character's appearance at all because the component class was never written and its reflective
+loader skips missing classes silently.
 
 **HTTP tests do not bind a port.** Requests go through the router with
-`tower::ServiceExt::oneshot`, so the suite runs in well under a second and never races.
+`tower::ServiceExt::oneshot`, so the suite runs in about a second and never races.
 
 ## Improvements over the C#
 
 Defects found while reading the original, fixed here rather than reproduced:
 
-- **The auth server assumed one `read()` returned the whole packet**
-  (`SmilegateAuth/Program.cs:22`). TCP may split it anywhere; there is a test that sends the
-  header, pauses, then dribbles the body two bytes at a time.
-- **The auth server handled one connection at a time.** A client that connected and then
-  stalled blocked every other player from signing in.
+- **The auth server assumed one `read()` returned the whole packet.** TCP may split it
+  anywhere; there is a test that sends the header, pauses, then dribbles the body two bytes at
+  a time.
+- **The auth server handled one connection at a time**, so a client that connected and stalled
+  blocked everyone else from signing in.
 - **`Session.AccountName` and `_characterUUID` were process-wide statics**, so the emulator
-  served exactly one player and two clients corrupted each other. State is keyed per account
-  here, and requests are attributed by peer address — the client sends nothing else that
-  identifies it (no `Authorization` header, no id in the path).
-- **Three processes sharing no state.** One process, one `Arc<AppState>`, so the game server
-  can see what the web server knows instead of re-deriving it.
+  served exactly one player and two clients corrupted each other's state.
+- **Three processes sharing no state.** One process over one `Arc<AppState>` here — as
+  separate processes, a client could finish creating a character and have the web layer still
+  report it as unfinished, looping it back into the creator.
+- **One packet per 30 ms tick**, which capped the whole server at ~33 packets a second and was
+  the documented cause of its interaction lag. This drains the queue.
+- **Character appearance never replicated.** `Player` sync index 19 was silently absent, so
+  every character rendered with the client's built-in defaults no matter what was chosen in
+  the creator.
 
 ## Known gaps
 
-- **The account name is whatever the client's application login sends** — with `nix run
-  .#sky-saga` that is `projectv-client`, not a player name, because those launch variables do
-  not include `auth`. This matches the C#'s behaviour exactly; it is parity, not a
-  regression. Launching with the `auth` variable set routes through `sgauth/_login` and gives
-  the real name.
-- **The social graph returns empty lists.** The response *shapes* are implemented (they are
-  the part that is easy to get wrong), but the interactive friends/requests/blocked graph the
-  C# grew is not ported.
-- **No HTTPS yet.** The 2017 builds (Alpha V10 b36731) need it on :5165; retail 10414, which
-  is what this was verified against, is plain HTTP.
-- **Photos, trading and binary storage are unimplemented** — they log as unhandled routes.
-- **No RakNet.** Stage 2.
+- **The photo album does not load.** Photos are captured, uploaded and stored, and single
+  images are served back, but `photos/_search` — which populates the album list — is not
+  implemented, so the album spins.
+- **Every connection shares one player entity.** Fine for one player; a second player is
+  handed the same body.
+- **Movement is not replicated.** `EntityMoved` and `SetPlayerState` are received and ignored,
+  so players would not see each other move.
+- **The social graph returns empty lists.** The response *shapes* are implemented — the part
+  that is easy to get wrong — but the interactive friends/requests/blocked graph is not.
+- **No chat.** The client expects an IRC server on :4444 and retries forever without one; it
+  is noisy in the client log but does not block play.
+- **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
+  verified against, is plain HTTP.
+- **Trading is unimplemented** and logs as unhandled routes.
 
 ## Contributing
 
-The whole layout is chosen so that adding something is adding a file:
+The layout is chosen so that adding something is adding a file:
 
 - **An HTTP endpoint** → one `async fn` plus one `.route()` line in that module's `router()`.
-- **A packet** *(stage 2)* → one file in `skysaga-proto/src/packets/`, one `PacketId` variant,
-  one arm in the dispatch `match`. The compiler tells you if you miss the arm.
+- **A packet** → one struct with an `ID` and an `encode`/`decode` in
+  `skysaga-proto/src/packets/`, one variant on `ClientPacket`, one arm in the dispatch match.
+- **A component** → one struct, one `Component` variant, one arm each in `sync` and `name`.
+  Both matches are exhaustive, so a missing arm is a compile error rather than a parameter
+  that quietly stops replicating — which is exactly how the C# lost the appearance component.
 
-Write the test first, and where behaviour must match the C#, capture what the C# does rather
-than asserting what you think it does.
+Write the test first. Where behaviour has to match the client, capture what the client or the
+C# actually does rather than asserting what you think it does; two of the longest debugging
+sessions in this port's history came from a decoder being *stricter* than the C# about fields
+neither of them reads.
