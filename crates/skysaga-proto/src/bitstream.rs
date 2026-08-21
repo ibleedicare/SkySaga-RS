@@ -169,6 +169,14 @@ impl BitWriter {
         }
     }
 
+    /// A 64-bit value in the emulator's little-endian `WriteUInt64` form.
+    ///
+    /// `WriteBits(BitConverter.GetBytes(value), 64, true)` -- the same idiom as
+    /// [`Self::write_bits_le`], widened. Not big-endian like [`Self::write_u32`].
+    pub fn write_u64_le(&mut self, value: u64) {
+        self.write_bits(&value.to_le_bytes(), 64);
+    }
+
     /// Pad with zero bits up to the next byte boundary.
     ///
     /// RakNet does this by advancing its bit counter; the bits it skips are zero because the
@@ -379,6 +387,17 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// The inverse of [`BitWriter::write_u64_le`].
+    pub fn read_u64_le(&mut self) -> Result<u64, BitError> {
+        let mut bytes = [0u8; 8];
+
+        for byte in &mut bytes {
+            *byte = self.read_u8()?;
+        }
+
+        Ok(u64::from_le_bytes(bytes))
     }
 
     /// Skip to the next byte boundary. The inverse of [`BitWriter::align_to_byte`].

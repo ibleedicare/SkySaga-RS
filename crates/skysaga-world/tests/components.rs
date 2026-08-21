@@ -1,0 +1,165 @@
+//! Components, against the payloads the C# server actually sent.
+//!
+//! The check that matters is byte equality with a captured `EntityAdd` payload. A weaker one
+//! comes free and is worth asserting separately: the widths must *add up* to the payload size
+//! the capture recorded, which catches a wrong width even when two errors would cancel out in
+//! the bytes.
+
+use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
+use skysaga_proto::packets::{EntityAdd, SyncData};
+use skysaga_world::{default_entities_path, EntityDefinitions, TimeOfDayComponent};
+
+const CAPTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skysaga-proto/tests/fixtures/handshake.tsv"
+);
+
+/// Every captured `EntityAdd`, decoded.
+fn captured_entities() -> Vec<EntityAdd> {
+    let text = std::fs::read_to_string(CAPTURE).expect("capture");
+
+    text.lines()
+        .filter(|line| line.starts_with("server_234_"))
+        .map(|line| {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let bytes: Vec<u8> = (0..fields[2].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&fields[2][i..i + 2], 16).unwrap())
+                .collect();
+
+            let mut reader = BitReader::from_bytes(&bytes);
+            let id = reader.read_packet_id().unwrap();
+
+            assert_eq!(id + ID_USER_PACKET_ENUM, 234);
+
+            EntityAdd::decode(&mut reader).expect("EntityAdd decodes")
+        })
+        .collect()
+}
+
+fn definitions() -> EntityDefinitions {
+    EntityDefinitions::load(default_entities_path()).expect("Entities.json")
+}
+
+/// The captured sync body for a named entity type.
+fn sync_data_for(name: &str) -> SyncData {
+    let definitions = definitions();
+    let definition = definitions.get(name).expect("entity is defined");
+
+    let entity = captured_entities()
+        .into_iter()
+        .find(|packet| packet.name_hash == Some(definition.name_hash()))
+        .unwrap_or_else(|| panic!("{name} was not in the capture"));
+
+    let mut reader = BitReader::new(entity.sync_data.bytes(), entity.sync_data.len());
+
+    SyncData::decode(&mut reader, definition.synced_parameter_count()).expect("sync data")
+}
+
+// --- TimeOfDay ---------------------------------------------------------------------------------
+
+/// Every one of its six parameters is synced, so the payload is the whole component.
+#[test]
+fn the_captured_time_of_day_syncs_every_parameter() {
+    let definitions = definitions();
+    let definition = definitions.get("TimeOfDay").unwrap();
+    let sync = sync_data_for("TimeOfDay");
+
+    assert_eq!(definition.synced_parameter_count(), 6);
+    assert_eq!(sync.present_indices().count(), 6, "all six are present");
+}
+
+/// The widths add up to the observed payload size. Independent of byte comparison: two
+/// compensating width errors would still produce the right total only by coincidence.
+#[test]
+fn the_time_of_day_widths_account_for_the_payload_exactly() {
+    let sync = sync_data_for("TimeOfDay");
+
+    assert_eq!(TimeOfDayComponent::SYNCED_BITS, 123);
+    assert_eq!(
+        sync.parameters.len(),
+        TimeOfDayComponent::SYNCED_BITS,
+        "the C# payload is exactly the six declared widths",
+    );
+}
+
+/// The real check: decode the captured payload and re-encode it byte for byte.
+#[test]
+fn the_captured_time_of_day_round_trips() {
+    let sync = sync_data_for("TimeOfDay");
+
+    let mut reader = BitReader::new(sync.parameters.bytes(), sync.parameters.len());
+
+    let component = TimeOfDayComponent::decode_all(&mut reader).expect("decodes");
+
+    assert_eq!(reader.bits_remaining(), 0, "the payload is fully consumed");
+
+    let mut writer = BitWriter::new();
+    component.encode_all(&mut writer);
+
+    assert_eq!(writer.bits_used(), sync.parameters.len());
+    assert_eq!(
+        hex(writer.as_bytes()),
+        hex(sync.parameters.bytes()),
+        "re-encoded TimeOfDay differs from the C#'s",
+    );
+}
+
+/// The decoded values have to be plausible, not merely round-trippable.
+#[test]
+fn the_captured_time_of_day_decodes_to_plausible_values() {
+    let sync = sync_data_for("TimeOfDay");
+    let mut reader = BitReader::new(sync.parameters.bytes(), sync.parameters.len());
+
+    let component = TimeOfDayComponent::decode_all(&mut reader).unwrap();
+
+    // Each field is a ranged integer and must sit inside its declared maximum, or the width
+    // is wrong and the surplus bits belong to the next field.
+    assert!(component.day_night_cycle_duration <= 1920, "{component:?}");
+    assert!(component.start_time_of_day <= 0x1_0000, "{component:?}");
+    assert!(component.time_of_day_offset <= 0x1_0000, "{component:?}");
+    assert!(component.time_stretch <= 8128, "{component:?}");
+}
+
+/// Dispatch is by name, case-insensitively, and an unknown parameter writes nothing.
+///
+/// That last part is load-bearing: "wrote nothing" is what clears the flag bit, so a
+/// component that accidentally accepted an unknown name would corrupt the whole packet.
+#[test]
+fn sync_dispatches_by_name_and_declines_unknowns() {
+    let component = TimeOfDayComponent::default();
+
+    let mut writer = BitWriter::new();
+
+    assert!(component.sync("TimeStretch", &mut writer), "case-insensitive");
+    assert_eq!(writer.bits_used(), 13);
+
+    let mut writer = BitWriter::new();
+
+    assert!(!component.sync("nosuchparameter", &mut writer));
+    assert_eq!(writer.bits_used(), 0, "a declined parameter writes nothing");
+}
+
+/// The component enum reports the name `Entities.json` uses, which is how a sync index finds
+/// its component.
+#[test]
+fn the_component_name_matches_the_data_file() {
+    use skysaga_world::Component;
+
+    let component = Component::TimeOfDay(TimeOfDayComponent::default());
+    let definitions = definitions();
+    let definition = definitions.get("TimeOfDay").unwrap();
+
+    assert_eq!(component.name(), "clienttimeofdaycomponent");
+
+    assert!(
+        definition
+            .synced_parameters()
+            .any(|(_, name, _)| name == component.name()),
+        "the name resolves against the entity's own parameter table",
+    );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
