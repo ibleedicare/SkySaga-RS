@@ -93,3 +93,75 @@ impl ItemSpec {
         })
     }
 }
+
+/// Width of a ranged field whose declared maximum is `max`.
+///
+/// The same rule the components use: the client's `NumBitsRequired` returns the leading-zero
+/// count, so the width is `32 - that`, which is `32 - leading_zeros(max)`.
+const fn ranged_bits(max: u32) -> u32 {
+    32 - max.leading_zeros()
+}
+
+/// The count boundary the encoding switches width at.
+///
+/// At or below this a count is 7 bits; above it, 17. The client decides which by reading the
+/// flag bit in front, so a writer that picks the wrong one desynchronises everything after it.
+const SMALL_COUNT: u32 = 64;
+
+/// The wide maximum, once a value is over [`SMALL_COUNT`].
+const LARGE_COUNT: u32 = 0x1_0000;
+
+/// What sits in one inventory slot: an item, how many, and its identity.
+///
+/// The parameter `inventoryslotdata` on `BasicInventoryItem` (sync index 2), and the payload
+/// the client reads to draw a stack in the rucksack.
+///
+/// Layout from `SkySaga.Game/Packets/Common/InventorySlotData.cs`. Three fields are still
+/// unnamed there and are kept rather than dropped: they are in the middle of the structure, so
+/// leaving them out would shift everything after them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InventorySlotData {
+    /// `CRC32` of a `geodata.json > Resources > Name`, such as `Dirt`.
+    pub name: Option<u32>,
+
+    /// How many are in the stack.
+    pub count: u32,
+
+    /// Unnamed in the C#. False in everything observed.
+    pub unknown3: bool,
+    /// Unnamed in the C#. Zero in everything observed.
+    pub unknown4: u32,
+    /// Unnamed in the C#. Zero in everything observed.
+    pub unknown5: u32,
+
+    /// This stack's own identity, so the client can tell two piles of dirt apart.
+    pub item_uuid: String,
+}
+
+impl InventorySlotData {
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_optional_u32(self.name);
+
+        Self::write_counted(writer, self.count);
+
+        writer.write_bit(self.unknown3);
+
+        Self::write_counted(writer, self.unknown4);
+
+        writer.write_bits_le(self.unknown5, ranged_bits(LARGE_COUNT));
+
+        writer.write_string(&self.item_uuid);
+    }
+
+    /// A count, and the flag saying how wide it is.
+    fn write_counted(writer: &mut BitWriter, value: u32) {
+        let large = value > SMALL_COUNT;
+
+        writer.write_bit(large);
+
+        writer.write_bits_le(
+            value,
+            ranged_bits(if large { LARGE_COUNT } else { SMALL_COUNT }),
+        );
+    }
+}

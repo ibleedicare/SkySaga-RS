@@ -133,6 +133,43 @@ impl SetClientEntity {
     }
 }
 
+/// `EntitySync` — this entity has changed.
+///
+/// The way to update an entity the client already holds. A repeat [`EntityAdd`] must not be
+/// used for that: the client destroys the entity and builds a fresh one, and every slot list
+/// still naming the old object is left holding a dangling pointer.
+///
+/// Same framing as `EntityAdd`'s payload, without the name hash or parent: the client already
+/// knows what the entity is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntitySync {
+    pub id: u32,
+    pub sync_data: Bits,
+}
+
+impl EntitySync {
+    pub const ID: u16 = 101;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+
+        writer.write_u32(self.id);
+        writer.write_bits_le(self.sync_data.len() as u32, LENGTH_BITS);
+
+        self.sync_data.encode(writer);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        let id = reader.read_u32()?;
+        let bits = reader.read_bits_le(LENGTH_BITS)? as usize;
+
+        Ok(Self {
+            id,
+            sync_data: Bits::decode(reader, bits)?,
+        })
+    }
+}
+
 /// `EntityRemoved` — this entity is gone.
 ///
 /// Sent when a player disconnects, so the others stop drawing their body. Without it the

@@ -988,3 +988,57 @@ mod reservations {
         );
     }
 }
+
+// --- admin commands ------------------------------------------------------------------------
+
+mod commands {
+    use skysaga_state::{AdminCommand, AppState, CredentialPolicy};
+
+    fn give(account: &str) -> AdminCommand {
+        AdminCommand::Give {
+            account: account.to_owned(),
+            item: "Dirt".into(),
+            count: 64,
+        }
+    }
+
+    #[test]
+    fn a_queued_command_is_taken_by_the_game_loop() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.push_command(give("Alice"));
+
+        assert_eq!(state.take_commands(), vec![give("Alice")]);
+    }
+
+    /// Taken once. A command carried out twice would give the player two stacks.
+    #[test]
+    fn commands_are_taken_only_once() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.push_command(give("Alice"));
+
+        assert_eq!(state.take_commands().len(), 1);
+        assert!(state.take_commands().is_empty());
+    }
+
+    /// In order, so two gives fill slots predictably rather than racing.
+    #[test]
+    fn commands_are_taken_in_order() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.push_command(give("Alice"));
+        state.push_command(give("Bob"));
+
+        let taken = state.take_commands();
+
+        assert_eq!(taken, vec![give("Alice"), give("Bob")]);
+    }
+
+    #[test]
+    fn an_empty_queue_yields_nothing() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        assert!(state.take_commands().is_empty());
+    }
+}

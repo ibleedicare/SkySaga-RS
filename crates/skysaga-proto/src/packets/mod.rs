@@ -22,6 +22,6 @@ pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use transfer::TransferToServer;
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
-    EntityRemoved,
+    EntityRemoved, EntitySync,
     MapDefinition, ServerInfo, SetClientEntity, SyncData,
 };

@@ -160,6 +160,12 @@ pub struct Session {
     player_entity_id: u32,
     character: CharacterProfile,
 
+    /// Entity ids of the items in this player's rucksack, by slot.
+    ///
+    /// Held per connection rather than in the world: the player body is rebuilt from the
+    /// profile, and items are given while the session runs.
+    inventory: Vec<u32>,
+
     /// Which account this connection belongs to.
     ///
     /// Claimed from the conductor's reservation when the connection arrives, because the
@@ -181,9 +187,20 @@ impl Session {
             stage: Stage::Connected,
             player_entity_id,
             character: CharacterProfile::default(),
+            inventory: Vec::new(),
             account: None,
             reported: BTreeSet::new(),
         }
+    }
+
+    /// The items this player is carrying, by entity id.
+    pub fn inventory(&self) -> &[u32] {
+        &self.inventory
+    }
+
+    /// Put an item entity into the rucksack.
+    pub fn take_item(&mut self, entity_id: u32) {
+        self.inventory.push(entity_id);
     }
 
     /// The account this connection belongs to, if one was claimed.
@@ -293,7 +310,8 @@ impl Session {
 
                 // This player's own body, under the id this connection was given, carrying
                 // the name and appearance from its profile.
-                let player = world.player_body(&self.character, self.player_entity_id);
+                let player =
+                    world.player_body(&self.character, self.player_entity_id, &self.inventory);
 
                 // This player's body goes where the world's template player sits, and the
                 // other players are appended.
