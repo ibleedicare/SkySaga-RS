@@ -203,9 +203,40 @@ Reading that list live (`tools/level-pending-b36731.py`) gives twelve loaders:
 **`w_Trees` is stuck at state 1** while the other eleven reached 2. One unfinished loader clears
 the readiness byte, and everything above follows from that.
 
-Not yet established: why `w_Trees` alone fails to finish. It reached state 1, so it *started*.
-Worth testing whether it correlates with what the map names, since the run above had
-`terrainGenerator` at the "none" sentinel (`SKYSAGA_MAPSPEC_FILL` was off).
+### Why `w_Trees` never finishes
+
+`FUN_004b6dd0` is what would move a loader from state 1 to 2. For a named loader it interns the
+name and searches a list on the loader's own world object:
+
+```c
+for (node = *(int **)(loader[0xd] + 0xb8); node; node = node[1])
+    if (node[0] && node[0][0x11] == key) { state = 2; }
+```
+
+Walking both lists in a stalled client (`tools/walk-loader-registry-b36731.py`):
+
+```text
+w_Trees          world 0x130d14d8   list +0xB8 : EMPTY (null head)   0 items   state 1
+w_ScatterAssets  world 0x130d07ec   list +0xB8 : 0x150c0500          2 items   state 2
+```
+
+**The `w_Trees` world object holds nothing**, so the lookup can never match and the loader can
+never leave state 1. Diffing the two world objects, the stalled one has `+0x48..+0x58` all set
+to 2 where the working one has 0, and its `+0x14` pointer is `0x003cecc4` against the working
+`0x123cecc4`: the same low bytes with the **high byte zeroed**, which is not a valid heap
+pointer.
+
+**This is independent of anything the server sends.** Running with every `MapSpec` slot filled
+(`SKYSAGA_MAPSPEC_FILL=1`, a real biome palette, three creature sets and a real terrain
+generator) produces a byte-identical result: `w_Trees` at 1, readiness 0, level state 2. So the
+map is not the cause, and an earlier "no change" observation about `FILL` is now confirmed
+against the loader itself rather than inferred from the client still stalling.
+
+Not established: whether the tree content is absent from this install's banks or fails to load
+from them. The bank names are not plaintext in the `.bpc` files, so grepping for `w_Trees`
+proves nothing (all twelve names return zero matches, including the eleven that load fine).
+Alpha V10 ships `ResBank_0000..0015` with no gaps, but whether sixteen is the *complete* set
+for this build is unverified, and the beta is known to be missing ten of its twenty-five.
 
 Driven past this point by hand the client behaves perfectly: it requests terrain, accepts all
 144 chunks, and reaches POPULATE_WORLD. Nothing else in the handshake is known to be broken.
