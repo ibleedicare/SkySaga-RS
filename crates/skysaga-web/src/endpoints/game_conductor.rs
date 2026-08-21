@@ -12,7 +12,7 @@ use serde::Serialize;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::Api;
+use crate::{Api, Caller};
 
 pub fn router() -> Router<Api> {
     Router::new()
@@ -64,7 +64,14 @@ struct World {
 
 /// Where to connect. `retryInMillis` is how long the client waits before asking again if the
 /// world is not ready; ours always is.
-async fn retrieve(State(api): State<Api>) -> Json<impl Serialize> {
+async fn retrieve(State(api): State<Api>, Caller(caller): Caller) -> Json<impl Serialize> {
+    // The client opens its RakNet connection immediately after this, and that connection
+    // carries no account. Recording who is about to connect is the only way the game server
+    // can tell two players apart. See `AppState::reserve_slot`.
+    if let Some(account) = &caller {
+        api.state.reserve_slot(account);
+    }
+
     let world = World {
         retry_in_millis: 5000,
         world: Uuid::new_v4(),
@@ -73,7 +80,12 @@ async fn retrieve(State(api): State<Api>) -> Json<impl Serialize> {
         server: Uuid::new_v4(),
     };
 
-    info!(ip = %world.ip, port = world.port, "handing out the game server address");
+    info!(
+        ip = %world.ip,
+        port = world.port,
+        account = caller.as_deref().unwrap_or("unknown"),
+        "handing out the game server address",
+    );
 
     Json(Wrapped { result: world })
 }
