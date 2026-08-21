@@ -60,6 +60,18 @@ impl World {
     ///
     /// Falls back to the template's defaults for anything the profile does not set, so a
     /// player who has never opened the creator still replicates a complete entity.
+    /// A player body for `profile`, under `entity_id`.
+    ///
+    /// The id is the caller's to choose: the game server allocates one per connection, which
+    /// is what lets two players exist at once.
+    pub fn player_body(&self, profile: &crate::CharacterProfile, entity_id: u32) -> EntityAdd {
+        let mut body = self.player_entity_add(profile);
+
+        body.id = entity_id;
+
+        body
+    }
+
     pub fn player_entity_add(&self, profile: &crate::CharacterProfile) -> EntityAdd {
         // A capture-built world has no template; replay what was captured.
         let Some((template, definition)) = &self.player_template else {
