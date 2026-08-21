@@ -6,6 +6,7 @@
 pub mod components;
 pub mod definitions;
 pub mod entity;
+pub mod terrain;
 
 pub use components::{
     Component, CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, HealthComponent,
@@ -14,4 +15,5 @@ pub use components::{
     TransformComponent, VoxelLink, VoxelLinkComponent,
 };
 pub use entity::Entity;
+pub use terrain::TerrainGenerator;
 pub use definitions::{default_entities_path, EntityDefinition, EntityDefinitions, LoadError};
