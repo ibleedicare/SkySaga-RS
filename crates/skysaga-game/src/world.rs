@@ -48,6 +48,26 @@ pub struct WorldConfig {
 
     /// When false the clock runs, which leaves the world dark half the time.
     pub fixed_time_of_day: bool,
+
+    /// The GeoData Adventure this world is, by name.
+    ///
+    /// The client resolves the whole world from its hash, so this is what selects the scene.
+    /// `CharacterCustomiser_Adventure` is the character creator's own world -- the deck with
+    /// banners -- whose biome is `CharacterCustomise`.
+    pub adventure: String,
+
+    /// How many voxels above the surface the player spawns.
+    ///
+    /// The creator camera sits at an offset from the player, so too little clearance puts the
+    /// camera inside terrain and the character behind it. Measured: at 3 voxels the camera is
+    /// buried in a sand bank and the character is not in frame; at 25 both the character and
+    /// the island behind it render.
+    pub spawn_clearance: i32,
+
+    /// The adventure's nested WorldType: 1 = home, 2 = quest, 3 = PVP, 5 = sandbox, and 0 for
+    /// the character customiser. Only a home world may be edited, which is what lets crafting
+    /// stations be placed.
+    pub world_type: u32,
 }
 
 impl Default for WorldConfig {
@@ -62,6 +82,9 @@ impl Default for WorldConfig {
             terrain: TerrainGenerator::default(),
             time_of_day: 65536 / 2,
             fixed_time_of_day: true,
+            spawn_clearance: 25,
+            adventure: "Home_Island_Adventure".to_owned(),
+            world_type: 1,
         }
     }
 }
@@ -169,18 +192,19 @@ impl World {
                 owner_guid: config.owner_guid.clone(),
                 owner_name: config.owner_name.clone(),
                 biome: config.biome.clone(),
-                adventure: None,
+                adventure: Some(skysaga_core::name_hash(&config.adventure)),
                 map_header_seed: 0,
-                // You own your home island; that is what lets crafting stations be placed.
-                is_home_world: true,
-                is_my_world: true,
+                // Only a home world may be edited. Items with IsLockedToHomeIsland refuse to
+                // be placed anywhere else.
+                is_home_world: config.world_type == 1,
+                is_my_world: config.world_type == 1,
                 chat_host: config.chat_host.clone(),
                 chat_port: config.chat_port,
             },
 
             map: MapDefinition {
                 size_chunks: [config.terrain.size_chunks as u32; 3],
-                biome: Some(skysaga_core::name_hash("Sky_Island")),
+                biome: Some(skysaga_core::name_hash(&config.biome)),
                 game_mode: 1,
             },
 
@@ -191,11 +215,22 @@ impl World {
     }
 }
 
+/// Position units are 1/32 of a voxel: a chunk origin is `chunkCoord * 32` voxels, and a
+/// voxel is 32 units across. Voxel coordinates must be scaled by this before they go on the
+/// wire.
+///
+/// Sending raw voxel coordinates puts an entity at 1/32 of its intended position -- for a
+/// spawn at the middle of the island, that is voxel 2, in the corner and *inside* the ground.
+/// An entity buried in terrain renders unlit, which is what a black character means.
+pub const POSITION_SCALE: u32 = 32;
+
 /// Everything the player entity replicates.
 fn player_components(config: &WorldConfig) -> Vec<Component> {
     use skysaga_world::*;
 
     let spawn = config.terrain.spawn();
+    // spawn() already includes 3 voxels of clearance; add any extra on top.
+    let spawn = (spawn.0, spawn.1 + config.spawn_clearance - 3, spawn.2);
 
     vec![
         Component::PlayerAspects(PlayerAspectsComponent {
@@ -206,7 +241,9 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             can_damage_devices: true,
             ..Default::default()
         }),
-        Component::CraftingDropSlots(CraftingDropSlotsComponent::default()),
+        // Two slots, as the C# seeds. The count is at the list's default of 2, so this takes
+        // the escape path and is not the same bits as an empty list.
+        Component::CraftingDropSlots(CraftingDropSlotsComponent { slots: vec![0, 0] }),
         Component::FeatureUnlock(FeatureUnlockComponent::default()),
         Component::Health(HealthComponent {
             half_hearts: 20,
@@ -226,7 +263,11 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             player_name: config.owner_name.clone(),
         }),
         Component::SmoothedTransform(TransformComponent {
-            position: [spawn.0 as u32, spawn.1 as u32, spawn.2 as u32],
+            position: [
+                spawn.0 as u32 * POSITION_SCALE,
+                spawn.1 as u32 * POSITION_SCALE,
+                spawn.2 as u32 * POSITION_SCALE,
+            ],
             ..Default::default()
         }),
         Component::UseEntity(UseEntityComponent::default()),

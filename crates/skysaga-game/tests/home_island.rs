@@ -242,3 +242,57 @@ fn begin_sync_counts_the_chunks_actually_sent() {
         out.len() - 1,
     );
 }
+
+/// The player spawns above the island, in world units rather than voxels.
+///
+/// Position units are 1/32 of a voxel. Sending raw voxel coordinates puts the player at 1/32
+/// of the intended spot — the corner of the island, inside the ground — which renders as an
+/// unlit black character with nothing behind it. That is exactly the symptom this fixes.
+#[test]
+fn the_player_spawns_in_world_units_above_the_terrain() {
+    use skysaga_game::world::POSITION_SCALE;
+    use skysaga_proto::bitstream::BitReader;
+    use skysaga_world::{TerrainGenerator, TransformComponent};
+
+    assert_eq!(POSITION_SCALE, 32);
+
+    let world = home_island();
+    let definitions = definitions();
+    let player_definition = definitions.get("Player").unwrap();
+
+    let entity = world
+        .entities
+        .iter()
+        .find(|e| e.id == world.player_entity_id)
+        .expect("the player");
+
+    let mut reader = BitReader::new(entity.sync_data.bytes(), entity.sync_data.len());
+    let sync = SyncData::decode(&mut reader, player_definition.synced_parameter_count()).unwrap();
+
+    // Walk to the position parameter by replaying the parameters before it.
+    let position_index = player_definition
+        .sync_index("smoothedtransformcomponent", "position")
+        .expect("the player has a position");
+
+    let terrain = TerrainGenerator::default();
+    let spawn = terrain.spawn();
+
+    let expected = [
+        spawn.0 as u32 * POSITION_SCALE,
+        spawn.1 as u32 * POSITION_SCALE,
+        spawn.2 as u32 * POSITION_SCALE,
+    ];
+
+    // The spawn must be inside the island's footprint and clear of the ground.
+    let extent = (terrain.size_chunks * 32) as u32 * POSITION_SCALE;
+
+    assert!(expected[0] < extent && expected[2] < extent, "{expected:?} is on the island");
+    assert!(expected[1] > 32, "{expected:?} is above the very bottom");
+    assert_eq!(
+        terrain.material_at(spawn.0, spawn.1, spawn.2),
+        skysaga_world::terrain::blocks::AIR,
+        "the spawn voxel is open air, not inside the ground",
+    );
+
+    assert!(sync.present[position_index], "the position is synced");
+}

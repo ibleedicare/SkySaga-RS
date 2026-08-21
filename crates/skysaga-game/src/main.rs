@@ -45,6 +45,11 @@ fn main() -> anyhow::Result<()> {
 
     let world_config = WorldConfig {
         owner_name: std::env::var("SKYSAGA_PLAYER_NAME").unwrap_or_else(|_| "Adventurer".to_owned()),
+        spawn_clearance: env_parse("SKYSAGA_SPAWN_CLEARANCE", 25),
+        adventure: std::env::var("SKYSAGA_ADVENTURE")
+            .unwrap_or_else(|_| "Home_Island_Adventure".to_owned()),
+        world_type: env_parse("SKYSAGA_WORLD_TYPE", 1),
+        biome: std::env::var("SKYSAGA_BIOME").unwrap_or_else(|_| "Desert".to_owned()),
         time_of_day: env_parse("SKYSAGA_TIME_OF_DAY", 65536 / 2),
         fixed_time_of_day: std::env::var("SKYSAGA_TIME_OF_DAY").as_deref() != Ok("cycle"),
         terrain: TerrainGenerator {
