@@ -53,6 +53,9 @@ pub struct World {
     /// not components, so there is nothing to re-encode *from*. Such a world replays the
     /// captured bytes verbatim, which is exactly what makes it usable as an oracle.
     pub player_template: Option<(Entity, EntityDefinition)>,
+
+    /// `BasicInventoryItem`, for stacks created while the server runs.
+    pub item_definition: Option<EntityDefinition>,
 }
 
 impl World {
@@ -60,6 +63,74 @@ impl World {
     ///
     /// Falls back to the template's defaults for anything the profile does not set, so a
     /// player who has never opened the creator still replicates a complete entity.
+    /// The definition for a stack of items, if the data file has one.
+    ///
+    /// Kept because an item entity is built at runtime rather than at startup, and building
+    /// one needs its definition to know which parameters to write.
+    pub fn item_definition(&self) -> Option<&EntityDefinition> {
+        self.item_definition.as_ref()
+    }
+
+    /// A player body for `profile`, under `entity_id`.
+    ///
+    /// The id is the caller's to choose: the game server allocates one per connection, which
+    /// is what lets two players exist at once.
+    pub fn player_body(
+        &self,
+        profile: &crate::CharacterProfile,
+        entity_id: u32,
+        inventory: &[u32],
+    ) -> EntityAdd {
+        self.player_entity(profile, entity_id, inventory)
+            .map(|(entity, definition)| entity.to_entity_add(definition))
+            .unwrap_or_else(|| {
+                let mut body = self.player_entity_add(profile);
+
+                body.id = entity_id;
+
+                body
+            })
+    }
+
+    /// The player entity itself, before serialisation, so it can be synced as well as added.
+    pub fn player_entity(
+        &self,
+        profile: &crate::CharacterProfile,
+        entity_id: u32,
+        inventory: &[u32],
+    ) -> Option<(Entity, &EntityDefinition)> {
+        let (template, definition) = self.player_template.as_ref()?;
+
+        let mut entity = template.clone();
+
+        entity.id = entity_id;
+
+        for component in &mut entity.components {
+            match component {
+                Component::CharacterCustomisation(customisation) => {
+                    if let Some(appearance) = &profile.appearance {
+                        customisation.customisation = appearance.clone();
+                    }
+                }
+
+                Component::PlayerName(player_name) => {
+                    if let Some(name) = &profile.name {
+                        player_name.player_name = name.clone();
+                    }
+                }
+
+                // The rucksack: entity ids of the stacks this player is carrying.
+                Component::Inventory(inv) => {
+                    inv.inventory_entity_list = inventory.to_vec();
+                }
+
+                _ => {}
+            }
+        }
+
+        Some((entity, definition))
+    }
+
     pub fn player_entity_add(&self, profile: &crate::CharacterProfile) -> EntityAdd {
         // A capture-built world has no template; replay what was captured.
         let Some((template, definition)) = &self.player_template else {
@@ -298,6 +369,7 @@ impl World {
             transfer_ip: config.public_ip.clone(),
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
+            item_definition: definitions.get("BasicInventoryItem").cloned(),
         }
     }
 }

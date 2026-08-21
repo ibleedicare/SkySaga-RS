@@ -1041,3 +1041,141 @@ mod admin {
         );
     }
 }
+
+// --- telling two clients apart -------------------------------------------------------------
+//
+// The client sends the token it was given at login back on every request, in `X-RWPVT`. That
+// is the only thing in a request that identifies which client sent it: two clients on one
+// machine share a source address, so attributing by peer gives them both the same account.
+//
+// Found by proxying a real client through socat and reading the raw bytes. The server used to
+// answer login with the literal string "tokenId", so every client echoed the same value and it
+// was useless.
+
+mod client_identity {
+    use super::*;
+
+    /// Sign in and return the token the client would echo back.
+    async fn sign_in(api: &Api, name: &str) -> String {
+        let (_, body) = api
+            .post(
+                "/api/authentication/applications/names/login",
+                json!({ "Name": name, "Password": "x" }),
+            )
+            .await;
+
+        body["result"]["tokenId"]
+            .as_str()
+            .expect("a token")
+            .to_owned()
+    }
+
+    async fn characters_as(api: &Api, token: &str) -> Value {
+        let (_, body) = api
+            .send(
+                Request::get("/api/persistent-record/characters/list")
+                    .header("X-RWPVT", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+
+        body
+    }
+
+    /// The placeholder that made this impossible: every client was handed the same string.
+    #[tokio::test]
+    async fn each_sign_in_gets_its_own_token() {
+        let api = Api::new();
+
+        let alice = sign_in(&api, "Alice").await;
+        let bob = sign_in(&api, "Bob").await;
+
+        assert_ne!(alice, bob, "two clients must not share a token");
+        assert_ne!(alice, "tokenId", "the placeholder token is not usable");
+    }
+
+    /// The whole point: two clients on one address, each seeing their own character.
+    #[tokio::test]
+    async fn two_clients_see_their_own_characters() {
+        let api = Api::new();
+
+        let alice = sign_in(&api, "Alice").await;
+        let bob = sign_in(&api, "Bob").await;
+
+        api.state.create_character("Alice", Some("Rowan")).unwrap();
+        api.state.set_home_biome("Alice", "Sky_Island").unwrap();
+        api.state.create_character("Bob", Some("Sage")).unwrap();
+        api.state.set_home_biome("Bob", "Sky_Island").unwrap();
+
+        let seen_by_alice = characters_as(&api, &alice).await;
+        let seen_by_bob = characters_as(&api, &bob).await;
+
+        assert_eq!(seen_by_alice["result"]["characters"][0]["name"], "Rowan");
+        assert_eq!(seen_by_bob["result"]["characters"][0]["name"], "Sage");
+    }
+
+    /// Bob signing in after Alice must not take Alice's session over, which is exactly what
+    /// happened when requests were attributed by address.
+    #[tokio::test]
+    async fn a_later_sign_in_does_not_take_over_an_earlier_one() {
+        let api = Api::new();
+
+        let alice = sign_in(&api, "Alice").await;
+        api.state.create_character("Alice", Some("Rowan")).unwrap();
+
+        // Bob arrives afterwards, from the same address.
+        let _bob = sign_in(&api, "Bob").await;
+
+        let seen_by_alice = characters_as(&api, &alice).await;
+
+        assert_eq!(
+            seen_by_alice["result"]["characters"][0]["name"], "Rowan",
+            "Alice must still be Alice after Bob signs in",
+        );
+    }
+
+    /// An unknown token falls back rather than failing: the game server asks over HTTP without
+    /// one, and several endpoints are reached before any login happens.
+    #[tokio::test]
+    async fn an_unknown_token_falls_back_to_the_peer() {
+        let api = Api::new();
+
+        sign_in(&api, "Alice").await;
+        api.state.create_character("Alice", Some("Rowan")).unwrap();
+
+        let seen = characters_as(&api, "not-a-real-token").await;
+
+        assert_eq!(seen["result"]["characters"][0]["name"], "Rowan");
+    }
+
+    /// No header at all behaves as before.
+    #[tokio::test]
+    async fn a_request_without_the_header_still_resolves() {
+        let api = Api::new();
+
+        sign_in(&api, "Alice").await;
+        api.state.create_character("Alice", Some("Rowan")).unwrap();
+
+        let (_, body) = api.get("/api/persistent-record/characters/list").await;
+
+        assert_eq!(body["result"]["characters"][0]["name"], "Rowan");
+    }
+
+    /// The 2017 builds sign in through sgauth, so that path must issue a real token too.
+    #[tokio::test]
+    async fn the_sgauth_login_also_issues_a_token() {
+        let api = Api::new();
+
+        let (_, body) = api
+            .post(
+                "/api/authentication/sgauth/_login",
+                json!({ "Token": "Alice" }),
+            )
+            .await;
+
+        let token = body["result"]["token"]["tokenId"].as_str().expect("a token");
+
+        assert_ne!(token, "tokenId", "sgauth must issue a real token too");
+    }
+}

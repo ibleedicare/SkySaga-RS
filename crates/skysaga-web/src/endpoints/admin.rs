@@ -15,10 +15,10 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
-use skysaga_state::PlayerSummary;
+use serde::{Deserialize, Serialize};
+use skysaga_state::{AdminCommand, PlayerSummary};
 
 use crate::Api;
 
@@ -35,6 +35,7 @@ pub fn router(token: Option<&str>) -> Router<Api> {
         .route("/admin/players", get(players))
         .route("/admin/world", get(world))
         .route("/admin/inventory/{account}", get(inventory))
+        .route("/admin/give", post(give))
 }
 
 /// Whether a request may use the admin API.
@@ -162,6 +163,54 @@ async fn inventory(
         account: player.account.clone(),
         slots: player.inventory_slots,
         items: player.inventory_items.clone(),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Give {
+    /// Who to give it to.
+    account: String,
+    /// A `geodata.json > Resources > Name`, such as `Dirt`.
+    item: String,
+    #[serde(default = "one")]
+    count: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+#[derive(Debug, Serialize)]
+struct Queued {
+    queued: bool,
+    account: String,
+    item: String,
+    count: u32,
+}
+
+/// Put items in a player's rucksack.
+///
+/// Queued rather than done here. The world belongs to the game server's thread and nothing
+/// else may touch it, so this returns as soon as the request is recorded and the game loop
+/// carries it out within a tick. A player who is not connected is not an error at this layer:
+/// the game loop says so in the log, because only it knows who is connected.
+async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    api.state.push_command(AdminCommand::Give {
+        account: give.account.clone(),
+        item: give.item.clone(),
+        count: give.count,
+    });
+
+    Json(Queued {
+        queued: true,
+        account: give.account,
+        item: give.item,
+        count: give.count,
     })
     .into_response()
 }

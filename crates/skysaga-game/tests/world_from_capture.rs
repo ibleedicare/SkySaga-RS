@@ -123,6 +123,7 @@ pub fn world_from_capture() -> World {
         // re-encode from. The captured bytes are replayed verbatim -- which is the whole
         // point of this world: it is the oracle, and must not be re-derived.
         player_template: None,
+        item_definition: None,
     }
 }
 
