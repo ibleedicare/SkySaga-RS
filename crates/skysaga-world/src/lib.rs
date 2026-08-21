@@ -10,7 +10,7 @@ pub mod terrain;
 
 pub use components::{
     CharacterCustomisationComponent, Component, CraftingDropSlotsComponent, Currency,
-    FeatureUnlockComponent, HealthComponent,
+    FeatureUnlockComponent, HealthComponent, InventoryItemComponent,
     MailBoxComponent, MailItem, PlayerAspectsComponent, UseEntityComponent, WalletComponent, InteractionComponent, InventoryComponent, OwnerComponent,
     PhysicsComponent, PickupComponent, PlayerNameComponent, TimeOfDayComponent,
     TransformComponent, VoxelLink, VoxelLinkComponent,

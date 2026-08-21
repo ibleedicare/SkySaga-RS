@@ -8,8 +8,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use raknet::{message_id, Guid, Peer};
-use skysaga_proto::packets::{EntityAdd, EntityRemoved};
-use skysaga_state::{AppState, PlayerSummary, ServerSnapshot, WorldSummary};
+use skysaga_proto::bitstream::BitWriter;
+use skysaga_proto::packets::{Bits, EntityAdd, EntityRemoved, EntitySync};
+use skysaga_proto::types::InventorySlotData;
+use skysaga_world::{Component, Entity, InventoryItemComponent};
+use skysaga_state::{AdminCommand, AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
 use crate::{encode, ClientPacket, Session, World};
@@ -135,6 +138,11 @@ impl GameServer {
     pub fn tick(&mut self) {
         self.drain();
 
+        // Admin requests, which may only be carried out here: the world is this thread's.
+        for command in self.state.take_commands() {
+            self.apply(command);
+        }
+
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
     }
@@ -172,7 +180,7 @@ impl GameServer {
                     // world as the character they created rather than as the defaults.
                     session.restore(Self::stored_profile(&self.state, account.as_deref()));
 
-                    let body = self.world.player_body(session.character(), entity_id);
+                    let body = self.world.player_body(session.character(), entity_id, &[]);
 
                     self.sessions.insert(guid, session);
                     self.bodies.insert(guid, body.clone());
@@ -237,6 +245,7 @@ impl GameServer {
 
                     let profile = session.character().clone();
                     let account = session.account().map(str::to_owned);
+                    let inventory = session.inventory().to_vec();
 
                     if transferring {
                         if let Some(account) = &account {
@@ -248,7 +257,7 @@ impl GameServer {
                     // has just changed. Rebuilding it here keeps them from seeing whatever
                     // this player looked like when they first connected.
                     if let Some(body) = self.bodies.get_mut(&guid) {
-                        *body = self.world.player_body(&profile, body.id);
+                        *body = self.world.player_body(&profile, body.id, &inventory);
                     }
 
                     // Movement is not interpreted, only passed on: the sender has already
@@ -321,6 +330,95 @@ impl GameServer {
         }
     }
 
+    /// Carry out an admin request.
+    fn apply(&mut self, command: AdminCommand) {
+        match command {
+            AdminCommand::Give {
+                account,
+                item,
+                count,
+            } => self.give(&account, &item, count),
+        }
+    }
+
+    /// Put a stack of `item` into a player's rucksack.
+    ///
+    /// Follows the C#: create an entity for the stack, announce it, then point a free slot at
+    /// its id. The order matters -- the client must know the entity before a slot references
+    /// it, or the slot points at nothing.
+    ///
+    /// The item name is hashed rather than looked up. `geodata.json` holds the resource table
+    /// and this server does not read it yet, so an unknown name produces a stack the client
+    /// cannot draw instead of an error here. That is the one thing this is worse at than the
+    /// C#, which refuses `unknown item 'x'`.
+    fn give(&mut self, account: &str, item: &str, count: u32) {
+        let Some((guid, entity_id)) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, session)| (*guid, session.player_entity_id()))
+        else {
+            warn!(%account, "cannot give: that player is not connected");
+
+            return;
+        };
+
+        let item_entity = self.next_entity_id;
+        self.next_entity_id += 1;
+
+        let Some(definition) = self.world.item_definition() else {
+            warn!("cannot give: BasicInventoryItem is not defined");
+
+            return;
+        };
+
+        let stack = Entity::new(
+            item_entity,
+            vec![Component::InventoryItem(InventoryItemComponent {
+                slot_data: InventorySlotData {
+                    name: Some(skysaga_core::name_hash(item)),
+                    count,
+                    item_uuid: uuid::Uuid::new_v4().to_string(),
+                    ..Default::default()
+                },
+            })],
+        );
+
+        let add = stack.to_entity_add(definition);
+
+        self.peer.send(guid, &encode(|w| add.encode(w)));
+
+        // Now the slot can point at it.
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        session.take_item(item_entity);
+
+        let profile = session.character().clone();
+        let inventory = session.inventory().to_vec();
+
+        // EntitySync, never a repeat EntityAdd. A second EntityAdd for an id the client holds
+        // makes it destroy the entity and build a fresh one, leaving every slot list that
+        // still names the old object holding a dangling pointer.
+        if let Some((entity, definition)) =
+            self.world.player_entity(&profile, entity_id, &inventory)
+        {
+            let mut payload = BitWriter::new();
+
+            entity.sync_data(definition).encode(&mut payload);
+
+            let sync = EntitySync {
+                id: entity_id,
+                sync_data: Bits::from_writer(&payload),
+            };
+
+            self.peer.send(guid, &encode(|w| sync.encode(w)));
+        }
+
+        info!(%account, %item, count, entity = item_entity, "gave an item");
+    }
+
     /// Send to every connection except `from`.
     ///
     /// Used for the things other players need to know: someone arrived, someone left, someone
@@ -342,25 +440,27 @@ impl GameServer {
             .sessions
             .values()
             .map(|session| {
-                let inventory = self
+                // How many slots the rucksack has comes from the template, since every player
+                // starts with the same one. What is *in* it comes from the session: items are
+                // given while the session runs, and the template never changes.
+                let slots = self
                     .world
                     .player_template
                     .as_ref()
                     .and_then(|(entity, _)| entity.component("clientinventorycomponent"))
                     .and_then(|component| match component {
-                        skysaga_world::Component::Inventory(inventory) => Some(inventory),
+                        Component::Inventory(inventory) => Some(inventory.max_inventory_slots),
                         _ => None,
-                    });
+                    })
+                    .unwrap_or(0);
 
                 PlayerSummary {
                     account: session.account().map(str::to_owned),
                     character: session.character().name.clone(),
                     entity_id: session.player_entity_id(),
                     stage: format!("{:?}", session.stage()),
-                    inventory_slots: inventory.map(|i| i.max_inventory_slots).unwrap_or(0),
-                    inventory_items: inventory
-                        .map(|i| i.inventory_entity_list.clone())
-                        .unwrap_or_default(),
+                    inventory_slots: slots,
+                    inventory_items: session.inventory().to_vec(),
                 }
             })
             .collect();

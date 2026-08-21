@@ -113,3 +113,72 @@ fn an_absent_value_shows_a_dash() {
     assert_eq!(or_dash(None), "-");
     assert_eq!(or_dash(Some("Rowan")), "Rowan");
 }
+
+// --- give ------------------------------------------------------------------------------------
+
+#[test]
+fn give_parses_with_a_count() {
+    assert_eq!(
+        parse(&args(&["give", "Alice", "dirt", "64"])),
+        Ok(Command::Give {
+            account: "Alice".into(),
+            item: "dirt".into(),
+            count: 64,
+        }),
+    );
+}
+
+/// `give Alice dirt` is a reasonable thing to type, so a missing count means one rather than
+/// an error.
+#[test]
+fn give_without_a_count_means_one() {
+    assert_eq!(
+        parse(&args(&["give", "Alice", "dirt"])),
+        Ok(Command::Give {
+            account: "Alice".into(),
+            item: "dirt".into(),
+            count: 1,
+        }),
+    );
+}
+
+#[test]
+fn give_needs_a_player_and_an_item() {
+    for incomplete in [vec!["give"], vec!["give", "Alice"]] {
+        assert_eq!(
+            parse(&args(&incomplete)),
+            Err(ParseError::MissingArgument {
+                command: "give".into(),
+                expected: "player and item".into(),
+            }),
+            "{incomplete:?} should be refused",
+        );
+    }
+}
+
+/// A count that is not a number falls back rather than failing, so a typo does not stop the
+/// command; the player gets one instead of none.
+#[test]
+fn an_unreadable_count_falls_back_to_one() {
+    assert_eq!(
+        parse(&args(&["give", "Alice", "dirt", "lots"])),
+        Ok(Command::Give {
+            account: "Alice".into(),
+            item: "dirt".into(),
+            count: 1,
+        }),
+    );
+}
+
+#[test]
+fn give_posts_to_its_own_path() {
+    let give = Command::Give {
+        account: "Alice".into(),
+        item: "dirt".into(),
+        count: 64,
+    };
+
+    assert_eq!(give.path(), "/admin/give");
+    assert!(give.is_write(), "give changes something");
+    assert!(!Command::Players.is_write(), "players only reads");
+}

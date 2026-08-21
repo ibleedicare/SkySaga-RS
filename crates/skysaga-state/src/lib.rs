@@ -138,6 +138,9 @@ struct Inner {
     /// Accounts that have asked the conductor where to connect and have not connected yet.
     /// See [`AppState::reserve_slot`].
     reservations: VecDeque<String>,
+
+    /// Admin requests the game loop has not carried out yet. See [`AdminCommand`].
+    commands: VecDeque<AdminCommand>,
 }
 
 /// One account and the character it owns, for loading and storing.
@@ -211,6 +214,22 @@ pub struct PlayerSummary {
     pub inventory_slots: u8,
     /// Entity ids of the items held. Empty until something gives the player items.
     pub inventory_items: Vec<u32>,
+}
+
+/// Something an administrator asked for, waiting to be carried out.
+///
+/// The world lives on the game server's thread and nothing else may touch it, so an admin
+/// request is queued rather than applied: the web handler pushes, the game loop drains. The
+/// mirror of [`ServerSnapshot`], which goes the other way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminCommand {
+    /// Put `count` of `item` into a player's rucksack.
+    Give {
+        account: String,
+        /// A `geodata.json > Resources > Name`, such as `Dirt`.
+        item: String,
+        count: u32,
+    },
 }
 
 /// Somewhere for changes to go.
@@ -454,6 +473,22 @@ impl AppState {
         }
 
         self.create_character(account, None)
+    }
+
+    /// Ask the game loop to do something.
+    ///
+    /// Queued rather than done here: the world belongs to the game server's thread. The
+    /// request is carried out within a tick, so a command line returns before the effect is
+    /// visible, and that is the honest cost of not letting anything else touch the world.
+    pub fn push_command(&self, command: AdminCommand) {
+        self.write().commands.push_back(command);
+    }
+
+    /// Take everything queued, leaving the queue empty.
+    ///
+    /// Called by the game loop once a tick.
+    pub fn take_commands(&self) -> Vec<AdminCommand> {
+        self.write().commands.drain(..).collect()
     }
 
     /// Record that `account` is about to open a game connection.
