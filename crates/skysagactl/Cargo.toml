@@ -1,0 +1,23 @@
+[package]
+name = "skysagactl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "skysagactl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Plain HTTP to localhost. TLS is deliberately off: it would pull in a whole stack for a tool
+# that talks to a server on the same machine, and the token is already a shared secret over
+# plain HTTP rather than something pretending to be secure.
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use raknet::{message_id, Guid, Peer};
-use skysaga_state::AppState;
+use skysaga_state::{AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
 use crate::{ClientPacket, Session, World};
@@ -100,6 +100,13 @@ impl GameServer {
     /// **Drains until empty.** The C# takes one packet per 30 ms tick, which caps that whole
     /// server at about 33 packets a second and is the documented cause of its interact lag.
     pub fn tick(&mut self) {
+        self.drain();
+
+        // After draining, so a client that connected this tick is already visible.
+        self.publish_snapshot();
+    }
+
+    fn drain(&mut self) {
         while let Some(packet) = self.peer.receive() {
             let guid = packet.guid();
             let id = packet.message_id();
@@ -206,6 +213,58 @@ impl GameServer {
         if let Some(appearance) = &profile.appearance {
             let _ = state.set_appearance(&account, appearance.clone());
         }
+    }
+
+    /// Publish what this server is doing, for anything that wants to look.
+    ///
+    /// Called at the end of every tick. The world and the sessions live here, on this thread,
+    /// and this is how they are made visible without letting anyone reach into them.
+    fn publish_snapshot(&self) {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let account = self
+            .state
+            .account_for_peer(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+        let players = self
+            .sessions
+            .values()
+            .map(|session| {
+                let inventory = self
+                    .world
+                    .player_template
+                    .as_ref()
+                    .and_then(|(entity, _)| entity.component("clientinventorycomponent"))
+                    .and_then(|component| match component {
+                        skysaga_world::Component::Inventory(inventory) => Some(inventory),
+                        _ => None,
+                    });
+
+                PlayerSummary {
+                    // The RakNet connection carries no account, so this is the same
+                    // most-recent-sign-in fallback the rest of the server uses: exact for one
+                    // player, approximate for several.
+                    account: account.clone(),
+                    character: session.character().name.clone(),
+                    entity_id: session.player_entity_id(),
+                    stage: format!("{:?}", session.stage()),
+                    inventory_slots: inventory.map(|i| i.max_inventory_slots).unwrap_or(0),
+                    inventory_items: inventory
+                        .map(|i| i.inventory_entity_list.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        self.state.publish_snapshot(ServerSnapshot {
+            world: WorldSummary {
+                adventure: self.world.adventure.clone(),
+                biome: self.world.server_info.biome.clone(),
+                chunks: self.world.chunks.len(),
+                entities: self.world.entities.len(),
+            },
+            players,
+        });
     }
 
     pub fn connection_count(&self) -> usize {
