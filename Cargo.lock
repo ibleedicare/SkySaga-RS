@@ -493,6 +493,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skysaga-proto"
+version = "0.1.0"
+dependencies = [
+ "skysaga-core",
+ "thiserror",
+]
+
+[[package]]
 name = "skysaga-server"
 version = "0.1.0"
 dependencies = [
@@ -510,6 +518,8 @@ dependencies = [
 name = "skysaga-state"
 version = "0.1.0"
 dependencies = [
+ "skysaga-core",
+ "skysaga-proto",
  "thiserror",
  "uuid",
 ]

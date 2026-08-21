@@ -146,3 +146,52 @@ Ports, unchanged from the C# so the existing launch scripts keep working:
 | web | 5165/tcp | https — build 36731 (`SKYSAGA_WEB_HTTPS=1`) |
 | auth | 10106/tcp | Smilegate login |
 | game | 42069/udp | RakNet |
+
+---
+
+## Addendum — `skysaga-proto` and the profile (stage 2, partial)
+
+`skysaga-proto` landed ahead of the RakNet transport, because the wire formats are pure
+functions and can be tested without one. It holds:
+
+- `bitstream` — a pure-Rust reimplementation of the subset of RakNet's `BitStream` the game
+  uses, verified byte-for-byte against the real `libRakNet.so`.
+- `customisation` — `CustomisationData`: gender, tribe, skin/eye/clothing materials and the
+  hair attachment.
+- `packets` — the character-creation packets: `SaveCharacterName` (108),
+  `CharcterCreationResponse` (109), `CreateHomeworld` (110),
+  `SetCharacterCustomisationData` (37).
+
+**`skysaga-state` depends on `skysaga-proto`** for `CustomisationData`. That is deliberate:
+a character's appearance *is* a protocol value, and defining a parallel type in `state` would
+mean converting between two identical structs at every boundary. Both crates are pure, so the
+dependency costs nothing in testability.
+
+### Generating the oracle
+
+The vectors in `crates/skysaga-proto/tests/fixtures/bitstream.tsv` come from
+`tools/bitstream-golden`, a small C# program that drives the real RakNet `BitStream` and
+prints `label<TAB>bits<TAB>hex`. Regenerate it when adding a packet:
+
+```bash
+dotnet run -c Release --project tools/bitstream-golden \
+  > crates/skysaga-proto/tests/fixtures/bitstream.tsv
+```
+
+It needs the C# tree next door and `libRakNet.so`; it is a development tool, not part of the
+server. Writing the packet's shape into that generator *first*, then making Rust reproduce its
+output, is the workflow — it is what stops the tests from merely agreeing with the Rust.
+
+### What the profile still needs
+
+The packets are implemented and tested; nothing dispatches them yet, because there is no
+RakNet transport. When one lands, wiring is:
+
+| packet | handler calls |
+|---|---|
+| `SaveCharacterName` (108) | `AppState::set_character_name`, then reply `CharacterSaved` |
+| `CreateHomeworld` (110) | `AppState::set_home_biome`, then reply `HomeworldCreated` |
+| `SetCharacterCustomisationData` (37) | `AppState::set_appearance` |
+
+All three already exist and are tested. The reply is not optional: without
+`CharacterSaved` the client's creator waits forever.

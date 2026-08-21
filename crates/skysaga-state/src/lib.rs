@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::RwLock;
 
+use skysaga_proto::customisation::CustomisationData;
 use uuid::Uuid;
 
 /// How account credentials are checked.
@@ -68,11 +69,27 @@ pub enum LoginError {
 
 /// A player's character. One per account for now; the client's UI supports a list, and this
 /// becomes a `Vec` when it needs to.
+///
+/// Only `uuid` is settled at creation time. The name, biome and appearance all arrive later,
+/// over RakNet rather than HTTP — `POST /characters/_create` really is posted with an empty
+/// body. See `documentations/character-and-appearance.md`:
+///
+/// | field | arrives in | packet |
+/// |---|---|---|
+/// | `name` | `SaveCharacterName` | 108 |
+/// | `home_biome` | `CreateHomeworld` | 110 |
+/// | `appearance` | `SetCharacterCustomisationData` | 37 |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Character {
     pub uuid: Uuid,
     pub name: String,
+
+    /// A `geodata.json > Biomes` name. Never blank: the client bounces back into the
+    /// character creator when `homeBiome` is null.
     pub home_biome: String,
+
+    /// Gender, tribe, skin/eye/clothing colours and hairstyle.
+    pub appearance: CustomisationData,
 }
 
 /// The result of a successful sign-in.
@@ -238,6 +255,7 @@ impl AppState {
                 .map(str::to_owned)
                 .unwrap_or_else(|| entry.display_name.clone()),
             home_biome: DEFAULT_HOME_BIOME.to_owned(),
+            appearance: CustomisationData::default(),
         };
 
         entry.character = Some(character.clone());
@@ -258,6 +276,83 @@ impl AppState {
         self.create_character(account, None)
     }
 
+    // --- the character profile ---------------------------------------------------------
+    //
+    // These three arrive over RakNet after the client has already connected, not over HTTP.
+    // See `documentations/character-and-appearance.md` §1 for the full sequence.
+
+    /// Apply `SaveCharacterName` (packet 108).
+    ///
+    /// The name is the one the player typed in the in-game creator. The character record
+    /// already exists by this point — `_create` made it — so this renames rather than
+    /// creates, and the uuid is unchanged.
+    pub fn set_character_name(&self, account: &str, name: &str) -> Result<Character, LoginError> {
+        self.update_character(account, |character| character.name = name.to_owned())
+    }
+
+    /// Apply `CreateHomeworld` (packet 110).
+    ///
+    /// `biome` is a `geodata.json > Biomes` name such as `"Sky_Island"`. A blank one is
+    /// refused: the client bounces straight back into the creator on a null `homeBiome`, so
+    /// storing one would strand the player in a loop. The C# hardcoded `"Desert"` forever.
+    pub fn set_home_biome(&self, account: &str, biome: &str) -> Result<Character, LoginError> {
+        if biome.trim().is_empty() {
+            return Err(LoginError::BadCredentials);
+        }
+
+        self.update_character(account, |character| character.home_biome = biome.to_owned())
+    }
+
+    /// Apply `SetCharacterCustomisationData` (packet 37).
+    pub fn set_appearance(
+        &self,
+        account: &str,
+        appearance: CustomisationData,
+    ) -> Result<Character, LoginError> {
+        self.update_character(account, move |character| character.appearance = appearance)
+    }
+
+    fn update_character(
+        &self,
+        account: &str,
+        change: impl FnOnce(&mut Character),
+    ) -> Result<Character, LoginError> {
+        let mut inner = self.write();
+
+        let character = inner
+            .accounts
+            .get_mut(&account.to_ascii_lowercase())
+            .and_then(|entry| entry.character.as_mut())
+            .ok_or(LoginError::NoSuchAccount)?;
+
+        change(character);
+
+        Ok(character.clone())
+    }
+
+    /// Validate a proposed character name, for `POST /characters/_checkname`.
+    ///
+    /// The client reads the four flags separately and maps each onto its own error message,
+    /// so all of them are reported rather than just the first failure.
+    pub fn check_character_name(&self, name: &str) -> NameCheck {
+        let taken = {
+            let inner = self.read();
+
+            inner.accounts.values().any(|account| {
+                account
+                    .character
+                    .as_ref()
+                    .is_some_and(|character| character.name.eq_ignore_ascii_case(name))
+            })
+        };
+
+        NameCheck {
+            profane: false,
+            contains_not_allowed_characters: !is_allowed_character_name(name),
+            already_exists: taken,
+        }
+    }
+
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
         self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -275,3 +370,50 @@ impl Default for AppState {
 
 /// Matches what the C# web server reported for every character.
 const DEFAULT_HOME_BIOME: &str = "Desert";
+
+/// The result of validating a proposed character name.
+///
+/// Shaped after the four booleans `FUN_0077f6e0` reads out of the `_checkname` response.
+/// Each maps onto its own message in the creator, so they are reported independently rather
+/// than collapsed into one "invalid" flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NameCheck {
+    /// Matched a banned word. Always `false` for now — the emulator has no word list, and a
+    /// bad one is worse than none.
+    pub profane: bool,
+
+    /// Contains something outside [`is_allowed_character_name`].
+    pub contains_not_allowed_characters: bool,
+
+    /// Another character already has this name, compared case-insensitively.
+    pub already_exists: bool,
+}
+
+impl NameCheck {
+    /// Every check passed.
+    pub const OK: Self = Self {
+        profane: false,
+        contains_not_allowed_characters: false,
+        already_exists: false,
+    };
+
+    pub fn is_ok(self) -> bool {
+        self == Self::OK
+    }
+}
+
+/// Longest name accepted. The client's own limit was not recovered; this is a sane bound that
+/// keeps the name inside the single length byte `WriteString` uses.
+pub const MAX_CHARACTER_NAME: usize = 32;
+
+/// Letters, digits and underscore, at least one character.
+///
+/// The client's real rule is not known — `_checkname`'s request body could not be recovered
+/// statically, and the endpoint has never been observed on the wire. This is deliberately
+/// conservative: a name the server accepts but the client cannot render is worse than a
+/// name the server needlessly refuses.
+pub fn is_allowed_character_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_CHARACTER_NAME
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}

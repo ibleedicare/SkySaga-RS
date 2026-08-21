@@ -21,6 +21,7 @@ pub fn router() -> Router<Api> {
         .route("/api/persistent-record/characters/list", get(list))
         .route("/api/persistent-record/characters/_active", get(active))
         .route("/api/persistent-record/characters/_create", post(create))
+        .route("/api/persistent-record/characters/_checkname", post(check_name))
 }
 
 #[derive(Debug, Serialize)]
@@ -196,4 +197,78 @@ async fn create(State(api): State<Api>, Peer(peer): Peer, body: String) -> Respo
 
         Err(_) => Json(ErrorEnvelope::new(NO_CHARACTER)).into_response(),
     }
+}
+
+/// `POST /api/persistent-record/characters/_checkname` — validate a proposed character name.
+///
+/// The in-game creator calls this before sending `SaveCharacterName`, and maps each of the
+/// four booleans onto its own error message (`FUN_0077f6e0`):
+///
+/// | key | creator error |
+/// |---|---|
+/// | `ok` | — proceeds and sends the name |
+/// | `profane` | 1 |
+/// | `containsNotAllowedCharacters` | 2 |
+/// | `alreadyExists` | 3 |
+///
+/// Two things about the response are load-bearing, both established in
+/// `documentations/character-and-appearance.md` §9:
+///
+/// 1. **The values must be real JSON booleans.** The client's lookup requires node type 6 and
+///    silently returns its default otherwise, so `{"ok":"true"}` reads as `false`.
+/// 2. **The envelope does not matter.** `FUN_00751120` hands the callback the `result` member
+///    when there is one and the whole document when there is not. The wrapped form is used
+///    here for consistency with every other endpoint.
+///
+/// A missing `ok` is *not* the same as `ok: false`: the client sets no error code in that
+/// case and simply waits, so the key is always present.
+async fn check_name(State(api): State<Api>, body: String) -> Json<impl Serialize> {
+    // The request body was never recovered statically -- the URL is referenced only by the
+    // RPC registration, and the endpoint has not been observed on the wire. So accept the
+    // name under any plausible spelling, and log the body to settle it from a real run.
+    let request: CheckNameRequest = serde_json::from_str(&body).unwrap_or_default();
+    let name = request.name();
+
+    let check = api.state.check_character_name(name);
+
+    info!(%name, ?check, raw = %body, "character name check");
+
+    Json(Wrapped {
+        result: NameCheckView {
+            ok: check.is_ok(),
+            profane: check.profane,
+            contains_not_allowed_characters: check.contains_not_allowed_characters,
+            already_exists: check.already_exists,
+        },
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CheckNameRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "Name")]
+    name_upper: Option<String>,
+    #[serde(default, rename = "characterName")]
+    character_name: Option<String>,
+}
+
+impl CheckNameRequest {
+    fn name(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.name_upper.as_deref())
+            .or(self.character_name.as_deref())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct NameCheckView {
+    ok: bool,
+    profane: bool,
+    #[serde(rename = "containsNotAllowedCharacters")]
+    contains_not_allowed_characters: bool,
+    #[serde(rename = "alreadyExists")]
+    already_exists: bool,
 }

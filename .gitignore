@@ -1,1 +1,5 @@
 /target
+
+# C# build output from the golden-vector generator
+bin/
+obj/

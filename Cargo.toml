@@ -13,6 +13,7 @@ skysaga-core = { path = "crates/skysaga-core" }
 skysaga-state = { path = "crates/skysaga-state" }
 skysaga-auth = { path = "crates/skysaga-auth" }
 skysaga-web = { path = "crates/skysaga-web" }
+skysaga-proto = { path = "crates/skysaga-proto" }
 
 anyhow = "1"
 axum = "0.8"

@@ -449,3 +449,140 @@ async fn a_malformed_body_does_not_500() {
 
     assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+// --- character name validation --------------------------------------------------------------
+//
+// POST /api/persistent-record/characters/_checkname. The four boolean keys were read out of
+// FUN_0077f6e0; the envelope was settled from FUN_00751120, which sets the callback's document
+// to the "result" member when there is one and to the whole body when there is not -- so both
+// shapes work, and the wrapped one is used for consistency with the rest of the API.
+// See documentations/character-and-appearance.md section 9.
+
+#[tokio::test]
+async fn checkname_accepts_a_free_name() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    let (status, body) = api
+        .post(
+            "/api/persistent-record/characters/_checkname",
+            json!({"name": "Zephyr"}),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let result = &body["result"];
+
+    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["profane"], json!(false));
+    assert_eq!(result["containsNotAllowedCharacters"], json!(false));
+    assert_eq!(result["alreadyExists"], json!(false));
+}
+
+/// The client type-checks each key and silently reads a non-boolean as `false`
+/// (`FUN_0077fea0` requires node type 6). `{"ok":"true"}` would hang the creator.
+#[tokio::test]
+async fn checkname_values_are_json_booleans_not_strings() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    let (_, body) = api
+        .post(
+            "/api/persistent-record/characters/_checkname",
+            json!({"name": "Zephyr"}),
+        )
+        .await;
+
+    for key in ["ok", "profane", "containsNotAllowedCharacters", "alreadyExists"] {
+        assert!(
+            body["result"][key].is_boolean(),
+            "{key} must be a JSON boolean, got {}",
+            body["result"][key]
+        );
+    }
+}
+
+#[tokio::test]
+async fn checkname_reports_a_name_that_is_taken() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    api.post(
+        "/api/persistent-record/characters/_create",
+        json!({"name": "Zephyr"}),
+    )
+    .await;
+
+    let (_, body) = api
+        .post(
+            "/api/persistent-record/characters/_checkname",
+            json!({"name": "Zephyr"}),
+        )
+        .await;
+
+    assert_eq!(body["result"]["alreadyExists"], json!(true));
+    assert_eq!(body["result"]["ok"], json!(false));
+}
+
+#[tokio::test]
+async fn checkname_reports_disallowed_characters() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    let (_, body) = api
+        .post(
+            "/api/persistent-record/characters/_checkname",
+            json!({"name": "Zeph yr!"}),
+        )
+        .await;
+
+    assert_eq!(body["result"]["containsNotAllowedCharacters"], json!(true));
+    assert_eq!(body["result"]["ok"], json!(false));
+}
+
+/// The request body was never recovered statically, so the handler accepts the name under any
+/// of the plausible spellings and must not 500 when it finds none of them.
+#[tokio::test]
+async fn checkname_tolerates_an_unrecognised_body() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    for body in [json!({"name": "Zephyr"}), json!({"Name": "Zephyr"}), json!({})] {
+        let (status, _) = api
+            .post("/api/persistent-record/characters/_checkname", body)
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+/// `characters/list` must report the biome the client actually chose, not a hardcoded one.
+/// The C# returned "Desert" forever (`PersistentRecordEndpoints.cs:44`).
+#[tokio::test]
+async fn character_list_reports_the_stored_home_biome() {
+    let api = Api::new();
+    api.login("Alice").await;
+    api.state.ensure_character("Alice").unwrap();
+
+    // What CreateHomeworld (packet 110) would do.
+    api.state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    let (_, body) = api.get("/api/persistent-record/characters/list").await;
+
+    assert_eq!(body["result"]["characters"][0]["homeBiome"], "Sky_Island");
+}
+
+/// Likewise the name from SaveCharacterName (packet 108).
+#[tokio::test]
+async fn character_list_reports_the_stored_name() {
+    let api = Api::new();
+    api.login("Alice").await;
+    api.state.ensure_character("Alice").unwrap();
+
+    api.state.set_character_name("Alice", "Zephyr").unwrap();
+
+    let (_, body) = api.get("/api/persistent-record/characters/list").await;
+
+    assert_eq!(body["result"]["characters"][0]["name"], "Zephyr");
+}

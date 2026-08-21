@@ -269,3 +269,175 @@ fn binding_an_unknown_account_is_ignored() {
 
     assert_eq!(state.account_for_peer(ip(1)), None);
 }
+
+// --- the character profile ---------------------------------------------------------------
+//
+// The name, home biome and appearance do not arrive over HTTP: the client sends them over
+// RakNet after connecting, as SaveCharacterName (108), CreateHomeworld (110) and
+// SetCharacterCustomisationData (37). POST /characters/_create really is posted with an empty
+// body. See documentations/character-and-appearance.md.
+
+use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
+
+#[test]
+fn a_new_character_has_the_default_appearance() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+
+    let character = state.create_character("Alice", None).unwrap();
+
+    assert_eq!(character.appearance, CustomisationData::default());
+    assert_eq!(character.home_biome, "Desert");
+}
+
+/// SaveCharacterName arrives after the character record already exists, so naming is an
+/// update to it rather than part of creation.
+#[test]
+fn the_character_can_be_renamed_after_creation() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+
+    let created = state.create_character("Alice", None).unwrap();
+    assert_eq!(created.name, "Alice");
+
+    let renamed = state.set_character_name("Alice", "Zephyr").unwrap();
+
+    assert_eq!(renamed.name, "Zephyr");
+    assert_eq!(renamed.uuid, created.uuid, "renaming keeps the same character");
+    assert_eq!(state.character("Alice").unwrap().name, "Zephyr");
+}
+
+/// CreateHomeworld carries a geodata *Biome* name. The C# hardcoded "Desert" forever.
+#[test]
+fn the_home_biome_can_be_set_from_create_homeworld() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+
+    let updated = state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    assert_eq!(updated.home_biome, "Sky_Island");
+    assert_eq!(state.character("Alice").unwrap().home_biome, "Sky_Island");
+}
+
+/// A blank biome must be refused: the client bounces back into the creator on a null
+/// homeBiome, so storing one would strand the player in a loop.
+#[test]
+fn a_blank_home_biome_is_refused() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+
+    assert!(state.set_home_biome("Alice", "").is_err());
+    assert_eq!(
+        state.character("Alice").unwrap().home_biome,
+        "Desert",
+        "the previous value survives"
+    );
+}
+
+#[test]
+fn the_appearance_can_be_set_from_the_customisation_packet() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", None).unwrap();
+
+    let appearance = CustomisationData {
+        gender: Gender::Female,
+        tribe: Some(skysaga_core::name_hash("Human")),
+        materials: vec![Some(1), Some(2), Some(3)],
+        attachments: vec![Attachment {
+            attachment: Some(4),
+            material: Some(5),
+        }],
+    };
+
+    let updated = state.set_appearance("Alice", appearance.clone()).unwrap();
+
+    assert_eq!(updated.appearance, appearance);
+    assert_eq!(state.character("Alice").unwrap().appearance.hair_colour(), Some(5));
+}
+
+#[test]
+fn profile_updates_for_an_account_with_no_character_fail() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+
+    assert!(state.set_character_name("Alice", "Zephyr").is_err());
+    assert!(state.set_home_biome("Alice", "Sky_Island").is_err());
+    assert!(state.set_appearance("Alice", CustomisationData::default()).is_err());
+}
+
+#[test]
+fn two_players_have_independent_profiles() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    for name in ["Alice", "Bob"] {
+        state.authenticate(name, "x").unwrap();
+        state.create_character(name, None).unwrap();
+    }
+
+    state.set_character_name("Alice", "Zephyr").unwrap();
+    state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    assert_eq!(state.character("Bob").unwrap().name, "Bob");
+    assert_eq!(state.character("Bob").unwrap().home_biome, "Desert");
+}
+
+// --- character name validation, for /characters/_checkname --------------------------------
+
+use skysaga_state::NameCheck;
+
+#[test]
+fn an_ordinary_name_is_accepted() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    assert_eq!(state.check_character_name("Zephyr"), NameCheck::OK);
+    assert!(state.check_character_name("Zephyr").is_ok());
+}
+
+#[test]
+fn a_name_already_in_use_is_reported() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", Some("Zephyr")).unwrap();
+
+    let check = state.check_character_name("Zephyr");
+
+    assert!(check.already_exists);
+    assert!(!check.is_ok());
+}
+
+/// Names are compared case-insensitively, or "zephyr" and "Zephyr" would both be takeable.
+#[test]
+fn the_already_exists_check_ignores_case() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+    state.authenticate("Alice", "x").unwrap();
+    state.create_character("Alice", Some("Zephyr")).unwrap();
+
+    assert!(state.check_character_name("ZEPHYR").already_exists);
+}
+
+#[test]
+fn disallowed_characters_are_reported() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    for name in ["Zeph yr", "Zephyr!", "Zeph<yr>", ""] {
+        let check = state.check_character_name(name);
+
+        assert!(
+            check.contains_not_allowed_characters,
+            "{name:?} should be rejected"
+        );
+        assert!(!check.is_ok());
+    }
+}
+
+#[test]
+fn letters_digits_and_underscore_are_allowed() {
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    for name in ["Zephyr", "Zephyr_2", "player123"] {
+        assert!(state.check_character_name(name).is_ok(), "{name:?}");
+    }
+}
