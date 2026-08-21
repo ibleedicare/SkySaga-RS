@@ -228,7 +228,7 @@ impl World {
                 //
                 // `adventure_type` and `map_file_name` stay overridable so the remaining
                 // unknowns can be bisected without a rebuild.
-                spec: MapSpec::home_island_b36731(config.terrain.seed as u32),
+                spec: map_spec_b36731(config.terrain.seed as u32),
                 adventure_type: std::env::var("SKYSAGA_MAP_ADVENTURE_TYPE").unwrap_or_default(),
                 map_file_name: std::env::var("SKYSAGA_MAP_FILENAME").unwrap_or_default(),
                 ..MapDefinition::default()
@@ -326,4 +326,42 @@ fn terrain_chunks(terrain: &TerrainGenerator) -> Vec<ChunkSync> {
     debug_assert!(CHUNK_SIZE == 32);
 
     chunks
+}
+
+/// The 2017 client's `MapSpec`, with the parts we are least sure of overridable.
+///
+/// The client stalls in its `LOAD_GAME_OBJECTS` stage: it parses the map, resolves it, stays
+/// connected, then loads objects forever without ever asking for the world. That stage runs
+/// *before* `DOWNLOAD_WORLD` in the client's own stage list, so it is not waiting for terrain,
+/// and pushing terrain early makes it disconnect instead. Whatever it cannot finish loading is
+/// named by this packet.
+///
+/// Two candidates, both switchable so one run can tell them apart without a rebuild:
+///
+/// - `SKYSAGA_MAPSPEC_FEATURE` replaces the feature name. It defaults to the adventure's
+///   `RootFeature`, `Home_Island_World`, which is the one value here we effectively invented:
+///   it appears nowhere in 36731's `GeoData.json`, which has no `Features` table at all, so the
+///   client must resolve it from resources and may never find it. Set it empty to send no name.
+/// - `SKYSAGA_MAPSPEC_FILL=1` fills the slots the adventure leaves empty with the home island's
+///   own entries instead of the "none" sentinel: region, palette, the three creature sets and
+///   the terrain generator. "None" is the faithful reading of the adventure, but a world may
+///   still need them before it can build anything.
+fn map_spec_b36731(seed: u32) -> MapSpec {
+    let mut spec = MapSpec::home_island_b36731(seed);
+
+    if let Ok(feature) = std::env::var("SKYSAGA_MAPSPEC_FEATURE") {
+        spec.searchable_string_b = feature;
+    }
+
+    if std::env::var("SKYSAGA_MAPSPEC_FILL").as_deref() == Ok("1") {
+        // Wire index is the GeoData position plus one: index 0 is the client's "none".
+        spec.searchable[1] = 1; // region              Regions[0] DesertRegion1
+        spec.searchable[4] = 23; // palette            BiomePalettes[22] _Forest_HomeIsland
+        spec.searchable[5] = 30; // featureCreatureSet
+        spec.searchable[6] = 30; // terrainCreatureSet CreatureSets[29] _HomeIsland_Desert
+        spec.searchable[7] = 30; // caveCreatureSet
+        spec.searchable[12] = 4; // terrainGenerator   TerrainGenerators[3] Desert
+    }
+
+    spec
 }
