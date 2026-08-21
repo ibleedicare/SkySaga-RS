@@ -153,3 +153,77 @@ fn the_home_island_entities_are_all_defined() {
 fn a_missing_file_is_reported() {
     assert!(EntityDefinitions::load("/nonexistent/Entities.json").is_err());
 }
+
+/// The invariant the sync mapping rests on: no synced parameter is bound by more than one
+/// component.
+///
+/// If two components bound the same synced parameter, the sync index would identify two
+/// different (component, parameter) pairs and which one won would depend on iteration order.
+/// It holds across the whole retail file today; this fails loudly if a data change breaks it,
+/// rather than letting the mapping become order-dependent.
+#[test]
+fn no_synced_parameter_is_bound_by_two_components() {
+    use std::collections::BTreeMap;
+
+    let text = std::fs::read_to_string(skysaga_world::default_entities_path()).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    let mut ambiguous = Vec::new();
+    let mut checked = 0;
+
+    for entity in file["Entities"].as_array().unwrap() {
+        let name = entity["Name"].as_str().unwrap_or("?");
+
+        let Some(components) = entity["client"]["components"].as_object() else {
+            continue;
+        };
+
+        let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+
+        for (component, body) in components {
+            let Some(bindings) = body["bindings"].as_object() else {
+                continue;
+            };
+
+            for target in bindings.values() {
+                if let Some(mapsto) = target["mapsto"].as_str() {
+                    owners.entry(mapsto).or_default().push(component);
+                }
+            }
+        }
+
+        for (parameter, mut components) in owners {
+            if !entity["parameters"][parameter]["syncindex"].is_number() {
+                continue; // unsynced: no index to fight over
+            }
+
+            checked += 1;
+
+            components.sort_unstable();
+            components.dedup();
+
+            if components.len() > 1 {
+                ambiguous.push(format!("{name}::{parameter} -> {components:?}"));
+            }
+        }
+    }
+
+    assert!(checked > 5000, "sanity: only checked {checked} bindings");
+    assert!(ambiguous.is_empty(), "ambiguous bindings: {ambiguous:#?}");
+}
+
+/// Loading twice gives the same mapping. Guards the same concern from the other side: if the
+/// resolution ever became order-dependent, repeated loads would disagree.
+#[test]
+fn loading_is_deterministic() {
+    let first = EntityDefinitions::load(skysaga_world::default_entities_path()).unwrap();
+    let second = EntityDefinitions::load(skysaga_world::default_entities_path()).unwrap();
+
+    let player_a = first.get("Player").unwrap();
+    let player_b = second.get("Player").unwrap();
+
+    let a: Vec<_> = player_a.synced_parameters().collect();
+    let b: Vec<_> = player_b.synced_parameters().collect();
+
+    assert_eq!(a, b);
+}
