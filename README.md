@@ -34,6 +34,7 @@ to obtain the game.
 crates/
   skysaga-core/     name hashing, bit maths, fixed-width strings          (pure)
   skysaga-state/    accounts, sessions, characters, photos                (pure)
+  skysaga-store/    persistence: the Store trait, and SQLite
   skysaga-proto/    packet wire formats and the RakNet BitStream codec    (pure)
   skysaga-world/    entity definitions, components, terrain generation    (pure)
   skysaga-auth/     Smilegate login                          TCP  :10106
@@ -75,6 +76,7 @@ Read by `skysaga-server`:
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
 | `SKYSAGA_DATA_DIR` | *(the C# tree)* | directory holding `Entities.json` |
+| `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
 | `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
 
@@ -82,23 +84,36 @@ Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORL
 `SKYSAGA_WORLD_SEED`, `SKYSAGA_WORLD_CHUNKS`, `SKYSAGA_SPAWN_CLEARANCE`,
 `SKYSAGA_TIME_OF_DAY`, `SKYSAGA_PLAYER_NAME`.
 
+### Persistence
+
+Accounts, characters and photos are stored in SQLite and survive a restart. The database is
+created on first run; there is nothing to set up.
+
+State is held in memory while the server runs and written down as it changes, so nothing is
+on a request path. That means a write is durable a moment after the change rather than at the
+instant of it, and a crash can lose the last few seconds. Ordering is preserved, so a delete
+never loses a race with the create before it.
+
+`skysaga-store` is built around a `Store` trait, with SQLite implemented today. PostgreSQL is
+adding one file: implement the trait, and the existing tests are the specification, because
+they are written against the trait rather than against SQLite.
+
 ### Starting character creation again
 
-Server state is in memory, so a finished character outlives every client run. Once it has a
-home biome, `characters/list` reports a *complete* character and the client skips its creator
-entirely, which looks exactly like a broken creator when nothing is wrong. To go through it
-again:
+A finished character now outlives the server, not just the client. Once it has a home biome,
+`characters/list` reports a *complete* character and the client skips its creator entirely,
+which looks exactly like a broken creator when nothing is wrong. To go through it again:
 
 ```bash
 curl -X POST 'http://127.0.0.1:5164/debug/reset-character'
 ```
 
-The account stays signed in; only the character is discarded.
+The account stays signed in; only the character is discarded, in memory and on disk.
 
 ## Tests
 
 ```bash
-cargo test --workspace          # 280 tests, no network, nothing to prepare
+cargo test --workspace          # 310 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.

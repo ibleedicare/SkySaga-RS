@@ -3,3 +3,8 @@
 # C# build output from the golden-vector generator
 bin/
 obj/
+
+# the default SQLite database
+skysaga.db
+skysaga.db-shm
+skysaga.db-wal

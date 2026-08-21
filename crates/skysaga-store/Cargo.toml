@@ -1,0 +1,22 @@
+[package]
+name = "skysaga-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+skysaga-state = { workspace = true }
+skysaga-proto = { workspace = true }
+
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+
+[lints.rust]
+unsafe_code = "forbid"
