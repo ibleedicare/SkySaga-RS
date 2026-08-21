@@ -1,0 +1,11 @@
+[package]
+name = "raknet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe wrapper over the RakNet transport. The only crate in the port that uses unsafe."
+
+[dependencies]
+raknet-sys = { workspace = true }
+thiserror = { workspace = true }

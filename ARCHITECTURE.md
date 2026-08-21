@@ -195,3 +195,71 @@ RakNet transport. When one lands, wiring is:
 
 All three already exist and are tested. The reply is not optional: without
 `CharacterSaved` the client's creator waits forever.
+
+---
+
+## Addendum — the RakNet transport
+
+Two crates, and they are the only place `unsafe` appears in the port:
+
+- `raknet-sys` — 19 `extern "C"` declarations, no code.
+- `raknet` — a safe wrapper: `Peer`, `Packet`, `Guid`, with `Drop` on both handles.
+
+### No C++ shim, after all
+
+The roadmap called for a hand-written C++ shim over SLikeNet, on the grounds that the SWIG
+wrapper carries the LP64 `long` bug (`Write< long >` is 32 bits on MSVC, 64 on Linux). Two
+things retired that plan:
+
+1. The flake already narrows `long` to `int32_t` when it builds the wrapper.
+2. **`skysaga-proto` has its own `BitStream`,** so nothing in Rust calls RakNet's. The only
+   surface used is byte-oriented send and receive, which the bug never touched.
+
+`libRakNet.so` exports 1879 unmangled `extern "C"` functions, so Rust calls them directly.
+The roadmap's ~30-function shim became 19 declarations and no build step — no C++ toolchain,
+no flake changes, nothing to keep in sync.
+
+### The one trap: SWIG overload numbering
+
+SWIG numbers overloads in declaration order, and the numbers are not guessable. Two bugs in
+one sitting, both segfaults or silent no-ops rather than compile errors:
+
+| wanted | wrong | right |
+|---|---|---|
+| `GetInternalID()` no-arg | `__SWIG_1` (takes a `SystemAddress`) | `__SWIG_2` |
+| `AddressOrGUID(RakNetGUID)` | `__SWIG_2` (takes a `SystemAddress`) | `__SWIG_4` |
+
+**Always check the generated C# in `server/Servers/SkySaga.RakNet/` before adding a binding.**
+`RakPeerInterface.cs` and friends name each overload's parameters; `RakNetPINVOKE.cs` gives
+the exact arity and types. Getting the arity wrong reads arguments off the stack.
+
+A related one: the system-identifier argument to `Send` must be a real `AddressOrGUID` even
+when broadcasting. RakNet dereferences it either way, so passing null is a segfault rather
+than an ignored argument.
+
+### Testing
+
+`crates/raknet/tests/loopback.rs` runs two real peers over loopback UDP: handshake, addressed
+send, broadcast, a 60 KB payload through RakNet's split/reassembly, and ordering. Peers bind
+port 0 so the suite never collides with a running emulator.
+
+Every test polls until the expected packet arrives rather than sleeping — RakNet works on its
+own threads. Note that a handshake has two halves: the connecting side sees
+`CONNECTION_REQUEST_ACCEPTED` slightly before the listening side sees
+`NEW_INCOMING_CONNECTION`, so a helper that waits for only the first leaves the server's
+connection table momentarily empty.
+
+### What is still missing for a game server
+
+The transport moves bytes; it does not yet run a game. Still to write:
+
+- a connection registry mapping `Guid` to player state,
+- a tick loop that **drains** `receive()` until empty (the C# takes one packet per 30 ms tick,
+  a ~33 packet/s ceiling for the entire server),
+- the inbound dispatch `match` on `PacketId`,
+- the handshake packets (`ServerInfo`, `MapDefinition`, `ChunkSync`, `EntityAdd`, …).
+
+The character-creation handlers are ready and tested and need only dispatching:
+`SaveCharacterName` → `set_character_name` → reply `CharacterSaved`;
+`CreateHomeworld` → `set_home_biome` → reply `HomeworldCreated`;
+`SetCharacterCustomisationData` → `set_appearance`.
