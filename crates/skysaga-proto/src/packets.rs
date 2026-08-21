@@ -109,12 +109,12 @@ impl CharacterCreationResponse {
     /// Writes the packet id as well — this one is only ever sent standalone.
     pub fn encode(self, writer: &mut BitWriter) {
         writer.write_packet_id(Self::ID);
-        writer.write_uint(self.value(), RESPONSE_BITS);
+        writer.write_bits_le(self.value(), RESPONSE_BITS);
     }
 
     /// Decodes the body; the caller has already read the id.
     pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
-        Ok(match reader.read_uint(RESPONSE_BITS)? {
+        Ok(match reader.read_bits_le(RESPONSE_BITS)? {
             0 => Self::CharacterSaved,
             1 => Self::CharacterSaveFailed,
             2 => Self::HomeworldCreated,
@@ -138,13 +138,13 @@ impl SetCharacterCustomisationData {
     pub const ID: u16 = 37;
 
     pub fn encode(&self, writer: &mut BitWriter) {
-        writer.write_uint(self.entity_id, 32);
+        writer.write_u32(self.entity_id);
         self.customisation.encode(writer);
     }
 
     pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
         Ok(Self {
-            entity_id: reader.read_uint(32)?,
+            entity_id: reader.read_u32()?,
             customisation: CustomisationData::decode(reader)?,
         })
     }

@@ -78,7 +78,7 @@ static void WriteOptionalUInt(BitStream bitStream, uint? value)
     bitStream.Write(value.HasValue);
 
     if (value.HasValue)
-        bitStream.WriteBits(BitConverter.GetBytes(value.Value), 32, true);
+        bitStream.Write((int)value.Value);
 }
 
 // A list with a zero-bit count field: the count is implicit, one escape bit says whether it
@@ -93,7 +93,7 @@ static void WriteCountOptimisedList(BitStream bitStream, int count, int defaultC
     else
     {
         bitStream.Write1();
-        bitStream.WriteBits(BitConverter.GetBytes(count), 32, true);
+        bitStream.Write(count);
     }
 
     write();
@@ -131,6 +131,17 @@ foreach (var (width, value) in new[]
 // Misaligned, so the shifting path is exercised rather than the fast path.
 Dump("bit_then_write_bits_3_5", bs => { bs.Write1(); bs.WriteBits(BitConverter.GetBytes(5), 3, true); });
 Dump("bit_then_write_bits_32_7", bs => { bs.Write1(); bs.WriteBits(BitConverter.GetBytes(7), 32, true); });
+
+// RakNet's own Write<T>, which is NOT the same as WriteBits(GetBytes(v), 32, true): it
+// byte-swaps to network order. The client uses this form for every 32-bit field, verified by
+// decoding a live SetCharacterCustomisationData capture -- big-endian resolves all six ids to
+// real geodata names, little-endian resolves none. The emulator's WriteBits idiom is the
+// odd one out and is only correct for widths under 8, where byte order cannot show.
+Dump("write_u32_native_7", bs => bs.Write(7));
+Dump("write_u32_native_12", bs => bs.Write(12));
+Dump("write_u32_native_0x12345678", bs => bs.Write(0x12345678));
+Dump("write_u32_native_crc_human", bs => bs.Write(unchecked((int)1319509738u)));
+Dump("bit_then_write_u32_native_7", bs => { bs.Write1(); bs.Write(7); });
 
 // --- strings ------------------------------------------------------------------------------
 
@@ -188,7 +199,7 @@ foreach (var response in new[] { 0, 1, 2, 3 })
 Dump("packet_set_character_customisation", bs =>
 {
     WritePacketId(bs, 37);
-    bs.WriteBits(BitConverter.GetBytes(4242), 32, true);          // entityID
+    bs.Write(4242);                                              // entityID
 
     bs.WriteBits(BitConverter.GetBytes(1), 2, true);              // gender = Female
     WriteOptionalUInt(bs, 1319509738);                            // tribe = Human
@@ -211,7 +222,7 @@ Dump("packet_set_character_customisation", bs =>
 Dump("packet_set_character_customisation_empty", bs =>
 {
     WritePacketId(bs, 37);
-    bs.WriteBits(BitConverter.GetBytes(0), 32, true);
+    bs.Write(0);                                                 // entityID
 
     bs.WriteBits(BitConverter.GetBytes(0), 2, true);
     WriteOptionalUInt(bs, null);

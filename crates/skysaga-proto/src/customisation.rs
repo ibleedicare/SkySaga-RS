@@ -56,11 +56,11 @@ impl Gender {
     }
 
     pub fn encode(self, writer: &mut BitWriter) {
-        writer.write_uint(self.value(), GENDER_BITS);
+        writer.write_bits_le(self.value(), GENDER_BITS);
     }
 
     pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
-        Ok(match reader.read_uint(GENDER_BITS)? {
+        Ok(match reader.read_bits_le(GENDER_BITS)? {
             0 => Self::Male,
             1 => Self::Female,
             other => Self::Unknown(other),
@@ -226,13 +226,13 @@ fn write_count(writer: &mut BitWriter, count: usize, default: usize) {
         writer.write_bit(false);
     } else {
         writer.write_bit(true);
-        writer.write_uint(count as u32, 32);
+        writer.write_u32(count as u32);
     }
 }
 
 fn read_count(reader: &mut BitReader, default: usize) -> Result<usize, BitError> {
     if reader.read_bit()? {
-        Ok(reader.read_uint(32)? as usize)
+        Ok(reader.read_u32()? as usize)
     } else {
         Ok(default)
     }

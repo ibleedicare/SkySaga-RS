@@ -34,8 +34,10 @@ struct Wrapped<T> {
 struct CharacterView {
     uuid: Uuid,
     name: String,
+    /// Serialised as JSON `null` until CreateHomeworld sets it -- that null is the client's
+    /// cue to run its character creator.
     #[serde(rename = "homeBiome")]
-    home_biome: String,
+    home_biome: Option<String>,
     #[serde(rename = "positionInList")]
     position_in_list: u32,
 }

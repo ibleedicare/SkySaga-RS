@@ -280,6 +280,12 @@ async fn creating_a_character_then_listing_it_matches_the_captures() {
     let uuid = created["result"]["characterUUID"].as_str().unwrap().to_owned();
     assert_ne!(uuid, "00000000-0000-0000-0000-000000000000");
 
+    // A deliberate divergence from the C# capture, which reports "Desert" here. At this point
+    // the client has not sent CreateHomeworld, so there is no biome to report and the value is
+    // null -- see `a_character_with_no_biome_yet_is_reported_as_null` for why that matters.
+    // Completing creation is what makes the response match the capture again.
+    api.state.set_home_biome("Alice", "Desert").unwrap();
+
     let (status, listed) = api.get("/api/persistent-record/characters/list").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -585,4 +591,38 @@ async fn character_list_reports_the_stored_name() {
     let (_, body) = api.get("/api/persistent-record/characters/list").await;
 
     assert_eq!(body["result"]["characters"][0]["name"], "Zephyr");
+}
+
+/// The cue that sends the client into its character creator.
+///
+/// A freshly `_create`d character has no biome yet — the biome arrives later, in
+/// `CreateHomeworld` (packet 110). `characters/list` must report that as a JSON `null`,
+/// because a non-null `homeBiome` tells the client the character is finished and it drops
+/// straight into the world without ever running the creator. Observed directly: with
+/// `"Desert"` hardcoded, the client posted `_create` and was in-world about six seconds
+/// later, never calling `_checkname` and never sending `SaveCharacterName`.
+#[tokio::test]
+async fn a_character_with_no_biome_yet_is_reported_as_null() {
+    let api = Api::new();
+    api.login("Alice").await;
+
+    api.post("/api/persistent-record/characters/_create", json!({}))
+        .await;
+
+    let (_, body) = api.get("/api/persistent-record/characters/list").await;
+
+    let character = &body["result"]["characters"][0];
+
+    assert!(
+        character["homeBiome"].is_null(),
+        "homeBiome must be null before CreateHomeworld, got {}",
+        character["homeBiome"]
+    );
+
+    // ...and once the biome arrives, it is reported and the client stops creating.
+    api.state.set_home_biome("Alice", "Sky_Island").unwrap();
+
+    let (_, body) = api.get("/api/persistent-record/characters/list").await;
+
+    assert_eq!(body["result"]["characters"][0]["homeBiome"], "Sky_Island");
 }

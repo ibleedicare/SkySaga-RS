@@ -314,7 +314,7 @@ fn gender_is_two_bits_and_tolerates_an_unknown_value() {
     assert_eq!(Gender::Female.value(), 1);
 
     let mut writer = BitWriter::new();
-    writer.write_uint(2, 2);
+    writer.write_bits_le(2, 2);
 
     let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
 

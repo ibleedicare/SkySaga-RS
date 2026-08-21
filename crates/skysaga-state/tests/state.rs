@@ -279,15 +279,23 @@ fn binding_an_unknown_account_is_ignored() {
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
 
+/// A freshly created character is deliberately *incomplete*: POST /characters/_create
+/// carries neither a name nor a biome, and the biome only arrives later in CreateHomeworld.
+///
+/// The home biome must be None rather than a plausible default, because that is exactly what
+/// tells the client the character still needs creating -- `characters/list` reporting a
+/// non-null homeBiome makes the client skip its creator and drop straight into the world.
+/// The C# hardcoded "Desert" and carried `// (string?)null, // null > character creation` as
+/// a comment next to it.
 #[test]
-fn a_new_character_has_the_default_appearance() {
+fn a_new_character_is_incomplete_until_the_client_finishes_creating_it() {
     let state = AppState::new(CredentialPolicy::AnyNonEmpty);
     state.authenticate("Alice", "x").unwrap();
 
     let character = state.create_character("Alice", None).unwrap();
 
     assert_eq!(character.appearance, CustomisationData::default());
-    assert_eq!(character.home_biome, "Desert");
+    assert_eq!(character.home_biome, None, "no biome until CreateHomeworld");
 }
 
 /// SaveCharacterName arrives after the character record already exists, so naming is an
@@ -316,8 +324,11 @@ fn the_home_biome_can_be_set_from_create_homeworld() {
 
     let updated = state.set_home_biome("Alice", "Sky_Island").unwrap();
 
-    assert_eq!(updated.home_biome, "Sky_Island");
-    assert_eq!(state.character("Alice").unwrap().home_biome, "Sky_Island");
+    assert_eq!(updated.home_biome.as_deref(), Some("Sky_Island"));
+    assert_eq!(
+        state.character("Alice").unwrap().home_biome.as_deref(),
+        Some("Sky_Island")
+    );
 }
 
 /// A blank biome must be refused: the client bounces back into the creator on a null
@@ -331,7 +342,7 @@ fn a_blank_home_biome_is_refused() {
     assert!(state.set_home_biome("Alice", "").is_err());
     assert_eq!(
         state.character("Alice").unwrap().home_biome,
-        "Desert",
+        None,
         "the previous value survives"
     );
 }
@@ -381,7 +392,7 @@ fn two_players_have_independent_profiles() {
     state.set_home_biome("Alice", "Sky_Island").unwrap();
 
     assert_eq!(state.character("Bob").unwrap().name, "Bob");
-    assert_eq!(state.character("Bob").unwrap().home_biome, "Desert");
+    assert_eq!(state.character("Bob").unwrap().home_biome, None);
 }
 
 // --- character name validation, for /characters/_checkname --------------------------------

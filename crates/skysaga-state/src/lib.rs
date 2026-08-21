@@ -84,9 +84,16 @@ pub struct Character {
     pub uuid: Uuid,
     pub name: String,
 
-    /// A `geodata.json > Biomes` name. Never blank: the client bounces back into the
-    /// character creator when `homeBiome` is null.
-    pub home_biome: String,
+    /// A `geodata.json > Biomes` name — `None` until `CreateHomeworld` arrives.
+    ///
+    /// This is load-bearing, not merely tidy. `characters/list` reports it verbatim, and a
+    /// non-null `homeBiome` is what tells the client its character is finished: with one set
+    /// at creation time the client skips its creator entirely and drops straight into the
+    /// world, never sending `SaveCharacterName`. The C# hardcoded `"Desert"` and carried
+    /// `// (string?)null, // null > character creation` as a comment beside it.
+    ///
+    /// Never `Some("")` — a blank is refused by [`AppState::set_home_biome`].
+    pub home_biome: Option<String>,
 
     /// Gender, tribe, skin/eye/clothing colours and hairstyle.
     pub appearance: CustomisationData,
@@ -254,7 +261,7 @@ impl AppState {
             name: name
                 .map(str::to_owned)
                 .unwrap_or_else(|| entry.display_name.clone()),
-            home_biome: DEFAULT_HOME_BIOME.to_owned(),
+            home_biome: None,
             appearance: CustomisationData::default(),
         };
 
@@ -300,7 +307,9 @@ impl AppState {
             return Err(LoginError::BadCredentials);
         }
 
-        self.update_character(account, |character| character.home_biome = biome.to_owned())
+        self.update_character(account, |character| {
+            character.home_biome = Some(biome.to_owned())
+        })
     }
 
     /// Apply `SetCharacterCustomisationData` (packet 37).
@@ -368,8 +377,6 @@ impl Default for AppState {
     }
 }
 
-/// Matches what the C# web server reported for every character.
-const DEFAULT_HOME_BIOME: &str = "Desert";
 
 /// The result of validating a proposed character name.
 ///

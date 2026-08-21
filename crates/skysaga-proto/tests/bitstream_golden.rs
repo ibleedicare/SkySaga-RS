@@ -99,7 +99,7 @@ fn arbitrary_widths_match_raknet() {
     ];
 
     for &(label, value, bits) in cases {
-        assert_golden(label, |w| w.write_uint(value, bits));
+        assert_golden(label, |w| w.write_bits_le(value, bits));
     }
 }
 
@@ -107,12 +107,12 @@ fn arbitrary_widths_match_raknet() {
 fn arbitrary_widths_match_raknet_when_misaligned() {
     assert_golden("bit_then_write_bits_3_5", |w| {
         w.write_bit(true);
-        w.write_uint(5, 3);
+        w.write_bits_le(5, 3);
     });
 
     assert_golden("bit_then_write_bits_32_7", |w| {
         w.write_bit(true);
-        w.write_uint(7, 32);
+        w.write_bits_le(7, 32);
     });
 }
 
@@ -168,21 +168,21 @@ fn the_reader_round_trips_every_primitive() {
 
     writer.write_bit(true);
     writer.write_u8(0xa5);
-    writer.write_uint(11, 4);
+    writer.write_bits_le(11, 4);
     writer.write_string("Alice");
     writer.write_optional_u32(Some(1_319_509_738));
     writer.write_optional_u32(None);
-    writer.write_uint(0x1234_5678, 32);
+    writer.write_bits_le(0x1234_5678, 32);
 
     let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
 
     assert!(reader.read_bit().unwrap());
     assert_eq!(reader.read_u8().unwrap(), 0xa5);
-    assert_eq!(reader.read_uint(4).unwrap(), 11);
+    assert_eq!(reader.read_bits_le(4).unwrap(), 11);
     assert_eq!(reader.read_string().unwrap(), "Alice");
     assert_eq!(reader.read_optional_u32().unwrap(), Some(1_319_509_738));
     assert_eq!(reader.read_optional_u32().unwrap(), None);
-    assert_eq!(reader.read_uint(32).unwrap(), 0x1234_5678);
+    assert_eq!(reader.read_bits_le(32).unwrap(), 0x1234_5678);
     assert_eq!(reader.bits_remaining(), 0);
 }
 
@@ -191,11 +191,11 @@ fn the_reader_round_trips_every_primitive() {
 #[test]
 fn the_reader_refuses_to_read_past_the_end() {
     let mut writer = BitWriter::new();
-    writer.write_uint(3, 4);
+    writer.write_bits_le(3, 4);
 
     let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
 
-    assert_eq!(reader.read_uint(4).unwrap(), 3);
+    assert_eq!(reader.read_bits_le(4).unwrap(), 3);
     assert!(reader.read_bit().is_err());
     assert!(reader.read_u8().is_err());
     assert!(reader.read_string().is_err());
@@ -236,5 +236,73 @@ fn packet_ids_round_trip() {
         let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
 
         assert_eq!(reader.read_packet_id().unwrap(), id, "id {id}");
+    }
+}
+
+// --- the other 32-bit write ------------------------------------------------------------------
+
+/// RakNet's own `Write<T>` is **big-endian**, and is not the same operation as
+/// `write_bits_le(v, 32)`. The client uses this one for every 32-bit field.
+#[test]
+fn write_u32_is_big_endian() {
+    assert_golden("write_u32_native_7", |w| w.write_u32(7));
+    assert_golden("write_u32_native_12", |w| w.write_u32(12));
+    assert_golden("write_u32_native_0x12345678", |w| w.write_u32(0x1234_5678));
+    assert_golden("write_u32_native_crc_human", |w| w.write_u32(1_319_509_738));
+}
+
+#[test]
+fn write_u32_is_big_endian_when_misaligned() {
+    assert_golden("bit_then_write_u32_native_7", |w| {
+        w.write_bit(true);
+        w.write_u32(7);
+    });
+}
+
+/// The two 32-bit writes must actually disagree — if this ever passes with them equal, one of
+/// them has been quietly redefined and every id on the wire is byte-reversed.
+#[test]
+fn the_two_32_bit_writes_are_not_interchangeable() {
+    let mut big = BitWriter::new();
+    big.write_u32(0x1234_5678);
+
+    let mut little = BitWriter::new();
+    little.write_bits_le(0x1234_5678, 32);
+
+    assert_eq!(to_hex(big.as_bytes()), "12345678");
+    assert_eq!(to_hex(little.as_bytes()), "78563412");
+}
+
+/// ...but they agree below a byte, which is why the narrow fields can use either.
+#[test]
+fn the_two_writes_agree_for_widths_under_eight() {
+    for bits in 1..8u32 {
+        for value in 0..(1u32 << bits) {
+            let mut le = BitWriter::new();
+            le.write_bits_le(value, bits);
+
+            let mut manual = BitWriter::new();
+            for index in (0..bits).rev() {
+                manual.write_bit(value & (1 << index) != 0);
+            }
+
+            assert_eq!(
+                to_hex(le.as_bytes()),
+                to_hex(manual.as_bytes()),
+                "{value} in {bits} bits"
+            );
+        }
+    }
+}
+
+#[test]
+fn u32_round_trips_through_the_reader() {
+    for value in [0u32, 1, 12, 0x1234_5678, 1_319_509_738, u32::MAX] {
+        let mut writer = BitWriter::new();
+        writer.write_u32(value);
+
+        let mut reader = BitReader::from_bytes(writer.as_bytes());
+
+        assert_eq!(reader.read_u32().unwrap(), value);
     }
 }

@@ -48,12 +48,23 @@ pub fn vectors() -> &'static HashMap<String, Vector> {
         text.lines()
             .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
             .map(|line| {
-                let mut fields = line.split('\t');
-                let label = fields.next().expect("label").to_owned();
-                let bits = fields.next().expect("bits").parse().expect("bits is a number");
-                let hex = fields.next().expect("hex").trim();
+                // Exactly three fields. Anything else means the generator's output was
+                // polluted -- the nix shell banner goes to stdout, for instance -- and a
+                // silently dropped vector would look like a passing test suite.
+                let fields: Vec<&str> = line.split('\t').collect();
 
-                (label, Vector { bits, bytes: from_hex(hex) })
+                assert_eq!(
+                    fields.len(),
+                    3,
+                    "malformed golden line (regenerate the fixture): {line:?}"
+                );
+
+                let label = fields[0].to_owned();
+                let bits = fields[1]
+                    .parse()
+                    .unwrap_or_else(|e| panic!("bits in {label:?}: {e}"));
+
+                (label, Vector { bits, bytes: from_hex(fields[2].trim()) })
             })
             .collect()
     })
