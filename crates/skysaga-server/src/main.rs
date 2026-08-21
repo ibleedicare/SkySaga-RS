@@ -16,6 +16,8 @@
 //! - `SKYSAGA_ACCOUNTS=user:pass,...`  restrict logins to a fixed list (default: accept any)
 //! - `SKYSAGA_PUBLIC_IP`               address advertised to the client (default 127.0.0.1)
 //! - `SKYSAGA_WEB_PORT`, `SKYSAGA_AUTH_PORT`, `SKYSAGA_GAME_PORT`
+//! - `SKYSAGA_DATABASE_URL`           where to persist (default `sqlite://skysaga.db`);
+//!                                     set it empty to keep everything in memory
 //! - `RUST_LOG`                        e.g. `skysaga_web=debug`
 
 use std::net::SocketAddr;
@@ -25,11 +27,16 @@ use anyhow::Context;
 use skysaga_auth::AuthConfig;
 use skysaga_game::{GameServer, GameServerConfig, World, WorldConfig};
 use skysaga_state::{AppState, CredentialPolicy};
+use skysaga_store::{Persistence, SqliteStore, Store};
 use skysaga_web::WebConfig;
 use skysaga_world::{default_entities_path, EntityDefinitions};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Where state is persisted unless told otherwise. A file beside the binary, so a first run
+/// needs no setup at all; point `SKYSAGA_DATABASE_URL` elsewhere for anything else.
+const DEFAULT_DATABASE_URL: &str = "sqlite://skysaga.db";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,7 +52,47 @@ async fn main() -> anyhow::Result<()> {
         info!("accepting any non-empty account name (set SKYSAGA_ACCOUNTS to restrict)");
     }
 
-    let state = Arc::new(AppState::new(policy));
+    // Persistence. Characters and photos live in memory while the server runs and are
+    // written down as they change, so a restart does not cost the player their character.
+    //
+    // `SKYSAGA_DATABASE_URL=` (empty) turns it off and keeps everything in memory, which is
+    // what the old behaviour was.
+    let database_url = std::env::var("SKYSAGA_DATABASE_URL")
+        .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
+
+    let state = if database_url.is_empty() {
+        warn!("no database configured; characters will not survive a restart");
+
+        AppState::new(policy)
+    } else {
+        // Failing here is fatal on purpose. Carrying on without a database would look like it
+        // worked and silently lose every character at shutdown.
+        let store: Arc<dyn Store> = Arc::new(
+            SqliteStore::open(&database_url)
+                .await
+                .with_context(|| format!("opening the database at {database_url}"))?,
+        );
+
+        store.migrate().await.context("applying the database schema")?;
+
+        let snapshot = store.load().await.context("loading stored state")?;
+
+        info!(
+            url = %database_url,
+            accounts = snapshot.accounts.len(),
+            characters = snapshot.accounts.iter().filter(|a| a.character.is_some()).count(),
+            photos = snapshot.photos.len(),
+            "loaded stored state",
+        );
+
+        let state = AppState::new(policy).with_sink(Arc::new(Persistence::start(store)));
+
+        state.import(snapshot.accounts, snapshot.photos);
+
+        state
+    };
+
+    let state = Arc::new(state);
     let web_config = WebConfig::from_env();
     let auth_config = AuthConfig::from_env();
 

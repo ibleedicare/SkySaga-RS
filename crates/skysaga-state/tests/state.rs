@@ -517,3 +517,239 @@ fn deleting_one_players_character_leaves_the_others_alone() {
     assert_eq!(state.character("Alice"), None);
     assert!(state.character("Bob").is_some());
 }
+
+// --- recording changes for persistence ----------------------------------------------------
+//
+// AppState stays the in-memory authority and stays synchronous: the game server reads it from
+// a plain OS thread and the web server from async handlers, and making it async would push
+// awaits into both. Instead it reports what changed to a sink, and the storage layer applies
+// those changes in the background.
+//
+// The sink is a trait rather than a channel so this crate keeps its no-I/O, no-tokio rule.
+
+mod persistence {
+    use std::sync::Mutex;
+
+    use skysaga_proto::customisation::CustomisationData;
+    use skysaga_state::{AccountRecord, AppState, Change, ChangeSink, Character, CredentialPolicy, Photo};
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct Recorder {
+        changes: Mutex<Vec<Change>>,
+    }
+
+    impl ChangeSink for Recorder {
+        fn record(&self, change: Change) {
+            self.changes.lock().unwrap().push(change);
+        }
+    }
+
+    impl Recorder {
+        fn changes(&self) -> Vec<Change> {
+            self.changes.lock().unwrap().clone()
+        }
+    }
+
+    fn state() -> (AppState, std::sync::Arc<Recorder>) {
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(std::sync::Arc::clone(&recorder) as _);
+
+        (state, recorder)
+    }
+
+    #[test]
+    fn signing_in_records_the_account() {
+        let (state, recorder) = state();
+
+        state.authenticate("Alice", "x").unwrap();
+
+        assert_eq!(
+            recorder.changes(),
+            vec![Change::Account {
+                key: "alice".into(),
+                display_name: "Alice".into(),
+            }],
+        );
+    }
+
+    /// Signing in again must not record a second, different account: the key is the lowercased
+    /// name and the display name is whatever was first used.
+    #[test]
+    fn signing_in_twice_records_the_same_key() {
+        let (state, recorder) = state();
+
+        state.authenticate("Alice", "x").unwrap();
+        state.authenticate("ALICE", "x").unwrap();
+
+        let keys: Vec<String> = recorder
+            .changes()
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Account { key, .. } => Some(key),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(keys, vec!["alice".to_owned(), "alice".to_owned()]);
+    }
+
+    #[test]
+    fn creating_and_updating_a_character_records_it() {
+        let (state, recorder) = state();
+
+        state.authenticate("Alice", "x").unwrap();
+        state.create_character("Alice", None).unwrap();
+        state.set_character_name("Alice", "Rowan").unwrap();
+        state.set_home_biome("Alice", "Sky_Island").unwrap();
+        state.set_appearance("Alice", CustomisationData::default()).unwrap();
+
+        let characters: Vec<Character> = recorder
+            .changes()
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Character { character, .. } => Some(character),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(characters.len(), 4, "create, then each of the three updates");
+
+        let last = characters.last().unwrap();
+
+        assert_eq!(last.name, "Rowan");
+        assert_eq!(last.home_biome.as_deref(), Some("Sky_Island"));
+    }
+
+    #[test]
+    fn deleting_a_character_records_the_deletion() {
+        let (state, recorder) = state();
+
+        state.authenticate("Alice", "x").unwrap();
+        state.create_character("Alice", None).unwrap();
+
+        state.delete_character("Alice").unwrap();
+
+        assert_eq!(
+            recorder.changes().last(),
+            Some(&Change::DeleteCharacter { account: "alice".into() }),
+        );
+    }
+
+    /// Deleting nothing changes nothing, so there is nothing to record.
+    #[test]
+    fn deleting_an_absent_character_records_nothing() {
+        let (state, recorder) = state();
+
+        state.authenticate("Alice", "x").unwrap();
+        let before = recorder.changes().len();
+
+        state.delete_character("Alice").unwrap();
+
+        assert_eq!(recorder.changes().len(), before);
+    }
+
+    #[test]
+    fn saving_a_photo_records_it() {
+        let (state, recorder) = state();
+
+        state.save_photo("photo-1", vec![1, 2, 3], 42);
+
+        assert_eq!(
+            recorder.changes().last(),
+            Some(&Change::Photo {
+                id: "photo-1".into(),
+                photo: Photo { bytes: vec![1, 2, 3], captured_at: 42 },
+            }),
+        );
+    }
+
+    /// A state with no sink must work exactly as before. Persistence is optional: the tests
+    /// and any embedding that does not want a database run without one.
+    #[test]
+    fn a_state_without_a_sink_still_works() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.authenticate("Alice", "x").unwrap();
+        state.create_character("Alice", None).unwrap();
+
+        assert!(state.character("Alice").is_some());
+    }
+
+    // --- loading back ---------------------------------------------------------------------
+
+    #[test]
+    fn an_imported_account_and_character_are_readable() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+        let uuid = Uuid::new_v4();
+
+        state.import(
+            vec![AccountRecord {
+                key: "alice".into(),
+                display_name: "Alice".into(),
+                character: Some(Character {
+                    uuid,
+                    name: "Rowan".into(),
+                    home_biome: Some("Sky_Island".into()),
+                    appearance: CustomisationData::default(),
+                }),
+            }],
+            vec![("photo-1".into(), Photo { bytes: vec![9], captured_at: 7 })],
+        );
+
+        let character = state.character("Alice").expect("the character came back");
+
+        assert_eq!(character.uuid, uuid, "the uuid must survive a restart");
+        assert_eq!(character.name, "Rowan");
+        assert_eq!(state.photo("photo-1").unwrap().bytes, vec![9]);
+    }
+
+    /// Importing is a load, not a change: re-recording what was just read would write the
+    /// whole database back on every start.
+    #[test]
+    fn importing_records_nothing() {
+        let (state, recorder) = state();
+
+        state.import(
+            vec![AccountRecord {
+                key: "alice".into(),
+                display_name: "Alice".into(),
+                character: None,
+            }],
+            Vec::new(),
+        );
+
+        assert!(recorder.changes().is_empty(), "import must not echo back to the sink");
+    }
+
+    /// An imported account is a real account: the player signs in against it and keeps the
+    /// character they already had.
+    #[test]
+    fn an_imported_account_can_sign_in_and_keeps_its_character() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.import(
+            vec![AccountRecord {
+                key: "alice".into(),
+                display_name: "Alice".into(),
+                character: Some(Character {
+                    uuid: Uuid::new_v4(),
+                    name: "Rowan".into(),
+                    home_biome: Some("Sky_Island".into()),
+                    appearance: CustomisationData::default(),
+                }),
+            }],
+            Vec::new(),
+        );
+
+        let session = state.authenticate("alice", "x").expect("signs in");
+
+        assert_eq!(session.account, "Alice", "the stored casing is used");
+        assert_eq!(
+            state.character("Alice").unwrap().name,
+            "Rowan",
+            "signing in must not wipe the character",
+        );
+    }
+}

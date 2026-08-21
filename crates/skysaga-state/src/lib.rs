@@ -130,6 +130,41 @@ struct Inner {
     photos: HashMap<String, Photo>,
 }
 
+/// One account and the character it owns, for loading and storing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountRecord {
+    /// The lowercased account name, which is the key everywhere else too.
+    pub key: String,
+    /// As the player first typed it, so their own casing is rendered back.
+    pub display_name: String,
+    pub character: Option<Character>,
+}
+
+/// Something worth writing down, reported as it happens.
+///
+/// A whole value rather than a delta: "the character is now this" instead of "the name
+/// changed". The state is small, the writes are rare, and a full value is idempotent, so a
+/// change applied twice or out of order still leaves the right thing stored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Account { key: String, display_name: String },
+    Character { account: String, character: Character },
+    DeleteCharacter { account: String },
+    Photo { id: String, photo: Photo },
+}
+
+/// Somewhere for changes to go.
+///
+/// A trait, not a channel, so this crate keeps its no-I/O and no-`tokio` rule: the storage
+/// layer supplies the implementation and owns the async runtime it needs.
+///
+/// `record` is synchronous and must not block. [`AppState`]'s methods are called from the
+/// game server's own thread and from async web handlers alike, and a sink that blocked would
+/// stall whichever it was called from. Implementations queue and return.
+pub trait ChangeSink: Send + Sync {
+    fn record(&self, change: Change);
+}
+
 /// An uploaded image.
 ///
 /// Held in memory with everything else. Photos are the only binary payload the server keeps,
@@ -145,10 +180,25 @@ pub struct Photo {
 ///
 /// Interior mutability rather than `&mut self` so it can sit in an `Arc` and be handed to
 /// axum handlers and socket tasks alike.
-#[derive(Debug)]
 pub struct AppState {
     policy: CredentialPolicy,
     inner: RwLock<Inner>,
+
+    /// Where changes are reported, if anything is listening. `None` means no persistence,
+    /// which is how the tests and any embedding without a database run.
+    sink: Option<std::sync::Arc<dyn ChangeSink>>,
+}
+
+/// Hand-written because a `dyn ChangeSink` cannot be `Debug`, and requiring it of every sink
+/// would be a burden for a field that is only ever "present or not".
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("policy", &self.policy)
+            .field("inner", &self.inner)
+            .field("persisted", &self.sink.is_some())
+            .finish()
+    }
 }
 
 impl AppState {
@@ -156,8 +206,43 @@ impl AppState {
         Self {
             policy,
             inner: RwLock::new(Inner::default()),
+            sink: None,
         }
     }
+
+    /// Report every change to `sink`, so it can be written down.
+    pub fn with_sink(mut self, sink: std::sync::Arc<dyn ChangeSink>) -> Self {
+        self.sink = Some(sink);
+
+        self
+    }
+
+    /// Load previously stored state.
+    ///
+    /// Deliberately silent: this is a load, not a change, and echoing it back to the sink
+    /// would rewrite the whole database on every start.
+    pub fn import(&self, accounts: Vec<AccountRecord>, photos: Vec<(String, Photo)>) {
+        let mut inner = self.write();
+
+        for record in accounts {
+            inner.accounts.insert(
+                record.key,
+                Account {
+                    display_name: record.display_name,
+                    character: record.character,
+                },
+            );
+        }
+
+        inner.photos.extend(photos);
+    }
+
+    fn record(&self, change: Change) {
+        if let Some(sink) = &self.sink {
+            sink.record(change);
+        }
+    }
+
 
     /// Check credentials, register the account if it is new, and open a session.
     pub fn authenticate(&self, username: &str, password: &str) -> Result<Session, LoginError> {
@@ -188,7 +273,14 @@ impl AppState {
         let display_name = account.display_name.clone();
 
         inner.sessions.insert(token.clone(), key.clone());
-        inner.most_recent = Some(key);
+        inner.most_recent = Some(key.clone());
+
+        drop(inner);
+
+        self.record(Change::Account {
+            key,
+            display_name: display_name.clone(),
+        });
 
         Ok(Session {
             account: display_name,
@@ -281,6 +373,13 @@ impl AppState {
 
         entry.character = Some(character.clone());
 
+        drop(inner);
+
+        self.record(Change::Character {
+            account: account.to_ascii_lowercase(),
+            character: character.clone(),
+        });
+
         Ok(character)
     }
 
@@ -302,9 +401,11 @@ impl AppState {
     /// Replaces any existing image for that id: the client only uploads once per validated
     /// capture, so a second upload is a retry rather than a second photo.
     pub fn save_photo(&self, id: &str, bytes: Vec<u8>, captured_at: u64) {
-        self.write()
-            .photos
-            .insert(id.to_owned(), Photo { bytes, captured_at });
+        let photo = Photo { bytes, captured_at };
+
+        self.write().photos.insert(id.to_owned(), photo.clone());
+
+        self.record(Change::Photo { id: id.to_owned(), photo });
     }
 
     /// A stored photo, if it was uploaded.
@@ -338,7 +439,17 @@ impl AppState {
             .get_mut(&account.to_ascii_lowercase())
             .ok_or(LoginError::NoSuchAccount)?;
 
-        Ok(entry.character.take().is_some())
+        let deleted = entry.character.take().is_some();
+
+        drop(inner);
+
+        if deleted {
+            self.record(Change::DeleteCharacter {
+                account: account.to_ascii_lowercase(),
+            });
+        }
+
+        Ok(deleted)
     }
 
     // --- the character profile ---------------------------------------------------------
@@ -394,7 +505,16 @@ impl AppState {
 
         change(character);
 
-        Ok(character.clone())
+        let updated = character.clone();
+
+        drop(inner);
+
+        self.record(Change::Character {
+            account: account.to_ascii_lowercase(),
+            character: updated.clone(),
+        });
+
+        Ok(updated)
     }
 
     /// Validate a proposed character name, for `POST /characters/_checkname`.
