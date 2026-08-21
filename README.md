@@ -1,4 +1,4 @@
-# SkySaga server emulator — Rust
+# SkySaga server emulator (Rust)
 
 A server emulator for **SkySaga: Infinite Isles**, a voxel MMO that was cancelled in 2017 and
 never released. The game's servers are gone; this is a reimplementation of them, reverse
@@ -6,7 +6,7 @@ engineered from the client, so the game can be played again.
 
 **Status: a real client logs in, creates a character, and plays.** Verified end to end against
 retail build 10414 on 2026-08-21: account login, character creation with appearance and name,
-terrain, entities, and world entry — all served by this code, with no C# server running.
+terrain, entities, and world entry, all served by this code with no C# server running.
 
 It is a rewrite of an earlier C# emulator, which is kept as a reference implementation and as
 a test oracle (see [Tests](#tests)).
@@ -18,10 +18,10 @@ tree, and it needs two things from outside itself:
 
 | Needed | Why | Where it comes from |
 |---|---|---|
-| `Entities.json` | every entity's components and sync indices; the world cannot be built without it | the C# emulator's `Data/` directory — point `SKYSAGA_DATA_DIR` at a copy |
-| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from SLikeNet source — `nix build .#raknet` in the parent tree, or set `SKYSAGA_RAKNET_LIB` |
+| `Entities.json` | every entity's components and sync indices; the world cannot be built without it | the C# emulator's `Data/` directory; point `SKYSAGA_DATA_DIR` at a copy |
+| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from SLikeNet source: `nix build .#raknet` in the parent tree, or set `SKYSAGA_RAKNET_LIB` |
 
-Neither is redistributable here — `Entities.json` is the game's own data, and the RakNet build
+Neither is redistributable here. `Entities.json` is the game's own data, and the RakNet build
 is a native library, not source. `cargo build` fails at the `raknet-sys` build script if it
 cannot find the library, and the server exits at startup if it cannot find `Entities.json`.
 
@@ -61,7 +61,7 @@ That one process serves everything the client needs. Then launch the client poin
 
 There is also a `skysaga-game` binary that runs *only* the game server, for working on the
 world without the web stack. Note that the world-shaping variables below are read by that
-binary alone — `skysaga-server` currently builds its world from the defaults and ignores them.
+binary alone. `skysaga-server` builds its world from the defaults and ignores them.
 
 ### Configuration
 
@@ -70,7 +70,7 @@ Read by `skysaga-server`:
 | Variable | Default | |
 |---|---|---|
 | `SKYSAGA_ACCOUNTS` | *(unset)* | `user:pass,other:pass` to restrict logins; unset accepts any non-empty name |
-| `SKYSAGA_PUBLIC_IP` | `127.0.0.1` | the address handed to the client — set this when the client is not on this host |
+| `SKYSAGA_PUBLIC_IP` | `127.0.0.1` | the address handed to the client; set this when the client is not on this host |
 | `SKYSAGA_WEB_PORT` | `5164` | |
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
@@ -86,7 +86,7 @@ Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORL
 
 Server state is in memory, so a finished character outlives every client run. Once it has a
 home biome, `characters/list` reports a *complete* character and the client skips its creator
-entirely — which looks exactly like a broken creator when nothing is wrong. To go through it
+entirely, which looks exactly like a broken creator when nothing is wrong. To go through it
 again:
 
 ```bash
@@ -105,7 +105,7 @@ The tests are the point of the rewrite, so a word on what they actually check.
 
 **The C# server is the oracle, not this code's own opinion.** The fixtures under
 `crates/*/tests/` were captured by running the real C# servers and recording what they put on
-the wire — including a full RakNet handshake, replayed byte for byte. A test passes when this
+the wire, including a full RakNet handshake replayed byte for byte. A test passes when this
 server's output matches *the C#'s*, not when it matches what the author believed the format
 to be.
 
@@ -135,7 +135,7 @@ Defects found while reading the original, fixed here rather than reproduced:
   blocked everyone else from signing in.
 - **`Session.AccountName` and `_characterUUID` were process-wide statics**, so the emulator
   served exactly one player and two clients corrupted each other's state.
-- **Three processes sharing no state.** One process over one `Arc<AppState>` here — as
+- **Three processes sharing no state.** One process over one `Arc<AppState>` here. As
   separate processes, a client could finish creating a character and have the web layer still
   report it as unfinished, looping it back into the creator.
 - **One packet per 30 ms tick**, which capped the whole server at ~33 packets a second and was
@@ -147,14 +147,14 @@ Defects found while reading the original, fixed here rather than reproduced:
 ## Known gaps
 
 - **The photo album does not load.** Photos are captured, uploaded and stored, and single
-  images are served back, but `photos/_search` — which populates the album list — is not
+  images are served back, but `photos/_search`, which populates the album list, is not
   implemented, so the album spins.
 - **Every connection shares one player entity.** Fine for one player; a second player is
   handed the same body.
 - **Movement is not replicated.** `EntityMoved` and `SetPlayerState` are received and ignored,
   so players would not see each other move.
-- **The social graph returns empty lists.** The response *shapes* are implemented — the part
-  that is easy to get wrong — but the interactive friends/requests/blocked graph is not.
+- **The social graph returns empty lists.** The response *shapes* are implemented, being the
+  part that is easy to get wrong, but the interactive friends/requests/blocked graph is not.
 - **No chat.** The client expects an IRC server on :4444 and retries forever without one; it
   is noisy in the client log but does not block play.
 - **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
@@ -170,7 +170,7 @@ The layout is chosen so that adding something is adding a file:
   `skysaga-proto/src/packets/`, one variant on `ClientPacket`, one arm in the dispatch match.
 - **A component** → one struct, one `Component` variant, one arm each in `sync` and `name`.
   Both matches are exhaustive, so a missing arm is a compile error rather than a parameter
-  that quietly stops replicating — which is exactly how the C# lost the appearance component.
+  that quietly stops replicating. That is exactly how the C# lost the appearance component.
 
 Write the test first. Where behaviour has to match the client, capture what the client or the
 C# actually does rather than asserting what you think it does; two of the longest debugging

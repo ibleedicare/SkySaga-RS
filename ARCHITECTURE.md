@@ -1,24 +1,24 @@
-# SkySaga server emulator — Rust architecture
+# SkySaga server emulator: Rust architecture
 
 A rewrite of the C# emulator (`server/Servers/`, ~33k LOC across four projects) in Rust.
 
 This document is the *design contract*. The C# server is the behavioural oracle: when this
 document and the C# disagree about bytes on the wire, the C# wins and this document is wrong.
-When they disagree about *structure*, this document wins — the point of the rewrite is that
+When they disagree about *structure*, this document wins. The point of the rewrite is that
 the structure is contributable.
 
 ---
 
 ## What is wrong with the current shape
 
-Not a criticism of the original — it grew by reverse-engineering, which is the only way it
+Not a criticism of the original: it grew by reverse-engineering, which is the only way it
 could have been written. But it now has four properties that make contribution hard:
 
 | Problem | Where | Consequence |
 |---|---|---|
 | Three processes, no shared state | `SkySaga.Web` / `SmilegateAuth` / `SkySaga.Game` | The web server knows the account name; the game server cannot see it. State is duplicated or guessed. |
 | Global mutable statics | `Web/Session.cs`, `PersistentRecordEndpoints._characterUUID` | Exactly one player, ever. Two clients corrupt each other. |
-| Networking fused to game logic | `Connection.cs` — 2827 lines | Nothing about the world can be tested without a RakNet socket and a real client. |
+| Networking fused to game logic | `Connection.cs`, 2827 lines | Nothing about the world can be tested without a RakNet socket and a real client. |
 | Reflection-driven components | `EntityManager.cs` (`Activator.CreateInstance`) | Rust has no reflection, so this cannot be transliterated; and the C# form hides which components exist. |
 | Hardcoded world seeding | `Server.cs` ctor, `Connection::InitialChunkSync` (`Data1[200+1024+1024+1] = 13`) | Adding a map means editing magic array indices. |
 
@@ -35,8 +35,8 @@ rust-server-port/
     ├── skysaga-auth/         Smilegate login   (TCP  :10106)
     ├── skysaga-web/          account / conductor / social API   (HTTP :5164, HTTPS :5165)
     ├── skysaga-state/        the shared world-independent state: accounts, characters, sessions
-    ├── skysaga-proto/        RakNet packet wire formats — encode/decode, no I/O   [stage 2]
-    ├── skysaga-world/        entities, components, chunks — pure simulation, no I/O [stage 2]
+    ├── skysaga-proto/        RakNet packet wire formats, encode/decode, no I/O   [stage 2]
+    ├── skysaga-world/        entities, components, chunks, pure simulation, no I/O [stage 2]
     ├── raknet/               safe wrapper over the native shim                      [stage 2]
     ├── skysaga-game/         game server: joins net ↔ world                         [stage 2]
     └── skysaga-server/       one binary that runs auth + web + game together
@@ -45,7 +45,7 @@ rust-server-port/
 Stage 1 (this milestone: *a client can log in*) needs only `core`, `state`, `auth`, `web`,
 `server`. The stage-2 crates are listed so the layout does not have to be re-cut later.
 
-### Rule 1 — I/O lives at the edges
+### Rule 1: I/O lives at the edges
 
 `skysaga-core`, `skysaga-state`, `skysaga-proto` and `skysaga-world` have **no** sockets, no
 files, no clock, no `tokio`. Everything they do is a function from values to values, which
@@ -57,7 +57,7 @@ This is the single change that makes the project testable. `Connection.cs` canno
 because there is no seam between "read a packet" and "decide what happens"; here there always
 is one.
 
-### Rule 2 — one process, one shared state
+### Rule 2: one process, one shared state
 
 The C#'s three processes are an accident of how it was built, and it costs correctness: the
 game server has to re-derive the account name that the web server already knew.
@@ -65,15 +65,15 @@ game server has to re-derive the account name that the web server already knew.
 `skysaga-server` is one binary running three `tokio` tasks over one `Arc<AppState>`. The
 individual binaries (`skysaga-auth`, `skysaga-web`) stay runnable on their own so a
 contributor can work on one piece, and so the Rust web server can be swapped in while the C#
-game server still runs — which is how the port gets validated incrementally.
+game server still runs, which is how the port gets validated incrementally.
 
-### Rule 3 — no global mutable state, ever
+### Rule 3: no global mutable state, ever
 
 `AppState` holds `accounts: RwLock<HashMap<AccountId, Account>>` and friends. Multiple
 players work by construction rather than by later effort. Nothing is `static mut`, nothing is
 a `lazy_static` singleton, nothing is "single-slot because the emulator serves one player".
 
-### Rule 4 — adding a thing is adding a file
+### Rule 4: adding a thing is adding a file
 
 The contribution test for every subsystem:
 
@@ -86,7 +86,7 @@ The contribution test for every subsystem:
 No reflection, no registries keyed by string, no `Activator.CreateInstance`. If it can be an
 exhaustive `match`, it is one.
 
-### Rule 5 — the wire format is written down, not inferred
+### Rule 5: the wire format is written down, not inferred
 
 C#'s `[StructLayout(Pack = 1)]` marshalling means the layout of `LoginReply` exists only as a
 consequence of field declaration order. Here every wire struct has an explicit
@@ -98,14 +98,14 @@ known-good byte sequence. Layout is stated, then verified.
 ## Testing strategy (TDD, in the order tests are written)
 
 1. **Unit tests, pure crates.** Written *before* the implementation. Known-good vectors come
-   from the C# — CRC32 hashes, packet sizes, byte-for-byte encodings.
+   from the C#: CRC32 hashes, packet sizes, byte-for-byte encodings.
 2. **Golden-byte tests.** `LoginRequest`/`LoginReply` and every RakNet packet get a
    hex fixture checked in under `tests/golden/`. A wrong integer width fails a test in
    milliseconds instead of appearing as "client stuck at Ready to Play".
 3. **HTTP contract tests.** Each endpoint is exercised in-process through
-   `tower::ServiceExt::oneshot` — no port binding, no sleep, fast. Assertions are on the exact
+   `tower::ServiceExt::oneshot`: no port binding, no sleep, fast. Assertions are on the exact
    JSON keys, because the client reads them case-sensitively (`RESERVED_NAME` must not become
-   `reserveD_NAME` — a real bug the C# had to work around).
+   `reserveD_NAME`, a real bug the C# had to work around).
 4. **The client.** The final gate. It is unforgiving and specific: it hangs at a *named*
    loading stage, and the name says which packet is wrong.
 
@@ -136,29 +136,29 @@ faithfully reproduced:
 | **1** | `core` + `state` + `auth` + `web` + `server` | The client logs in and reaches character select against the Rust servers, with the C# web and auth servers stopped |
 | 2 | `raknet` + `proto` | Handshake completes; golden packet sizes match the C# table |
 | 3 | `world` + `game` | The client enters the world; all C# stopped |
-| 4 | persistence, chat, beyond parity | — |
+| 4 | persistence, chat, beyond parity | |
 
 Ports, unchanged from the C# so the existing launch scripts keep working:
 
 | Service | Port | |
 |---|---|---|
-| web | 5164/tcp | http — build 10414 |
-| web | 5165/tcp | https — build 36731 (`SKYSAGA_WEB_HTTPS=1`) |
+| web | 5164/tcp | http, build 10414 |
+| web | 5165/tcp | https, build 36731 (`SKYSAGA_WEB_HTTPS=1`) |
 | auth | 10106/tcp | Smilegate login |
 | game | 42069/udp | RakNet |
 
 ---
 
-## Addendum — `skysaga-proto` and the profile (stage 2, partial)
+## Addendum: `skysaga-proto` and the profile (stage 2, partial)
 
 `skysaga-proto` landed ahead of the RakNet transport, because the wire formats are pure
 functions and can be tested without one. It holds:
 
-- `bitstream` — a pure-Rust reimplementation of the subset of RakNet's `BitStream` the game
+- `bitstream`: a pure-Rust reimplementation of the subset of RakNet's `BitStream` the game
   uses, verified byte-for-byte against the real `libRakNet.so`.
-- `customisation` — `CustomisationData`: gender, tribe, skin/eye/clothing materials and the
+- `customisation`: `CustomisationData`: gender, tribe, skin/eye/clothing materials and the
   hair attachment.
-- `packets` — the character-creation packets: `SaveCharacterName` (108),
+- `packets`: the character-creation packets: `SaveCharacterName` (108),
   `CharcterCreationResponse` (109), `CreateHomeworld` (110),
   `SetCharacterCustomisationData` (37).
 
@@ -180,7 +180,7 @@ dotnet run -c Release --project tools/bitstream-golden \
 
 It needs the C# tree next door and `libRakNet.so`; it is a development tool, not part of the
 server. Writing the packet's shape into that generator *first*, then making Rust reproduce its
-output, is the workflow — it is what stops the tests from merely agreeing with the Rust.
+output, is the workflow. It is what stops the tests from merely agreeing with the Rust.
 
 ### What the profile still needs
 
@@ -198,12 +198,12 @@ All three already exist and are tested. The reply is not optional: without
 
 ---
 
-## Addendum — the RakNet transport
+## Addendum: the RakNet transport
 
 Two crates, and they are the only place `unsafe` appears in the port:
 
-- `raknet-sys` — 19 `extern "C"` declarations, no code.
-- `raknet` — a safe wrapper: `Peer`, `Packet`, `Guid`, with `Drop` on both handles.
+- `raknet-sys`: 19 `extern "C"` declarations, no code.
+- `raknet`: a safe wrapper: `Peer`, `Packet`, `Guid`, with `Drop` on both handles.
 
 ### No C++ shim, after all
 
@@ -216,7 +216,7 @@ things retired that plan:
    surface used is byte-oriented send and receive, which the bug never touched.
 
 `libRakNet.so` exports 1879 unmangled `extern "C"` functions, so Rust calls them directly.
-The roadmap's ~30-function shim became 19 declarations and no build step — no C++ toolchain,
+The roadmap's ~30-function shim became 19 declarations and no build step: no C++ toolchain,
 no flake changes, nothing to keep in sync.
 
 ### The one trap: SWIG overload numbering
@@ -243,7 +243,7 @@ than an ignored argument.
 send, broadcast, a 60 KB payload through RakNet's split/reassembly, and ordering. Peers bind
 port 0 so the suite never collides with a running emulator.
 
-Every test polls until the expected packet arrives rather than sleeping — RakNet works on its
+Every test polls until the expected packet arrives rather than sleeping. RakNet works on its
 own threads. Note that a handshake has two halves: the connecting side sees
 `CONNECTION_REQUEST_ACCEPTED` slightly before the listening side sees
 `NEW_INCOMING_CONNECTION`, so a helper that waits for only the first leaves the server's
