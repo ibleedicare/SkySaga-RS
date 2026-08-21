@@ -57,6 +57,45 @@ pub fn router(state: Arc<AppState>, config: WebConfig) -> Router {
         .with_state(api)
 }
 
+/// The header the client identifies itself with.
+///
+/// Every request carries it, holding whatever `tokenId` the login response gave back. Found by
+/// proxying a real client through socat and reading the raw request bytes.
+pub const CLIENT_TOKEN_HEADER: &str = "x-rwpvt";
+
+/// Which account a request belongs to, or `None` if it cannot be told.
+///
+/// Resolved by token first, then by peer address.
+///
+/// The token is what makes two clients on one machine distinguishable. They share a source
+/// address, so attributing by peer alone hands both of them whichever account signed in last:
+/// the second player takes the first one over, which is exactly what happened before this
+/// existed.
+///
+/// The peer fallback stays because not every request carries a token. The game server asks
+/// over HTTP without one, and several routes are reached before any login has happened.
+pub struct Caller(pub Option<String>);
+
+impl FromRequestParts<Api> for Caller {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, api: &Api) -> Result<Self, Self::Rejection> {
+        let by_token = parts
+            .headers
+            .get(CLIENT_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|token| api.state.account_for_token(token));
+
+        if by_token.is_some() {
+            return Ok(Self(by_token));
+        }
+
+        let Peer(peer) = Peer::from_request_parts(parts, api).await?;
+
+        Ok(Self(api.state.account_for_peer(peer)))
+    }
+}
+
 /// The address the request came from.
 ///
 /// Falls back to `0.0.0.0` when the router was not served with `into_make_service_with_

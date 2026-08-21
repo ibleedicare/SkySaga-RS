@@ -35,7 +35,7 @@ use std::collections::BTreeSet;
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
 use skysaga_proto::packets::{
-    BeginSync, CharacterCreationResponse, ClientEntitiesSyncFinished, CreateHomeworld,
+    BeginSync, EntityAdd, CharacterCreationResponse, ClientEntitiesSyncFinished, CreateHomeworld,
     DebugRequestFinishTutorial, NotifyPhotoCaptured, PhotoValidated, SaveCharacterName,
     SetCharacterCustomisationData, SetClientEntity, TransferToServer,
 };
@@ -160,6 +160,19 @@ pub struct Session {
     player_entity_id: u32,
     character: CharacterProfile,
 
+    /// Entity ids of the items in this player's rucksack, by slot.
+    ///
+    /// Held per connection rather than in the world: the player body is rebuilt from the
+    /// profile, and items are given while the session runs.
+    inventory: Vec<u32>,
+
+    /// Which account this connection belongs to.
+    ///
+    /// Claimed from the conductor's reservation when the connection arrives, because the
+    /// connection itself carries no account. `None` for a connection nobody reserved: the
+    /// probe and the capture tool connect without going through the conductor.
+    account: Option<String>,
+
     /// Wire ids already reported as unhandled.
     ///
     /// EntityMoved alone arrives dozens of times a minute, so warning per packet buries every
@@ -174,8 +187,30 @@ impl Session {
             stage: Stage::Connected,
             player_entity_id,
             character: CharacterProfile::default(),
+            inventory: Vec::new(),
+            account: None,
             reported: BTreeSet::new(),
         }
+    }
+
+    /// The items this player is carrying, by entity id.
+    pub fn inventory(&self) -> &[u32] {
+        &self.inventory
+    }
+
+    /// Put an item entity into the rucksack.
+    pub fn take_item(&mut self, entity_id: u32) {
+        self.inventory.push(entity_id);
+    }
+
+    /// The account this connection belongs to, if one was claimed.
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
+    /// Attribute this connection to an account.
+    pub fn set_account(&mut self, account: Option<String>) {
+        self.account = account;
     }
 
     /// What the player has told us about their character.
@@ -225,6 +260,20 @@ impl Session {
     /// re-sending the world — resending 16 chunks on demand would be an amplification vector,
     /// and the client does not expect it.
     pub fn handle(&mut self, packet: ClientPacket, world: &World) -> Vec<Vec<u8>> {
+        self.handle_with(packet, world, &[])
+    }
+
+    /// As [`Self::handle`], also announcing `others`: the bodies of players already here.
+    ///
+    /// The entity burst is the only place they are needed, and it is the only chance a
+    /// joining client gets to learn about them: the client builds its world from this burst
+    /// and is told nothing again until something changes.
+    pub fn handle_with(
+        &mut self,
+        packet: ClientPacket,
+        world: &World,
+        others: &[EntityAdd],
+    ) -> Vec<Vec<u8>> {
         match (packet, self.stage) {
             (ClientPacket::ClientConnected, Stage::Connected) => {
                 self.stage = Stage::SentWorldInfo;
@@ -259,11 +308,18 @@ impl Session {
 
                 info!(entities = world.entities.len(), "sending entities");
 
-                // The player's own entry is re-encoded from the template so it carries this
-                // player's name and appearance. Everything else was serialised once, at
-                // startup, and is shared by every connection.
-                let player = world.player_entity_add(&self.character);
+                // This player's own body, under the id this connection was given, carrying
+                // the name and appearance from its profile.
+                let player =
+                    world.player_body(&self.character, self.player_entity_id, &self.inventory);
 
+                // This player's body goes where the world's template player sits, and the
+                // other players are appended.
+                //
+                // The order is not the client's business, but it is the C#'s: the handshake
+                // oracle compares these bytes against a capture of the real server, and
+                // moving the player to the end of the burst breaks that comparison for no
+                // gain. With one player connected the output is unchanged.
                 let mut out: Vec<Vec<u8>> = world
                     .entities
                     .iter()
@@ -275,6 +331,7 @@ impl Session {
                             encode(|w| entity.encode(w))
                         }
                     })
+                    .chain(others.iter().map(|entity| encode(|w| entity.encode(w))))
                     .collect();
 
                 out.push(encode(|w| ClientEntitiesSyncFinished.encode(w)));

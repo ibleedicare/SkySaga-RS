@@ -33,9 +33,27 @@ pub struct Token {
 }
 
 impl Default for Token {
+    /// A placeholder, for the routes that answer before anyone has signed in.
+    ///
+    /// Not usable as an identity: it is the same string for everyone. Real logins issue
+    /// [`Token::issued`] instead, and it matters, because the client sends whatever it is
+    /// given back on every request and that is the only way to tell two clients apart.
     fn default() -> Self {
         Self {
             token_id: "tokenId".to_owned(),
+            refreshing_token_id: "refreshingTokenId".to_owned(),
+            timeout: TOKEN_TIMEOUT,
+        }
+    }
+}
+
+impl Token {
+    /// The token for a session that just signed in.
+    pub fn issued(token: &str) -> Self {
+        Self {
+            token_id: token.to_owned(),
+            // The client never exchanges the refreshing token, so it stays a placeholder
+            // rather than a second thing to keep track of.
             refreshing_token_id: "refreshingTokenId".to_owned(),
             timeout: TOKEN_TIMEOUT,
         }
@@ -62,10 +80,10 @@ async fn login(
     Peer(peer): Peer,
     Json(login): Json<ApplicationLogin>,
 ) -> Json<impl Serialize> {
-    sign_in(&api, peer, &login.name, &login.password);
+    let token = sign_in(&api, peer, &login.name, &login.password);
 
     Json(Wrapped {
-        result: Token::default(),
+        result: token.as_deref().map(Token::issued).unwrap_or_default(),
     })
 }
 
@@ -96,14 +114,14 @@ async fn sgauth_login(
 ) -> Json<impl Serialize> {
     let account = login.token.split(':').next().unwrap_or_default().to_owned();
 
-    sign_in(&api, peer, &account, "");
+    let token = sign_in(&api, peer, &account, "");
 
     Json(Wrapped {
         result: SgAuthResult {
             sg_user: String::new(),
             member_id: "1".to_owned(),
             username: account,
-            token: Token::default(),
+            token: token.as_deref().map(Token::issued).unwrap_or_default(),
         },
     })
 }
@@ -119,18 +137,28 @@ async fn autologin() -> Json<impl Serialize> {
 /// Authentication here always succeeds: the Smilegate server (`skysaga-auth`) is what checks
 /// credentials, and by the time the client reaches the web API it has already passed. What
 /// this call is really for is learning *who* is on the other end.
-fn sign_in(api: &Api, peer: std::net::IpAddr, account: &str, password: &str) {
+/// Sign in, returning the token the client will identify itself with.
+///
+/// `None` when the credentials were refused, in which case the caller answers with the
+/// placeholder token and the client shows its own error.
+fn sign_in(api: &Api, peer: std::net::IpAddr, account: &str, password: &str) -> Option<String> {
     match api.state.authenticate(account, password) {
         Ok(session) => {
+            // Still bound, as a fallback for requests that arrive without a token: the game
+            // server asks over HTTP without one, and some routes are reached before login.
             api.state.bind_peer(peer, &session.account);
 
             info!(account = %session.account, %peer, "signed in");
+
+            Some(session.token)
         }
 
         Err(error) => {
             // A blank name, or a name not in SKYSAGA_ACCOUNTS. Nothing to bind; the request
             // still succeeds so the client shows its own error rather than a transport one.
             info!(%account, %error, "web sign-in refused");
+
+            None
         }
     }
 }
