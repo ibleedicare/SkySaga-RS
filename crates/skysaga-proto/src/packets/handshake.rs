@@ -798,11 +798,31 @@ impl ChunkSync {
     /// `8 - num_bits_required_byte(64)` — the neighbour mask's width.
     const ADJACENT_BITS: u32 = 8 - 64u8.leading_zeros();
 
+    /// 36731's maximum for the **Y** axis, giving a 3-bit field where 10414 uses 6.
+    ///
+    /// The client's reader asks `clz32(7)` for Y and `clz32(0x20)` for X and Z
+    /// (`FUN_007d6a30`), so only the vertical axis narrowed.
+    const MAX_CHUNKS_Y_B36731: u32 = 7;
+
     pub fn encode(&self, writer: &mut BitWriter) {
         writer.write_packet_id(Self::ID);
 
-        for axis in self.coords {
-            writer.write_bits_le(axis, ranged_bits(Self::MAX_CHUNKS));
+        let b36731 = writer.build() == ClientBuild::B36731;
+
+        for (axis, value) in self.coords.into_iter().enumerate() {
+            // Y is three bits in 36731 and six in 10414. This is not cosmetic: the client reads
+            // each array's payload immediately after its length with **no alignment**, and the
+            // correct widths are what leave the stream byte-aligned there. Writing Y as six bits
+            // adds three bits, an aligned write then pads, the client does not skip the pad, and
+            // it goes on to read the next array's 32-bit length out of the payload. It allocates
+            // whatever that says, which is how a 32-bit client reports running out of memory.
+            let max = if b36731 && axis == 1 {
+                Self::MAX_CHUNKS_Y_B36731
+            } else {
+                Self::MAX_CHUNKS
+            };
+
+            writer.write_bits_le(value, ranged_bits(max));
         }
 
         for data in [&self.data1, &self.data2] {
@@ -810,14 +830,24 @@ impl ChunkSync {
 
             if let Some(data) = data {
                 writer.write_u32(data.len() as u32);
-                writer.write_aligned_bytes(data);
+
+                if b36731 {
+                    // Exactly `len * 8` bits, no alignment, matching FUN_007d6e60.
+                    writer.write_bits(data, data.len() as u32 * 8);
+                } else {
+                    writer.write_aligned_bytes(data);
+                }
             }
         }
 
         writer.write_bit(self.adjacent_chunks.is_some());
 
         if let Some(mask) = self.adjacent_chunks {
-            writer.write_bits_le(u32::from(mask), Self::ADJACENT_BITS);
+            // 36731 reads a whole byte here; absent means 256, which a byte cannot hold, so the
+            // presence bit is the only way to say "default".
+            let width = if b36731 { 8 } else { Self::ADJACENT_BITS };
+
+            writer.write_bits_le(u32::from(mask), width);
         }
     }
 

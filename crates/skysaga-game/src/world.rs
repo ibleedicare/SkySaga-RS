@@ -306,20 +306,39 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
 /// Chunks that generate as entirely air are not sent at all — the C# skips them, and the
 /// count in `BeginSync` has to match what actually follows.
 fn terrain_chunks(terrain: &TerrainGenerator) -> Vec<ChunkSync> {
+    // How many chunk layers to send above the ground one.
+    //
+    // The 2017 client is told a map size (`HomeIsland_6x4x6` = 6 x 4 x 6 chunks) and appears to
+    // wait for that whole volume rather than for the count `BeginSync` announces: it takes every
+    // chunk we send, stays in `DOWNLOAD_WORLD`, and never reports the sync finished. Sending the
+    // full volume is the obvious thing to try, and the layers above the ground are empty, which
+    // costs a presence bit each rather than 32 KB.
+    //
+    // `SKYSAGA_WORLD_LAYERS` is 1 for the 10414 behaviour, which is a single ground layer.
+    let layers: u32 = std::env::var("SKYSAGA_WORLD_LAYERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+
     let mut chunks = Vec::new();
 
     for x in 0..terrain.size_chunks {
         for z in 0..terrain.size_chunks {
-            let Some(data) = terrain.chunk(x, 0, z) else {
-                continue;
-            };
+            for y in 0..layers {
+                // Only the ground layer has voxels; the rest is air, sent as an absent array.
+                let data = if y == 0 { terrain.chunk(x, 0, z) } else { None };
 
-            chunks.push(ChunkSync {
-                coords: [x as u32, 0, z as u32],
-                data1: Some(data),
-                data2: None,
-                adjacent_chunks: None,
-            });
+                if y == 0 && data.is_none() {
+                    continue;
+                }
+
+                chunks.push(ChunkSync {
+                    coords: [x as u32, y, z as u32],
+                    data1: data,
+                    data2: None,
+                    adjacent_chunks: None,
+                });
+            }
         }
     }
 
