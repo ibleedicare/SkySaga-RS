@@ -14,6 +14,12 @@ pub enum Command {
     World,
     /// One player's rucksack.
     Inventory { account: String },
+    /// Put items in a player's rucksack.
+    Give {
+        account: String,
+        item: String,
+        count: u32,
+    },
 }
 
 impl Command {
@@ -25,7 +31,13 @@ impl Command {
             // Percent-encoding is not applied: account names are letters, digits and
             // underscore (`is_allowed_character_name`), none of which need it.
             Self::Inventory { account } => format!("/admin/inventory/{account}"),
+            Self::Give { .. } => "/admin/give".to_owned(),
         }
+    }
+
+    /// Whether this command changes something, and so is sent rather than fetched.
+    pub fn is_write(&self) -> bool {
+        matches!(self, Self::Give { .. })
     }
 }
 
@@ -71,6 +83,21 @@ pub fn parse(args: &[String]) -> Result<Command, ParseError> {
             }),
         },
 
+        "give" => match (args.get(1), args.get(2)) {
+            (Some(account), Some(item)) => Ok(Command::Give {
+                account: account.clone(),
+                item: item.clone(),
+                // A missing or unreadable count means one, rather than refusing: `give Alice
+                // dirt` is a reasonable thing to type.
+                count: args.get(3).and_then(|c| c.parse().ok()).unwrap_or(1),
+            }),
+
+            _ => Err(ParseError::MissingArgument {
+                command: "give".to_owned(),
+                expected: "player and item".to_owned(),
+            }),
+        },
+
         other => Err(ParseError::Unknown(other.to_owned())),
     }
 }
@@ -81,6 +108,8 @@ skysagactl - look at a running SkySaga server
   skysagactl players             who is connected
   skysagactl world               what is being served
   skysagactl inventory <player>  one player's rucksack
+  skysagactl give <player> <item> [count]
+                                 put items in a rucksack
 
   SKYSAGA_ADMIN_TOKEN   required; the same value the server was started with
   SKYSAGA_ADMIN_URL     default http://127.0.0.1:5164";

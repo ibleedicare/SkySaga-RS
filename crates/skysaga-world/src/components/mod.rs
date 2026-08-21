@@ -30,6 +30,7 @@ pub mod character_customisation;
 pub mod health;
 pub mod interaction;
 pub mod inventory;
+pub mod inventory_item;
 pub mod owner;
 pub mod misc;
 pub mod physics;
@@ -44,6 +45,7 @@ pub use character_customisation::CharacterCustomisationComponent;
 pub use health::HealthComponent;
 pub use interaction::InteractionComponent;
 pub use inventory::InventoryComponent;
+pub use inventory_item::InventoryItemComponent;
 pub use owner::OwnerComponent;
 pub use misc::{
     CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, MailBoxComponent, MailItem,
@@ -78,6 +80,8 @@ pub enum Component {
     Health(HealthComponent),
     Interaction(InteractionComponent),
     Inventory(InventoryComponent),
+    /// `inventoryitemcomponent` -- one stack of items.
+    InventoryItem(InventoryItemComponent),
     MailBox(MailBoxComponent),
     Owner(OwnerComponent),
     Pickup(PickupComponent),
@@ -103,6 +107,7 @@ impl Component {
             Self::Health(_) => "clienthealthcomponent",
             Self::Interaction(_) => "clientinteractioncomponent",
             Self::Inventory(_) => "clientinventorycomponent",
+            Self::InventoryItem(_) => "inventoryitemcomponent",
             Self::MailBox(_) => "clientmailboxcomponent",
             Self::Owner(_) => "clientownercomponent",
             Self::Pickup(_) => "clientpickupcomponent",
@@ -130,6 +135,7 @@ impl Component {
             Self::Health(component) => component.sync(parameter, writer),
             Self::Interaction(component) => component.sync(parameter, writer),
             Self::Inventory(component) => component.sync(parameter, writer),
+            Self::InventoryItem(component) => component.sync(parameter, writer),
             Self::MailBox(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),
             Self::Pickup(component) => component.sync(parameter, writer),

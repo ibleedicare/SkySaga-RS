@@ -41,8 +41,25 @@ fn main() -> Result<()> {
 
     let url = format!("{}{}", base_url(), command.path());
 
-    let response = reqwest::blocking::Client::new()
-        .get(&url)
+    let client = reqwest::blocking::Client::new();
+
+    // A write is a POST carrying what to do; a read is a plain GET.
+    let request = if let Command::Give {
+        account,
+        item,
+        count,
+    } = &command
+    {
+        client.post(&url).json(&serde_json::json!({
+            "account": account,
+            "item": item,
+            "count": count,
+        }))
+    } else {
+        client.get(&url)
+    };
+
+    let response = request
         .header(skysaga_admin_header(), token)
         .send()
         .with_context(|| format!("asking {url}"))?;
@@ -74,7 +91,19 @@ fn print(command: &Command, body: &Value) {
         Command::Players => print_players(body),
         Command::World => print_world(body),
         Command::Inventory { account } => print_inventory(account, body),
+        Command::Give { .. } => print_given(body),
     }
+}
+
+/// The command is queued, not done: the game loop carries it out within a tick, and only it
+/// knows whether the player is connected. Say that rather than implying it has happened.
+fn print_given(body: &Value) {
+    let account = or_dash(body["account"].as_str());
+    let item = or_dash(body["item"].as_str());
+    let count = body["count"].as_u64().unwrap_or(0);
+
+    println!("  queued: {count} x {item} for {account}");
+    println!("  the server carries it out on its next tick, if they are connected");
 }
 
 fn print_players(body: &Value) {
