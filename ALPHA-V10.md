@@ -123,9 +123,33 @@ Tested and eliminated:
 That last one is worth remembering: the stage byte is display state. Writing it makes the
 loading screen claim a stage the client is not in.
 
-## The current lead
+## A dead end, recorded so it is not walked again
 
-The main thread spins in `FUN_005dff80`, a resource-status lookup keyed by a 16-bit id:
+**The resource table is not the problem.** It looked like one: on a client that had been running
+a long time, exactly one entry sat "in progress" while 43 were ready and 84 unrequested. On a
+freshly launched client the histogram is `{0: 85, 2: 43}` with **nothing in progress at all**, so
+the single stuck entry was a transient, not a cause.
+
+Worse, the poll it was found through is not a symptom either. A backtrace from `FUN_005dff80`
+lands in the **main game loop**:
+
+```
+0x0048b220:
+  loop:  eax = [0x1440e98]                  ; app state, quit checks at +0x70/+0x72
+         ecx = [edi+0x20];  call 0x5e1150   ; tick
+         push 1; push 0;    call 0x5dfdd0   ; tick -> the resource poll
+         ecx = [0x1440e38]; call 0x48c8c0   ; tick
+         jmp loop
+```
+
+The client is ticking normally, every frame, and polling resources each frame because that is
+what the loop does. The 200,000 poll hits in 40 seconds were 200,000 frames of ordinary work,
+not a busy-wait. The window looks frozen because the loading screen is static, not because the
+process is.
+
+So: the client is **healthy and idle**, waiting for something, with no resource outstanding.
+
+For reference, the poll's table layout, since the tooling reads it:
 
 ```
 mov  eax, [edi + 0x30]              ; table base
@@ -140,14 +164,26 @@ signal:
 128 entries; state histogram: {0: 84, 1: 1, 2: 43}
 ```
 
-43 ready, 84 never requested, and **exactly one entry in progress**: id 33, which does not move
-in 30 seconds of watching. Its record differs from ready entries at `+0x0a` (11, where ready
-entries have 2) and `+0x14` (1, where they have 2 or 5). Its `+0x04` object carries its own id
-at `+0x10`, and `+0x30` points at a BlitzTech resource blob (`BLTZ`, `iHDR`, `iITM`, `iMNI`,
-`iCHN`, `iTGT`, `iKEY` chunk tags).
+Entry records are 40 bytes: `+0x00` a shared vtable, `+0x04` a per-entry object carrying its own
+id at `+0x10`, `+0x0a` flags, `+0x0f` the state. On a fresh client 43 entries are ready and the
+rest were never requested.
 
-**Not yet established:** whether entry 33 being stuck is the cause of the stall or a normal
-resident state for a streaming resource. Identify what it is before building on it.
+## Where to look next
+
+The client is idle in `LOAD_GAME_OBJECTS`, sending nothing over RakNet and making no HTTP calls,
+with its main loop ticking normally. So it is waiting to be told something.
+
+The open question is **the direction of ids 9 (`FrameTimeSyncCheck`) and 10 (`ResourceCheck`)**.
+`recv-map-b36731.py` resolves id 11 to a receive handler but not 9 or 10, which suggests they are
+client-to-server. That is weak evidence: the tool resolves only 100 of 341 ids, so absence proves
+nothing. Two attempts to settle it by looser and stricter byte patterns both failed, one with a
+false positive (matching `push 0xa; push 1` in unrelated UI argument setup) and one with a false
+negative (rejecting `SetConnectionTimeout`, whose `mov ecx` precedes the pushes rather than
+following them). **Do not trust a pattern that has not been validated against a known handler.**
+
+`ResourceCheck` matching the stalled stage name is suggestive enough to test empirically rather
+than statically: send it and watch, the way `SetConnectionTimeout` was added. Its payload is
+unknown, so start by establishing whether the client reacts at all.
 
 ## Tools
 
