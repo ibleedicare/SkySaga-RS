@@ -30,8 +30,10 @@ pub mod health;
 pub mod interaction;
 pub mod inventory;
 pub mod owner;
+pub mod misc;
 pub mod physics;
 pub mod pickup;
+pub mod player_aspects;
 pub mod player_name;
 pub mod time_of_day;
 pub mod transform;
@@ -41,8 +43,13 @@ pub use health::HealthComponent;
 pub use interaction::InteractionComponent;
 pub use inventory::InventoryComponent;
 pub use owner::OwnerComponent;
+pub use misc::{
+    CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, MailBoxComponent, MailItem,
+    UseEntityComponent, WalletComponent,
+};
 pub use physics::PhysicsComponent;
 pub use pickup::PickupComponent;
+pub use player_aspects::PlayerAspectsComponent;
 pub use player_name::PlayerNameComponent;
 pub use time_of_day::TimeOfDayComponent;
 pub use transform::TransformComponent;
@@ -62,17 +69,23 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 pub enum Component {
     /// `clientcharacterphysicscomponent`
     CharacterPhysics(PhysicsComponent),
+    CraftingDropSlots(CraftingDropSlotsComponent),
+    FeatureUnlock(FeatureUnlockComponent),
     Health(HealthComponent),
     Interaction(InteractionComponent),
     Inventory(InventoryComponent),
+    MailBox(MailBoxComponent),
     Owner(OwnerComponent),
     Pickup(PickupComponent),
+    PlayerAspects(PlayerAspectsComponent),
     PlayerName(PlayerNameComponent),
     /// Same parameters as [`Transform`](Self::Transform); the entity binds a different name.
     SmoothedTransform(TransformComponent),
     TimeOfDay(TimeOfDayComponent),
     Transform(TransformComponent),
+    UseEntity(UseEntityComponent),
     VoxelLink(VoxelLinkComponent),
+    Wallet(WalletComponent),
 }
 
 impl Component {
@@ -80,16 +93,22 @@ impl Component {
     pub fn name(&self) -> &'static str {
         match self {
             Self::CharacterPhysics(_) => "clientcharacterphysicscomponent",
+            Self::CraftingDropSlots(_) => "clientcraftingdropslotscomponent",
+            Self::FeatureUnlock(_) => "clientfeatureunlockcomponent",
             Self::Health(_) => "clienthealthcomponent",
             Self::Interaction(_) => "clientinteractioncomponent",
             Self::Inventory(_) => "clientinventorycomponent",
+            Self::MailBox(_) => "clientmailboxcomponent",
             Self::Owner(_) => "clientownercomponent",
             Self::Pickup(_) => "clientpickupcomponent",
+            Self::PlayerAspects(_) => "clientplayeraspectscomponent",
             Self::PlayerName(_) => "clientplayernamecomponent",
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
             Self::Transform(_) => "transformcomponent",
+            Self::UseEntity(_) => "clientuseentitycomponent",
             Self::VoxelLink(_) => "clientvoxellinkcomponent",
+            Self::Wallet(_) => "clientwalletcomponent",
         }
     }
 
@@ -100,16 +119,22 @@ impl Component {
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match self {
             Self::CharacterPhysics(component) => component.sync(parameter, writer),
+            Self::CraftingDropSlots(component) => component.sync(parameter, writer),
+            Self::FeatureUnlock(component) => component.sync(parameter, writer),
             Self::Health(component) => component.sync(parameter, writer),
             Self::Interaction(component) => component.sync(parameter, writer),
             Self::Inventory(component) => component.sync(parameter, writer),
+            Self::MailBox(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),
             Self::Pickup(component) => component.sync(parameter, writer),
+            Self::PlayerAspects(component) => component.sync(parameter, writer),
             Self::PlayerName(component) => component.sync(parameter, writer),
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
             Self::Transform(component) => component.sync(parameter, writer),
+            Self::UseEntity(component) => component.sync(parameter, writer),
             Self::VoxelLink(component) => component.sync(parameter, writer),
+            Self::Wallet(component) => component.sync(parameter, writer),
         }
     }
 }

@@ -8,7 +8,8 @@ pub mod definitions;
 pub mod entity;
 
 pub use components::{
-    Component, HealthComponent, InteractionComponent, InventoryComponent, OwnerComponent,
+    Component, CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, HealthComponent,
+    MailBoxComponent, MailItem, PlayerAspectsComponent, UseEntityComponent, WalletComponent, InteractionComponent, InventoryComponent, OwnerComponent,
     PhysicsComponent, PickupComponent, PlayerNameComponent, TimeOfDayComponent,
     TransformComponent, VoxelLink, VoxelLinkComponent,
 };

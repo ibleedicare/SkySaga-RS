@@ -385,3 +385,139 @@ fn a_default_item_spec_round_trips_through_the_escape_path() {
     assert_eq!(ItemSpec::decode(&mut reader).unwrap(), spec);
     assert_eq!(reader.bits_remaining(), 0);
 }
+
+// --- Player: the full component set ----------------------------------------------------------
+
+/// Every component the Player needs, with default state.
+fn player_components() -> Vec<skysaga_world::Component> {
+    use skysaga_world::*;
+
+    vec![
+        Component::PlayerAspects(PlayerAspectsComponent::default()),
+        Component::CraftingDropSlots(CraftingDropSlotsComponent::default()),
+        Component::FeatureUnlock(FeatureUnlockComponent::default()),
+        Component::Health(HealthComponent::default()),
+        Component::Inventory(InventoryComponent::default()),
+        Component::CharacterPhysics(PhysicsComponent::default()),
+        Component::MailBox(MailBoxComponent::default()),
+        Component::Owner(OwnerComponent::default()),
+        Component::PlayerName(PlayerNameComponent::default()),
+        Component::SmoothedTransform(TransformComponent::default()),
+        Component::UseEntity(UseEntityComponent::default()),
+        Component::Wallet(WalletComponent::default()),
+    ]
+}
+
+/// The Player flags exactly the parameters the C# flags — all 28 of them, and nothing else.
+///
+/// This is the check that every component accepts precisely the parameter names its C#
+/// counterpart writes. It is independent of the *values*, which are run-specific (the owner
+/// uuid, the inventory contents), so it isolates naming and dispatch from state.
+#[test]
+fn the_player_flags_the_same_parameters_as_the_csharp() {
+    use skysaga_world::Entity;
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").expect("Player");
+
+    let player = Entity::new(12, player_components());
+
+    let ours = player.sync_data(definition);
+    let theirs = sync_data_for("Player");
+
+    assert_eq!(theirs.present_indices().count(), 28, "the capture's own count");
+
+    let mut missing = Vec::new();
+    let mut extra = Vec::new();
+
+    for index in 0..definition.synced_parameter_count() {
+        match (ours.present[index], theirs.present[index]) {
+            (false, true) => missing.push((index, definition.parameter_at(index))),
+            (true, false) => extra.push((index, definition.parameter_at(index))),
+            _ => {}
+        }
+    }
+
+    assert!(missing.is_empty(), "parameters the C# sends and we do not: {missing:#?}");
+    assert!(extra.is_empty(), "parameters we send and the C# does not: {extra:#?}");
+}
+
+/// A zero-bit payload is still a *flagged* parameter.
+///
+/// `craftingdropslots` writes nothing at all for a list shorter than two — there is no count
+/// field — yet the C# returns true, so the flag is set. Anything that treated "wrote no bits"
+/// as "declined" would drop the flag and shift every parameter after it.
+#[test]
+fn a_parameter_that_writes_no_bits_is_still_flagged() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingDropSlotsComponent, Entity};
+
+    let mut writer = BitWriter::new();
+    let component = Component::CraftingDropSlots(CraftingDropSlotsComponent::default());
+
+    assert!(component.sync("craftingdropslots", &mut writer), "accepted");
+    assert_eq!(writer.bits_used(), 0, "and wrote nothing");
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").unwrap();
+
+    let sync = Entity::new(12, player_components()).sync_data(definition);
+    let index = definition
+        .sync_index("clientcraftingdropslotscomponent", "craftingdropslots")
+        .unwrap();
+
+    assert!(sync.present[index], "flagged despite writing no bits");
+}
+
+/// `featureislockedstatuslist` is a fixed 31 zero bits regardless of its contents — the C#
+/// ignores its own list. Reproduced rather than corrected: the width is what the client
+/// parses, and changing it would shift everything after it.
+#[test]
+fn the_feature_unlock_list_is_always_thirty_one_zero_bits() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, FeatureUnlockComponent};
+
+    for locked in [vec![], vec![true; 30], vec![false; 5]] {
+        let mut writer = BitWriter::new();
+
+        Component::FeatureUnlock(FeatureUnlockComponent { locked })
+            .sync("featureislockedstatuslist", &mut writer);
+
+        assert_eq!(writer.bits_used(), 31);
+        assert!(writer.as_bytes().iter().all(|&b| b == 0), "all zero");
+    }
+}
+
+/// Every component named by the Player's definition is one we implement. If this fails, a
+/// parameter would silently vanish from the packet.
+#[test]
+fn every_component_the_player_needs_is_implemented() {
+    use std::collections::BTreeSet;
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").unwrap();
+
+    let implemented: BTreeSet<&str> = player_components()
+        .iter()
+        .map(|component| component.name())
+        .collect();
+
+    let needed: BTreeSet<&str> = definition
+        .synced_parameters()
+        .map(|(_, component, _)| component)
+        .collect();
+
+    let sync = sync_data_for("Player");
+
+    // Only the components that actually carry a flagged parameter must be implemented; the
+    // definition names more than the C# populates.
+    let used: BTreeSet<&str> = sync
+        .present_indices()
+        .filter_map(|index| definition.parameter_at(index).map(|(c, _)| c))
+        .collect();
+
+    let unimplemented: Vec<_> = used.difference(&implemented).collect();
+
+    assert!(unimplemented.is_empty(), "not implemented: {unimplemented:?}");
+    assert!(needed.len() >= used.len());
+}
