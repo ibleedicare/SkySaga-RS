@@ -38,7 +38,83 @@ Environment variables are unchanged from the C#, so the existing scripts work as
 | `SKYSAGA_WEB_PORT` | `5164` | |
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | address handed out by `game-conductor/retrieve` |
+| `SKYSAGA_CLIENT_BUILD` | `10414` | `36731` serves Alpha V10, translating every packet id |
+| `SKYSAGA_WEB_HTTPS` | *(unset)* | `1` also listens with TLS, which Alpha V10 requires |
+| `SKYSAGA_WEB_HTTPS_PORT` | `5165` | |
+| `SKYSAGA_WEB_CERT` / `SKYSAGA_WEB_KEY` | *(generated)* | PEM paths, if you would rather supply your own |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to see every request body |
+
+## TLS, for the 2017 client
+
+Alpha V10 (b36731) calls the web API over **https**, and it cannot be talked out of it: the
+scheme is a per-RPC flag compiled into the client, chosen at the URL builder `0x00c0eec0`, and
+the login RPC is registered secure. Against a plain-http server the client never gets past the
+login screen, showing `SERVER ERROR / 404`. Build 10414 is http-only and is unaffected by any
+of this, which is why the two are served on separate ports and both clients can be online at
+once:
+
+```text
+http  :5164   build 10414
+https :5165   build 36731
+```
+
+### The certificate
+
+The client does **not** verify the certificate, so a self-signed one is fine. It is generated
+on first run and cached beside the binary as `skysaga-dev-cert.pem` / `skysaga-dev-key.pem`,
+because a certificate that changed on every restart would be a new identity to the client each
+time. Both files are gitignored: one of them is a private key.
+
+To generate one yourself, or to replace a cached one:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -keyout skysaga-dev-key.pem -out skysaga-dev-cert.pem \
+    -subj "/CN=127.0.0.1" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+```
+
+Point `SKYSAGA_WEB_CERT` / `SKYSAGA_WEB_KEY` at them if they live anywhere else. Add the
+address the client actually connects to (`SKYSAGA_PUBLIC_IP`) to `subjectAltName` when the
+client is not on this host: it costs nothing and keeps the certificate usable if anything ever
+does verify it.
+
+**Use RSA, not ECDSA.** The C# emulator served RSA-2048 with `KeyEncipherment` key usage, which
+also permits the old RSA key-exchange suites this client's era of OpenSSL expects.
+
+### Terminating TLS in front, which is what currently works
+
+**`SKYSAGA_WEB_HTTPS=1` does not yet get this client through the handshake.** The listener is
+built on rustls, which implements neither RSA key exchange nor TLS below 1.2, and the 2017
+client cannot negotiate with it: its connections reach the server and go straight to `TIME-WAIT`
+with nothing logged, not even the catch-all unimplemented-route fallback, while `curl -k`
+against the same listener returns 200. Swapping the certificate from ECDSA to RSA changed
+nothing, so it is the protocol, not the certificate.
+
+Until the TLS stack moves to something OpenSSL-backed, terminate it in front of the plain http
+port. `openssl s_server` holds the connection where rustls drops it, and so does socat:
+
+```bash
+# serve the API on plain http somewhere the client is not pointed at
+SKYSAGA_WEB_PORT=5166 SKYSAGA_GAME_PORT=42070 SKYSAGA_AUTH_PORT=10107 \
+    cargo run --release -p skysaga-server
+
+# then terminate TLS on the port the client does use
+socat OPENSSL-LISTEN:5165,reuseaddr,fork,cert=skysaga-dev-cert.pem,key=skysaga-dev-key.pem,\
+verify=0,cipher=ALL:@SECLEVEL=0,openssl-min-proto-version=TLS1 TCP:127.0.0.1:5166
+```
+
+`@SECLEVEL=0` and `openssl-min-proto-version=TLS1` are what let a modern OpenSSL speak to a
+2017 client at all; both are needed. With that in front, the client logs in, fetches its active
+character, and is handed the game server address.
+
+Check it end to end before launching a client, since a dead web server looks exactly like a
+protocol bug from the client side:
+
+```bash
+curl -s  -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5166/ping   # 200
+curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:5165/ping  # 200
+```
 
 ## Tests
 
