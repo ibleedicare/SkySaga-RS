@@ -519,3 +519,130 @@ fn aligned_arrays_are_padded_to_a_byte_boundary() {
 
     assert_eq!(&bytes[8..12], &[0xAB; 4], "the payload starts on byte 8");
 }
+
+// --- the sync flag block ------------------------------------------------------------------------
+
+/// Flags are **not** written index-first.
+///
+/// `BitArray.CopyTo` packs bit `i` at position `i % 8` of byte `i / 8` — least significant
+/// first — and `WriteBits` then emits each byte most-significant-bit first. So within a byte
+/// the flags come out backwards: with only index 0 set, the first bit on the wire is 0 and
+/// the eighth is 1.
+///
+/// A sequential "index 0 first" reader round-trips perfectly against a sequential writer and
+/// is still wrong against the C#, which is exactly how this went unnoticed.
+#[test]
+fn sync_flags_are_reversed_within_each_byte() {
+    use skysaga_proto::packets::{Bits, SyncData};
+
+    let mut present = vec![false; 15];
+    present[0] = true;
+
+    let mut writer = BitWriter::new();
+
+    SyncData {
+        present,
+        parameters: Bits::default(),
+    }
+    .encode(&mut writer);
+
+    let bytes = writer.as_bytes();
+
+    assert_eq!(bytes[0] & 0x80, 0, "wire bit 0 is flag index 7, which is unset");
+    assert_eq!(bytes[0] & 0x01, 0x01, "wire bit 7 is flag index 0, which is set");
+}
+
+/// A complete 32-bit word additionally has its bytes reversed; a trailing partial word does
+/// not. The loop runs `count / 32` times, so 15 flags get no reversal and 40 get one.
+#[test]
+fn complete_words_are_byte_reversed_and_partial_ones_are_not() {
+    use skysaga_proto::packets::{Bits, SyncData};
+
+    // Index 0 set, 40 flags: one complete word (indices 0..31) is reversed, so index 0 —
+    // which lives in byte 0 — ends up in byte 3.
+    let mut present = vec![false; 40];
+    present[0] = true;
+
+    let mut writer = BitWriter::new();
+
+    SyncData {
+        present,
+        parameters: Bits::default(),
+    }
+    .encode(&mut writer);
+
+    let bytes = writer.as_bytes();
+
+    assert_eq!(bytes[0], 0, "byte 0 after reversal holds indices 24..31");
+    assert_eq!(bytes[3] & 0x01, 0x01, "index 0 moved to byte 3");
+}
+
+#[test]
+fn sync_flags_round_trip_at_every_width() {
+    use skysaga_proto::packets::{Bits, SyncData};
+
+    // Widths either side of the byte and word boundaries the packing cares about.
+    for count in [1usize, 7, 8, 9, 15, 16, 31, 32, 33, 40, 64, 89] {
+        let present: Vec<bool> = (0..count).map(|index| index % 3 == 0).collect();
+
+        let mut writer = BitWriter::new();
+
+        SyncData {
+            present: present.clone(),
+            parameters: Bits::default(),
+        }
+        .encode(&mut writer);
+
+        let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
+
+        let decoded = SyncData::decode(&mut reader, count).expect("decodes");
+
+        assert_eq!(decoded.present, present, "{count} flags");
+    }
+}
+
+/// The contradiction that exposed the bug, kept as a regression test.
+///
+/// `TransformComponent::TrySync` returns `false` for `YawDegrees`, so that parameter can
+/// never be flagged. Decoding the captured Airship with the flags read sequentially claimed
+/// it *was* — which is impossible, and was the tell.
+#[test]
+fn the_captured_airship_does_not_sync_yaw_degrees() {
+    use skysaga_proto::packets::{EntityAdd, SyncData};
+    use skysaga_world::{default_entities_path, EntityDefinitions};
+
+    let definitions = EntityDefinitions::load(default_entities_path()).expect("Entities.json");
+    let airship = definitions.get("Airship").expect("Airship is defined");
+
+    let entity = handshake_golden::labels_for_wire_id(234)
+        .into_iter()
+        .map(|label| {
+            let bytes = &capture(&label).bytes;
+            let mut reader = BitReader::from_bytes(bytes);
+            reader.read_packet_id().unwrap();
+            EntityAdd::decode(&mut reader).unwrap()
+        })
+        .find(|packet| packet.name_hash == Some(airship.name_hash()))
+        .expect("the Airship was in the capture");
+
+    let mut reader = BitReader::new(entity.sync_data.bytes(), entity.sync_data.len());
+    let sync = SyncData::decode(&mut reader, airship.synced_parameter_count()).unwrap();
+
+    let yaw = airship
+        .sync_index("transformcomponent", "yawdegrees")
+        .expect("the Airship declares yawdegrees");
+
+    assert!(
+        !sync.present[yaw],
+        "yawdegrees (index {yaw}) is flagged, but TransformComponent never writes it",
+    );
+
+    // And the parameters it *does* sync are the ones Transform actually writes.
+    for (parameter, expected) in [("position", true), ("size", true)] {
+        let index = airship
+            .sync_index("transformcomponent", parameter)
+            .unwrap_or_else(|| panic!("{parameter}"));
+
+        assert_eq!(sync.present[index], expected, "{parameter}");
+    }
+}

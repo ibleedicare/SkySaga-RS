@@ -337,23 +337,75 @@ pub struct SyncData {
 
 impl SyncData {
     pub fn encode(&self, writer: &mut BitWriter) {
-        for &flag in &self.present {
-            writer.write_bit(flag);
-        }
+        writer.write_bits(&Self::flag_bytes(&self.present), self.present.len() as u32);
 
         writer.write_bits_le(self.parameters.len() as u32, LENGTH_BITS);
 
         self.parameters.encode(writer);
     }
 
+    /// Pack the flags the way the C# does, which is **not** "index 0 first".
+    ///
+    /// `BitArray.CopyTo` writes bit `i` into byte `i / 8` at position `i % 8` -- least
+    /// significant first -- and then every *complete* four-byte group is reversed. `WriteBits`
+    /// then emits each byte most-significant-bit first. The net effect is that within a byte
+    /// the flags come out backwards, and within a 32-bit word the bytes do too.
+    ///
+    /// Note the reversal loop runs `count / 32` times, so a trailing partial word is not
+    /// reversed -- an entity with 15 synced parameters gets no reversal at all.
+    fn flag_bytes(present: &[bool]) -> Vec<u8> {
+        let mut data = vec![0u8; present.len().div_ceil(8)];
+
+        for (index, &flag) in present.iter().enumerate() {
+            if flag {
+                data[index / 8] |= 1 << (index % 8);
+            }
+        }
+
+        for group in 0..(present.len() / 32) {
+            data[group * 4..group * 4 + 4].reverse();
+        }
+
+        data
+    }
+
+    /// The inverse of [`Self::flag_bytes`].
+    fn flags_from_bytes(mut data: Vec<u8>, count: usize) -> Vec<bool> {
+        for group in 0..(count / 32) {
+            data[group * 4..group * 4 + 4].reverse();
+        }
+
+        (0..count)
+            .map(|index| data[index / 8] & (1 << (index % 8)) != 0)
+            .collect()
+    }
+
     /// `count` is the entity's declared synced-parameter count, which the reader cannot infer
     /// from the stream — it comes from `Entities.json`.
     pub fn decode(reader: &mut BitReader, count: usize) -> Result<Self, BitError> {
-        let mut present = Vec::with_capacity(count);
+        // Read the flag block back as bytes in RakNet's own layout: whole bytes
+        // most-significant-first, a trailing partial byte into its *low* bits.
+        let mut data = vec![0u8; count.div_ceil(8)];
+        let mut remaining = count;
+        let mut index = 0;
 
-        for _ in 0..count {
-            present.push(reader.read_bit()?);
+        while remaining > 0 {
+            let width = remaining.min(8);
+            let mut byte = 0u8;
+
+            for bit in 0..width {
+                if reader.read_bit()? {
+                    byte |= 0x80 >> bit;
+                }
+            }
+
+            data[index] = if width == 8 { byte } else { byte >> (8 - width) };
+
+            remaining -= width;
+            index += 1;
         }
+
+        let present = Self::flags_from_bytes(data, count);
 
         let len = reader.read_bits_le(LENGTH_BITS)? as usize;
 

@@ -12,3 +12,6 @@ thiserror = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dev-dependencies]
+skysaga-world = { workspace = true }
