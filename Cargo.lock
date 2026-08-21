@@ -513,6 +513,7 @@ dependencies = [
  "skysaga-core",
  "skysaga-proto",
  "skysaga-state",
+ "skysaga-world",
  "thiserror",
  "tracing",
  "tracing-subscriber",

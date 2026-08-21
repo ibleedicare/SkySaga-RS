@@ -28,7 +28,7 @@ pub mod server;
 pub mod world;
 
 pub use server::{GameServer, GameServerConfig};
-pub use world::World;
+pub use world::{World, WorldConfig};
 
 use skysaga_proto::bitstream::{BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::packets::{
