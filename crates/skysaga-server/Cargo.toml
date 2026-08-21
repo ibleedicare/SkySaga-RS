@@ -1,0 +1,24 @@
+[package]
+name = "skysaga-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Runs the SkySaga emulator's servers in one process over one shared state."
+
+[[bin]]
+name = "skysaga-server"
+path = "src/main.rs"
+
+[dependencies]
+skysaga-auth = { workspace = true }
+skysaga-state = { workspace = true }
+skysaga-web = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

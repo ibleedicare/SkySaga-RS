@@ -1,0 +1,14 @@
+[package]
+name = "skysaga-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared, per-account server state: accounts, sessions, characters."
+
+[dependencies]
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

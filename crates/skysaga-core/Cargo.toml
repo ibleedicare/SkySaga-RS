@@ -1,0 +1,13 @@
+[package]
+name = "skysaga-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure value types shared by every SkySaga server: name hashing, bit maths, fixed-width strings."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"

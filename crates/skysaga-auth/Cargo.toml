@@ -1,0 +1,20 @@
+[package]
+name = "skysaga-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Smilegate login server (TCP :10106)."
+
+[dependencies]
+skysaga-core = { workspace = true }
+skysaga-state = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "net", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
