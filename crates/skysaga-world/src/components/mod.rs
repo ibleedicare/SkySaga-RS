@@ -26,16 +26,24 @@
 //! `write_u32`. The two are easy to confuse and the difference is invisible below 8 bits —
 //! see the `bitstream` module docs.
 
+pub mod health;
 pub mod interaction;
+pub mod inventory;
 pub mod owner;
+pub mod physics;
 pub mod pickup;
+pub mod player_name;
 pub mod time_of_day;
 pub mod transform;
 pub mod voxel_link;
 
+pub use health::HealthComponent;
 pub use interaction::InteractionComponent;
+pub use inventory::InventoryComponent;
 pub use owner::OwnerComponent;
+pub use physics::PhysicsComponent;
 pub use pickup::PickupComponent;
+pub use player_name::PlayerNameComponent;
 pub use time_of_day::TimeOfDayComponent;
 pub use transform::TransformComponent;
 pub use voxel_link::{VoxelLink, VoxelLinkComponent};
@@ -52,9 +60,16 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 /// Every component the server implements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Component {
+    /// `clientcharacterphysicscomponent`
+    CharacterPhysics(PhysicsComponent),
+    Health(HealthComponent),
     Interaction(InteractionComponent),
+    Inventory(InventoryComponent),
     Owner(OwnerComponent),
     Pickup(PickupComponent),
+    PlayerName(PlayerNameComponent),
+    /// Same parameters as [`Transform`](Self::Transform); the entity binds a different name.
+    SmoothedTransform(TransformComponent),
     TimeOfDay(TimeOfDayComponent),
     Transform(TransformComponent),
     VoxelLink(VoxelLinkComponent),
@@ -64,9 +79,14 @@ impl Component {
     /// The component's name as it appears in `Entities.json` — lower-case, no separators.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::CharacterPhysics(_) => "clientcharacterphysicscomponent",
+            Self::Health(_) => "clienthealthcomponent",
             Self::Interaction(_) => "clientinteractioncomponent",
+            Self::Inventory(_) => "clientinventorycomponent",
             Self::Owner(_) => "clientownercomponent",
             Self::Pickup(_) => "clientpickupcomponent",
+            Self::PlayerName(_) => "clientplayernamecomponent",
+            Self::SmoothedTransform(_) => "smoothedtransformcomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
             Self::Transform(_) => "transformcomponent",
             Self::VoxelLink(_) => "clientvoxellinkcomponent",
@@ -79,9 +99,14 @@ impl Component {
     /// caller uses it to decide whether to set the parameter's flag bit.
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match self {
+            Self::CharacterPhysics(component) => component.sync(parameter, writer),
+            Self::Health(component) => component.sync(parameter, writer),
             Self::Interaction(component) => component.sync(parameter, writer),
+            Self::Inventory(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),
             Self::Pickup(component) => component.sync(parameter, writer),
+            Self::PlayerName(component) => component.sync(parameter, writer),
+            Self::SmoothedTransform(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
             Self::Transform(component) => component.sync(parameter, writer),
             Self::VoxelLink(component) => component.sync(parameter, writer),

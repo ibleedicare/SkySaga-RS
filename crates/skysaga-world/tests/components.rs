@@ -277,3 +277,111 @@ fn parameters_without_a_component_are_absent() {
     assert!(!sync.present[owner], "no owner component, so no owner parameter");
     assert_eq!(sync.present_indices().count(), 2, "only position and size");
 }
+
+// --- Sheep: the animal template ------------------------------------------------------------------
+
+/// The Sheep reproduces its captured payload, which brings five more components under test.
+///
+/// Its budget is the strongest single confirmation so far. Every parameter except the item
+/// spec accounts for 135 bits of the 306-bit payload, leaving 171 — which is exactly the
+/// width of a default `ItemSpec`, computed independently from its own field list. Two
+/// unrelated calculations meeting on 171 is what says the item spec encoding is right.
+#[test]
+fn the_sheep_reproduces_its_captured_sync_data() {
+    use skysaga_world::{
+        Component, Entity, HealthComponent, InventoryComponent, PhysicsComponent,
+        PlayerNameComponent, TransformComponent,
+    };
+
+    let definitions = definitions();
+    let definition = definitions.get("Sheep").expect("Sheep");
+
+    let sheep = Entity::new(
+        3,
+        vec![
+            // Server.cs seeds exactly these two; everything else is the component default.
+            // 50 was also recoverable from the capture: decoding halfhearts with the 10-bit
+            // ranged width gives 50, which is what the C# assigns.
+            Component::Health(HealthComponent {
+                half_hearts: 50,
+                ..Default::default()
+            }),
+            Component::Inventory(InventoryComponent::default()),
+            Component::CharacterPhysics(PhysicsComponent::default()),
+            Component::PlayerName(PlayerNameComponent::default()),
+            Component::SmoothedTransform(TransformComponent {
+                position: [2000, 70, 629],
+                ..Default::default()
+            }),
+        ],
+    );
+
+    let ours = sheep.sync_data(definition);
+    let theirs = sync_data_for("Sheep");
+
+    assert_eq!(ours.present, theirs.present, "different parameters flagged");
+    assert_eq!(ours.parameters.len(), theirs.parameters.len(), "width differs");
+    assert_eq!(
+        hex(ours.parameters.bytes()),
+        hex(theirs.parameters.bytes()),
+        "payload bytes differ from the C#'s",
+    );
+}
+
+/// The arithmetic stated on its own, so a change is diagnosed as a width change rather than
+/// as "the Sheep broke".
+#[test]
+fn the_sheep_payload_splits_into_135_plus_a_default_item_spec() {
+    use skysaga_proto::types::ItemSpec;
+
+    let sheep = sync_data_for("Sheep");
+
+    assert_eq!(ItemSpec::DEFAULT_BITS, 171);
+    assert_eq!(sheep.parameters.len(), 306);
+    assert_eq!(sheep.parameters.len() - ItemSpec::DEFAULT_BITS, 135);
+}
+
+/// `SmoothedTransform` writes exactly what `Transform` does; only the bound name differs.
+#[test]
+fn smoothed_transform_encodes_like_transform() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, TransformComponent};
+
+    let value = TransformComponent {
+        position: [2000, 70, 629],
+        size: [1, 2, 3],
+        scale: 4,
+    };
+
+    let mut plain = BitWriter::new();
+    let mut smoothed = BitWriter::new();
+
+    Component::Transform(value.clone()).sync("position", &mut plain);
+    Component::SmoothedTransform(value).sync("position", &mut smoothed);
+
+    assert_eq!(hex(plain.as_bytes()), hex(smoothed.as_bytes()));
+    assert_eq!(
+        Component::SmoothedTransform(TransformComponent::default()).name(),
+        "smoothedtransformcomponent",
+    );
+}
+
+/// A default `ItemSpec` round-trips, and takes the escape path: its four materials are *at*
+/// the default length, and the condition is `count < default`, so the short form is not used.
+#[test]
+fn a_default_item_spec_round_trips_through_the_escape_path() {
+    use skysaga_proto::bitstream::{BitReader, BitWriter};
+    use skysaga_proto::types::ItemSpec;
+
+    let spec = ItemSpec::default();
+
+    let mut writer = BitWriter::new();
+    spec.encode(&mut writer);
+
+    assert_eq!(writer.bits_used(), ItemSpec::DEFAULT_BITS);
+
+    let mut reader = BitReader::new(writer.as_bytes(), writer.bits_used());
+
+    assert_eq!(ItemSpec::decode(&mut reader).unwrap(), spec);
+    assert_eq!(reader.bits_remaining(), 0);
+}
