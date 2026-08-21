@@ -18,13 +18,16 @@ raknet-sys = { path = "crates/raknet-sys" }
 raknet = { path = "crates/raknet" }
 skysaga-game = { path = "crates/skysaga-game" }
 skysaga-world = { path = "crates/skysaga-world" }
+skysaga-store = { path = "crates/skysaga-store" }
 
 anyhow = "1"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
