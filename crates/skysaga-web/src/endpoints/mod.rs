@@ -1,6 +1,7 @@
 //! One module per API area. Each exposes `router() -> Router<Api>`.
 
 pub mod account;
+pub mod admin;
 pub mod binary_storage;
 pub mod authentication;
 pub mod debug;

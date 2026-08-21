@@ -31,6 +31,12 @@ pub struct World {
     /// Where the player sits in `entities`, so its burst entry can be replaced.
     pub player_index: usize,
 
+    /// The GeoData Adventure this world is, by name.
+    ///
+    /// `server_info` carries only its hash, which is what the client resolves the scene from.
+    /// The name is kept alongside for anything that has to report what is being served.
+    pub adventure: String,
+
     /// Where a client is sent once it has finished creating its homeworld. See
     /// [`WorldConfig::public_ip`].
     pub transfer_ip: String,
@@ -288,6 +294,7 @@ impl World {
             entities,
             player_entity_id,
             player_index,
+            adventure: config.adventure.clone(),
             transfer_ip: config.public_ip.clone(),
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),

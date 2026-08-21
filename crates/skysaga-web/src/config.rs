@@ -26,6 +26,12 @@ pub struct WebConfig {
 
     /// Datacentre name reported by `/api/game-conductor/geonode`.
     pub datacentre: String,
+
+    /// Shared secret for the admin API, from `SKYSAGA_ADMIN_TOKEN`.
+    ///
+    /// `None` means the admin routes are not mounted at all. A server started normally has no
+    /// admin surface rather than one behind a default token.
+    pub admin_token: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -36,6 +42,7 @@ impl Default for WebConfig {
             public_ip: "127.0.0.1".to_owned(),
             game_port: DEFAULT_GAME_PORT,
             datacentre: "UK".to_owned(),
+            admin_token: None,
         }
     }
 }
@@ -55,6 +62,7 @@ impl WebConfig {
         Self {
             http_port: port("SKYSAGA_WEB_PORT", default.http_port),
             https_port: port("SKYSAGA_WEB_HTTPS_PORT", default.https_port),
+            admin_token: std::env::var("SKYSAGA_ADMIN_TOKEN").ok().filter(|t| !t.is_empty()),
             public_ip: std::env::var("SKYSAGA_PUBLIC_IP").unwrap_or(default.public_ip),
             game_port: port("SKYSAGA_GAME_PORT", default.game_port),
             datacentre: std::env::var("SKYSAGA_DATACENTRE").unwrap_or(default.datacentre),
