@@ -8,3 +8,6 @@ obj/
 skysaga.db
 skysaga.db-shm
 skysaga.db-wal
+
+# the launcher is its own workspace
+/launcher/target

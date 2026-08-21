@@ -1,0 +1,35 @@
+# Deliberately its own workspace, not a member of the server's.
+#
+# eframe pulls in winit, glow and their system dependencies. The server workspace is built
+# around a test suite that runs in about a second and needs no display; making the launcher a
+# member would put all of that on the critical path of `cargo test --workspace`, for a binary
+# the server never calls.
+#
+# It still depends on skysaga-store by path: the launcher lists the accounts that already
+# exist, and reimplementing that read would mean two definitions of the same schema.
+
+[package]
+name = "skysaga-launcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+skysaga-state = { path = "../crates/skysaga-state" }
+skysaga-store = { path = "../crates/skysaga-store" }
+
+anyhow = "1"
+eframe = "0.36"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dev-dependencies]
+skysaga-proto = { path = "../crates/skysaga-proto" }
+uuid = { version = "1", features = ["v4"] }
