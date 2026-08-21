@@ -47,7 +47,7 @@ async fn geonode(State(api): State<Api>) -> Json<impl Serialize> {
             uuid: Uuid::new_v4(),
             datacentre: api.config.datacentre.clone(),
             ip: api.config.public_ip.clone(),
-            port: api.config.http_port,
+            port: api.config.advertised_port(),
         }],
     })
 }

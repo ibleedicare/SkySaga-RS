@@ -4,7 +4,7 @@
 //! session state machine only reads it, so it can be built by [`World::home_island`], decoded
 //! from a capture (as the tests do), or assembled by hand.
 
-use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
+use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, MapSpec, ServerInfo};
 use skysaga_world::terrain::CHUNK_SIZE;
 use skysaga_world::{
     Component, Entity, EntityDefinitions, HealthComponent, InteractionComponent,
@@ -200,12 +200,38 @@ impl World {
                 is_my_world: config.world_type == 1,
                 chat_host: config.chat_host.clone(),
                 chat_port: config.chat_port,
+
+                // --- read only by build 36731 ---------------------------------------------
+                //
+                // The 2017 struct carries the owner as a binary uuid rather than a string, and
+                // adds a world and a server uuid. They are sent as absent when we have none:
+                // an all-zero uuid is a *value*, and the client cannot tell it from a real one.
+                owner_uuid: skysaga_proto::types::uuid_to_wire_bytes(&config.owner_guid),
+                world_uuid: None,
+                server_uuid: None,
+                max_users: 32,
+                min_users_required_to_play: 0,
+                game_mode_entity_id: 0,
+                is_opened_to_matchmaking: false,
             },
 
             map: MapDefinition {
                 size_chunks: [config.terrain.size_chunks as u32; 3],
                 biome: Some(skysaga_core::name_hash(&config.biome)),
                 game_mode: 1,
+
+                // --- read only by build 36731 ---------------------------------------------
+                //
+                // Real GeoData indices, derived from `Adventures[82]` in build 36731's own
+                // GeoData rather than chosen by hand. Index 0 is the client's "none" sentinel,
+                // so the all-zero map it used to get named nothing and could not be resolved.
+                //
+                // `adventure_type` and `map_file_name` stay overridable so the remaining
+                // unknowns can be bisected without a rebuild.
+                spec: MapSpec::home_island_b36731(config.terrain.seed as u32),
+                adventure_type: std::env::var("SKYSAGA_MAP_ADVENTURE_TYPE").unwrap_or_default(),
+                map_file_name: std::env::var("SKYSAGA_MAP_FILENAME").unwrap_or_default(),
+                ..MapDefinition::default()
             },
 
             chunks: terrain_chunks(&config.terrain),

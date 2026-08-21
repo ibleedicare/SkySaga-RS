@@ -40,6 +40,8 @@
 
 use thiserror::Error;
 
+use crate::client_build::ClientBuild;
+
 /// RakNet's first user-assignable message id. Game packet ids are offsets from here.
 pub const ID_USER_PACKET_ENUM: u16 = 134;
 
@@ -65,11 +67,41 @@ pub enum BitError {
 pub struct BitWriter {
     data: Vec<u8>,
     bits: usize,
+
+    /// Which build's ids [`Self::write_packet_id`] emits. Carried on the writer rather than
+    /// read from a global so tests can build both dialects in one process.
+    build: ClientBuild,
+
+    /// Set when a packet id has no equivalent in [`Self::build`], which makes everything
+    /// written after it meaningless. Checked by the caller instead of writing a wrong id.
+    unmapped: Option<u16>,
 }
 
 impl BitWriter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A writer that emits `build`'s packet ids.
+    pub fn for_build(build: ClientBuild) -> Self {
+        Self {
+            build,
+            ..Self::default()
+        }
+    }
+
+    /// The packet id that had no equivalent in this build, if one was attempted.
+    ///
+    /// A packet that reports this **must not be sent**: the id is the only part the client
+    /// dispatches on, and a wrong one makes it act on the body as some other packet entirely.
+    pub fn unmapped(&self) -> Option<u16> {
+        self.unmapped
+    }
+
+    /// Which build this writer emits for. Packets whose *layout* changed between builds, not
+    /// just their id, branch on this.
+    pub fn build(&self) -> ClientBuild {
+        self.build
     }
 
     /// Number of bits written so far. RakNet sends this, not the byte count.
@@ -241,6 +273,19 @@ impl BitWriter {
         self.write_bits(bytes, bytes.len() as u32 * 8);
     }
 
+    /// A presence bit, then the bytes if present.
+    ///
+    /// The shape 36731 uses for its optional uuids: `WriteOptional` around a raw 16-byte
+    /// write. The bytes go out at whatever bit offset the presence bit left, so this is
+    /// **not** an aligned write.
+    pub fn write_optional_bytes(&mut self, value: Option<&[u8]>) {
+        self.write_bit(value.is_some());
+
+        if let Some(bytes) = value {
+            self.write_bits(bytes, bytes.len() as u32 * 8);
+        }
+    }
+
     /// The "a resource, or none" shape used all over the protocol: one bit, then 32 bits.
     pub fn write_optional_u32(&mut self, value: Option<u32>) {
         self.write_bit(value.is_some());
@@ -250,11 +295,33 @@ impl BitWriter {
         }
     }
 
+    /// Write a packet id **without** translating it, for packets that exist in only one build.
+    ///
+    /// [`Self::write_packet_id`] maps our 10414 ordinal to the target build's. A packet with no
+    /// 10414 counterpart has no ordinal to map *from*, so it names its own id directly. Use this
+    /// only for such packets: on anything shared, it would send a 10414 id to a 36731 client.
+    pub fn write_native_packet_id(&mut self, id: u16) {
+        let wire = id + ID_USER_PACKET_ENUM;
+
+        if wire >= 255 {
+            self.write_u8(0xFF);
+            self.write_u8((wire - 255) as u8);
+        } else {
+            self.write_u8(wire as u8);
+        }
+    }
+
     /// Write a game packet id, offset by [`ID_USER_PACKET_ENUM`].
     ///
     /// Anything reaching 255 is escaped: `0xFF` followed by the remainder. 255 is RakNet's
     /// own marker for "the id continues in the next byte".
     pub fn write_packet_id(&mut self, id: u16) {
+        let Some(id) = self.build.to_wire(id) else {
+            self.unmapped = Some(id);
+
+            return;
+        };
+
         let wire = id + ID_USER_PACKET_ENUM;
 
         if wire >= 255 {

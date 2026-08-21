@@ -3,3 +3,12 @@
 # C# build output from the golden-vector generator
 bin/
 obj/
+
+# Development TLS material, generated on first run and cached beside the binary. The 2017
+# client needs https and accepts a self-signed certificate; these are per-machine and one of
+# them is a private key, so neither belongs in the repository.
+skysaga-dev-cert.pem
+skysaga-dev-key.pem
+skysaga-rsa-cert.pem
+skysaga-rsa-key.pem
+skysaga-dev-cert.pfx
