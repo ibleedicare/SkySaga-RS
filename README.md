@@ -78,7 +78,7 @@ Read by `skysaga-server`:
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
 | `SKYSAGA_CHAT_PORT` | `4444` | the IRC server every chat message goes over |
-| `SKYSAGA_DATA_DIR` | *(the C# tree)* | directory holding `Entities.json` |
+| `SKYSAGA_DATA_DIR` | *(a checkout of the upstream C# tree)* | directory holding `Entities.json` |
 | `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
 | `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
