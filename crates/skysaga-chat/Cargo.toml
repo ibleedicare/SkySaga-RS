@@ -1,0 +1,18 @@
+[package]
+name = "skysaga-chat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The client's chat service: an IRC server speaking its non-RFC dialect (TCP :4444)."
+
+[dependencies]
+skysaga-state = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-util", "net", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"

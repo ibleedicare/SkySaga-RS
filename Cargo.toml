@@ -23,6 +23,7 @@ raknet = { path = "crates/raknet" }
 skysaga-game = { path = "crates/skysaga-game" }
 skysaga-world = { path = "crates/skysaga-world" }
 skysaga-store = { path = "crates/skysaga-store" }
+skysaga-chat = { path = "crates/skysaga-chat" }
 
 anyhow = "1"
 async-trait = "0.1"

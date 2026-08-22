@@ -15,6 +15,7 @@ skysaga-auth = { workspace = true }
 skysaga-state = { workspace = true }
 skysaga-store = { workspace = true }
 skysaga-web = { workspace = true }
+skysaga-chat = { workspace = true }
 skysaga-game = { workspace = true }
 skysaga-world = { workspace = true }
 anyhow = { workspace = true }

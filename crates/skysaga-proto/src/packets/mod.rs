@@ -10,6 +10,7 @@
 //! Every layout here is checked against bytes captured from the C# server or the live client,
 //! never against a reading of the C# source alone.
 
+pub mod chat;
 pub mod character_creation;
 pub mod handshake;
 pub mod interaction;
@@ -23,6 +24,7 @@ pub mod voxel;
 pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
+pub use chat::{Channel, ChannelType, RequestChatChannelData, SendChatChannelData};
 pub use interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 pub use inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,

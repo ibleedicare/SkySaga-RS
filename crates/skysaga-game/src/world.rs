@@ -4,6 +4,7 @@
 //! session state machine only reads it, so it can be built by [`World::home_island`], decoded
 //! from a capture (as the tests do), or assembled by hand.
 
+use skysaga_proto::packets::chat::Channel;
 use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
 use skysaga_world::geodata::{default_geodata_path, GeoData};
 use skysaga_world::terrain::CHUNK_SIZE;
@@ -66,6 +67,13 @@ pub struct World {
     /// swing as a dig -- which is wrong, but wrong in the direction that cannot duplicate
     /// items.
     pub geodata: GeoData,
+
+    /// The chat channels this world offers.
+    ///
+    /// Handed out on request over RakNet; the messages themselves go over the IRC socket that
+    /// `server_info` names. An empty list means the client never issues a `JOIN` and chat is
+    /// silent even with the IRC server running.
+    pub chat_channels: Vec<Channel>,
 
     /// The containers in this world, un-encoded.
     ///
@@ -214,6 +222,9 @@ pub struct WorldConfig {
     pub biome: String,
     pub chat_host: String,
     pub chat_port: u16,
+
+    /// `type:name` pairs, comma separated. The client turns `global` into `#global`.
+    pub chat_channels: String,
     pub terrain: TerrainGenerator,
 
     /// Frozen time of day, over a 65536-tick cycle.
@@ -266,6 +277,7 @@ impl Default for WorldConfig {
             biome: "Desert".to_owned(),
             chat_host: "127.0.0.1".to_owned(),
             chat_port: 4444,
+            chat_channels: "0:global".to_owned(),
             terrain: TerrainGenerator::default(),
             time_of_day: 65536 / 2,
             fixed_time_of_day: true,
@@ -462,6 +474,7 @@ impl World {
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
             geodata: load_geodata(),
+            chat_channels: Channel::parse_list(&config.chat_channels),
             containers,
         }
     }

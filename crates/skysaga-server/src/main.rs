@@ -126,6 +126,18 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_task = tokio::spawn(skysaga_auth::serve(auth, Arc::clone(&state)));
 
+    // Chat, which is a second transport rather than part of the game socket: the RakNet side
+    // hands out the *list of channels* and this carries every actual message. Without it the
+    // client retries the connection forever and its chat never becomes enabled, because the
+    // `001` greeting is what advances its state machine.
+    let chat_config = skysaga_chat::ChatServerConfig::from_env();
+
+    let chat = skysaga_chat::ChatServer::bind(&chat_config, Arc::clone(&state))
+        .await
+        .with_context(|| format!("binding the chat server on port {}", chat_config.port))?;
+
+    let chat_task = tokio::spawn(chat.run());
+
     // The game server, over the *same* AppState. Character creation happens on this socket
     // but is read back over HTTP, so the two have to agree -- run as separate processes, the
     // client finishes creating a character, characters/list still reports no biome, and it
@@ -168,6 +180,12 @@ async fn main() -> anyhow::Result<()> {
             result.context("auth task panicked")?.context("auth server failed")?;
 
             anyhow::bail!("the auth server stopped serving unexpectedly");
+        }
+
+        result = chat_task => {
+            result.context("chat task panicked")?;
+
+            anyhow::bail!("the chat server stopped serving unexpectedly");
         }
 
         _ = tokio::signal::ctrl_c() => {
