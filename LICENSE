@@ -41,9 +41,10 @@ particular it does not, and cannot, grant any rights in:
 Those remain the property of their respective rights holders. They are not
 distributed here, and no part of this repository grants permission to use them.
 
-Third-party components keep their own licences:
+This repository vendors no third-party source. It is built against two outside
+projects, neither of them included:
 
-  * `server/` — MIT, EDITzDev/SkySaga; see `server/LICENSE`.
-  * `SkySagaResourceExplorer/` — MIT, EDITzDev/SkySagaResourceExplorer; see
-    `SkySagaResourceExplorer/LICENSE`.
-  * SLikeNet / RakNet, built as `libRakNet.so` — see that project's own terms.
+  * SLikeNet / RakNet, linked as `libRakNet.so`, under that project's own
+    terms.
+  * EDITzDev/SkySaga (MIT), which this is a port of, and whose copyright
+    notice is retained above.
