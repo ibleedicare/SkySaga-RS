@@ -16,21 +16,6 @@ contain.
 
 ---
 
-## What is wrong with the current shape
-
-Not a criticism of the original: it grew by reverse-engineering, which is the only way it
-could have been written. But it now has four properties that make contribution hard:
-
-| Problem | Where | Consequence |
-|---|---|---|
-| Three processes, no shared state | `SkySaga.Web` / `SmilegateAuth` / `SkySaga.Game` | The web server knows the account name; the game server cannot see it. State is duplicated or guessed. |
-| Global mutable statics | `Web/Session.cs`, `PersistentRecordEndpoints._characterUUID` | Exactly one player, ever. Two clients corrupt each other. |
-| Networking fused to game logic | `Connection.cs`, ~2,800 lines | Nothing about the world can be tested without a RakNet socket and a real client. |
-| Reflection-driven components | `EntityManager.cs` (`Activator.CreateInstance`) | Rust has no reflection, so this cannot be transliterated; and the C# form hides which components exist. |
-| Hardcoded world seeding | `Server.cs` ctor, `Connection::InitialChunkSync` (`Data1[200+1024+1024+1] = 13`) | Adding a map means editing magic array indices. |
-
----
-
 ## Shape of the port
 
 ```
