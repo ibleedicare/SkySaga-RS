@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
+use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -114,6 +115,13 @@ pub enum ClientPacket {
     /// 240 — a player is looking that way.
     SetLookAtDirection(SetLookAtDirection),
 
+    // --- doing something to an entity ---------------------------------------------------
+    /// 198 — who did what to what. **Pressing E arrives here**, not as `InteractWithEntity`.
+    ExecuteEntityAction(ExecuteEntityAction),
+
+    /// 154 — who touched what. Carries no verb, so nothing can be decided from it.
+    InteractWithEntity(InteractWithEntity),
+
     /// Anything else, by wire id.
     Unknown(u16),
 }
@@ -188,6 +196,14 @@ impl ClientPacket {
 
             SetLookAtDirection::ID => SetLookAtDirection::decode(&mut reader)
                 .map(Self::SetLookAtDirection)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            ExecuteEntityAction::ID => ExecuteEntityAction::decode(&mut reader)
+                .map(Self::ExecuteEntityAction)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            InteractWithEntity::ID => InteractWithEntity::decode(&mut reader)
+                .map(Self::InteractWithEntity)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             _ => Self::from_wire_id(wire_id),
@@ -275,6 +291,20 @@ pub struct Session {
     /// Which way the player is facing, from the same packet.
     facing_yaw: Option<u32>,
 
+    /// The entity whose container this player has open, or 0 for none.
+    ///
+    /// **This is the whole opening mechanism.** There is no "open the container" packet: the
+    /// client opens a loot window when the *player's* `usingentityid` becomes the target's id,
+    /// and closes it when that goes back to 0.
+    using_entity: u32,
+
+    /// Containers whose `hasbeenopened` is currently raised.
+    ///
+    /// The **close** signal, not the open one. The client's open path fires only while it is
+    /// clear and its close path on the rising edge, so it is raised to shut a lid and lowered
+    /// again before the next open.
+    closed_lids: BTreeSet<u32>,
+
     /// Which account this connection belongs to.
     ///
     /// Claimed from the conductor's reservation when the connection arrives, because the
@@ -309,6 +339,8 @@ impl Session {
             active_slot: 0,
             position: None,
             facing_yaw: None,
+            using_entity: 0,
+            closed_lids: BTreeSet::new(),
             account: None,
             reported: BTreeSet::new(),
         }
@@ -484,6 +516,15 @@ impl Session {
                 self.stage = Stage::SentEntities;
 
                 info!(entities = world.entities.len(), "sending entities");
+
+                // Give every container in the world an inventory in this session's model, so
+                // a drag into a chest has somewhere to land. Done here rather than in `new`
+                // because the world is not known until a packet arrives.
+                for container in &world.containers {
+                    if !self.inventories.is_open(container.id) {
+                        self.inventories.open(container.id, container.slots);
+                    }
+                }
 
                 // This player's own body, under the id this connection was given, carrying
                 // the name and appearance from its profile.
@@ -738,6 +779,37 @@ impl Session {
                 Vec::new()
             }
 
+            // --- doing something to an entity ------------------------------------------
+            (ClientPacket::ExecuteEntityAction(packet), _) => {
+                debug!(
+                    source = packet.source_entity,
+                    target = packet.target_entity,
+                    action = ?packet.action,
+                    "entity action",
+                );
+
+                // Only Interact opens anything. Opening on any action at all would have a
+                // pickaxe swing open the loot window.
+                if packet.action == Some(Action::Interact) {
+                    self.open_container(packet.target_entity, world)
+                } else {
+                    Vec::new()
+                }
+            }
+
+            (ClientPacket::InteractWithEntity(packet), _) => {
+                // No verb, so there is nothing to decide. Named rather than left to `Unknown`
+                // because it is sent alongside every E press, and an unhandled packet that
+                // arrives on every interaction is noise that hides real gaps.
+                debug!(
+                    interacting = packet.interacting_entity,
+                    target = packet.target_entity,
+                    "interact",
+                );
+
+                Vec::new()
+            }
+
             (ClientPacket::Unknown(wire_id), _) => {
                 // An unimplemented packet is the usual reason a client stalls, so it is worth
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
@@ -764,6 +836,168 @@ impl Session {
 }
 
 impl Session {
+    /// Open or close the container `target`, and say what to send.
+    ///
+    /// # There is no "open the container" packet
+    ///
+    /// The client opens a loot window when the **player's** `usingentityid` becomes the
+    /// target's entity id, and closes it when that goes back to 0. Nothing is sent to the
+    /// container to open it; the answer to an interact is a sync of a component on the
+    /// *player*. Years of adjusting chest parameters got nowhere because of this.
+    ///
+    /// # `hasbeenopened` is the close signal
+    ///
+    /// The client's open path fires only while it is clear, and its close path on the
+    /// false -> true edge. So it is raised to shut a lid and lowered again before the next
+    /// open, which is safe because the two happen on separate key presses.
+    ///
+    /// # Why a loot chest toggles and nothing else does
+    ///
+    /// **The client never says when a panel is dismissed.** Clicking a window's X sends
+    /// nothing at all, and the interact fires on open only. So a plain toggle drifts out of
+    /// phase the moment a player closes a window with the mouse: the server still believes it
+    /// open, the next E is spent "closing" something already gone, and the player has to press
+    /// E twice.
+    ///
+    /// A loot chest is the exception -- it has no close button, so E really is the only way to
+    /// shut it. Anything with an X is re-opened instead: `usingentityid` drops to 0 and is
+    /// restored, because the client reacts to a *change* and would ignore being told the same
+    /// id twice.
+    fn open_container(&mut self, target: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(container) = world.container(target) else {
+            debug!(target, "not a container; nothing to open");
+
+            return Vec::new();
+        };
+
+        let opening = self.using_entity != target;
+
+        if !opening && !container.is_loot_chest {
+            // Re-open. Two syncs rather than one: the client ignores being told the id it
+            // already holds, so it has to see 0 and then the id again.
+            //
+            // The C# spreads these over two ticks. Here they are two packets in one burst,
+            // which is two distinct values in the order they must be read. Worth confirming
+            // in the client the first time a panel with an X button is wired up; the chest
+            // path below does not use it.
+            self.closed_lids.remove(&target);
+
+            let mut out = Vec::new();
+
+            self.using_entity = 0;
+            out.extend(self.sync_player(world));
+
+            self.using_entity = target;
+            out.extend(self.sync_player(world));
+
+            debug!(target, "re-opening; the client closed it without telling us");
+
+            return out;
+        }
+
+        self.using_entity = if opening { target } else { 0 };
+
+        if opening {
+            self.closed_lids.remove(&target);
+        } else {
+            self.closed_lids.insert(target);
+        }
+
+        debug!(target, opening, "container");
+
+        let mut out = self.sync_player(world);
+
+        out.extend(self.sync_container(target, world));
+
+        out
+    }
+
+    /// The entity this player has a container open on, or 0.
+    pub fn using_entity(&self) -> u32 {
+        self.using_entity
+    }
+
+    /// Whether a container's lid is currently shut.
+    pub fn has_been_opened(&self, container: u32) -> bool {
+        self.closed_lids.contains(&container)
+    }
+
+    /// Sync the player's own body: the parameters that open a container and hold the rucksack.
+    fn sync_player(&self, world: &World) -> Vec<Vec<u8>> {
+        self.sync_of(self.player_entity_id, &["usingentityid"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// Sync a container: its lid, and what is in it.
+    fn sync_container(&self, container: u32, world: &World) -> Vec<Vec<u8>> {
+        self.sync_of(container, &["hasbeenopened"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// One `EntitySync` for `entity`, carrying only `parameters`.
+    fn sync_of(&self, entity: u32, parameters: &[&str], world: &World) -> Option<Vec<u8>> {
+        let (built, definition) = self.entity_now(entity, world)?;
+
+        let sync_data = built.sync_data_for(definition, parameters);
+
+        Some(encode(|w| {
+            let mut payload = BitWriter::new();
+            sync_data.encode(&mut payload);
+
+            EntitySync {
+                id: entity,
+                sync_data: skysaga_proto::packets::Bits::from_writer(&payload),
+            }
+            .encode(w)
+        }))
+    }
+
+    /// An entity as it is *now*, with this session's state written into it.
+    ///
+    /// The world's copy was built at startup. What has changed since -- what is in an
+    /// inventory, whether a lid is shut, where a player's `usingentityid` points -- lives on
+    /// the session, so re-encoding has to fold it back in.
+    fn entity_now<'a>(
+        &self,
+        entity: u32,
+        world: &'a World,
+    ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
+        if entity == self.player_entity_id {
+            let (mut player, definition) =
+                world.player_entity(&self.character, entity, self.inventory())?;
+
+            for component in &mut player.components {
+                if let Component::UseEntity(use_entity) = component {
+                    use_entity.using_entity_id = self.using_entity;
+                }
+            }
+
+            return Some((player, definition));
+        }
+
+        let container = world.container(entity)?;
+
+        let mut built = container.entity.clone();
+
+        for component in &mut built.components {
+            match component {
+                Component::Inventory(inventory) => {
+                    inventory.inventory_entity_list = self.inventories.slots(entity).to_vec();
+                }
+
+                Component::Interaction(interaction) => {
+                    interaction.has_been_opened = self.closed_lids.contains(&entity);
+                }
+
+                _ => {}
+            }
+        }
+
+        Some((built, &container.definition))
+    }
+
     /// Turn the model's [`Effect`]s into packets, in the order they must be sent.
     ///
     /// The ordering is the model's, not this function's: an `ItemCreated` arrives before the
@@ -812,30 +1046,17 @@ impl Session {
                 Some(encode(|w| EntityRemoved { entity_id: entity }.encode(w)))
             }
 
+            // Works for the player and for a container alike. A chest is an entity the client
+            // is drawing too, so syncing only the player after a transfer leaves the chest's
+            // square still showing an item that has moved.
             Effect::SlotsChanged { owner } => {
-                if owner != self.player_entity_id {
-                    // A container. Nothing in the world has one yet, so there is no definition
-                    // to encode it from; this is where opening a chest will plug in.
-                    warn!(owner, "no definition for this inventory; not syncing it");
+                let packet = self.sync_of(owner, &["inventoryentitylist"], world);
 
-                    return None;
+                if packet.is_none() {
+                    warn!(owner, "no definition for this inventory; not syncing it");
                 }
 
-                let (player, definition) =
-                    world.player_entity(&self.character, owner, self.inventory())?;
-
-                let sync_data = player.sync_data_for(definition, &["inventoryentitylist"]);
-
-                Some(encode(|w| {
-                    let mut payload = BitWriter::new();
-                    sync_data.encode(&mut payload);
-
-                    EntitySync {
-                        id: owner,
-                        sync_data: skysaga_proto::packets::Bits::from_writer(&payload),
-                    }
-                    .encode(w)
-                }))
+                packet
             }
         }
     }

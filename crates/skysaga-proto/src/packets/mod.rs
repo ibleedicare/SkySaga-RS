@@ -12,6 +12,7 @@
 
 pub mod character_creation;
 pub mod handshake;
+pub mod interaction;
 pub mod inventory;
 pub mod movement;
 pub mod photo;
@@ -20,6 +21,7 @@ pub mod transfer;
 pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
+pub use interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 pub use inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,

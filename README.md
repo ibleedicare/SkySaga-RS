@@ -113,10 +113,32 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 310 tests, no network, nothing to prepare
+cargo test --workspace          # 469 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
+
+**Some of them drive a headless client over a real socket.** `skysaga-probe` speaks the
+protocol without rendering anything, so "does the server actually answer that packet" is a
+test that runs in a second rather than a Wine client and a human looking at a screen. The
+`parity_*` files use it: they start this server in-process, play a scenario, and assert what
+came back. That is the layer where the inventory packets were failing — they decoded fine and
+were then dropped, which from a player's side is a UI that freezes rather than an error.
+
+**Those same scenarios can be replayed against the running C# server.** Start it beside this
+one and point the tests at it:
+
+```bash
+./scripts/run-oracle.sh                                  # C# on :43069, admin panel on :6175
+SKYSAGA_ORACLE_GAME=127.0.0.1:43069 \
+  SKYSAGA_ORACLE_ADMIN=http://127.0.0.1:6175 \
+  cargo test -p skysaga-probe
+```
+
+Without those variables the oracle tests **skip** rather than fail, so `cargo test --workspace`
+stays runnable with nothing prepared. Two behavioural differences were found this way rather
+than by reading the C#, and both are now asserted on each side: it echoes a mover its own
+position, and its idea of which way a player faces is always approximately zero.
 
 **The C# server is the oracle, not this code's own opinion.** The fixtures under
 `crates/*/tests/` were captured by running the real C# servers and recording what they put on
@@ -171,9 +193,10 @@ Defects found while reading the original, fixed here rather than reproduced:
 - **Buying from the trading post is not implemented.** Browsing works: the catalogue and the
   search both answer. A purchase is a *teleport* to the seller's home island rather than an
   item transfer, so it belongs to the world-transfer work rather than to the trading routes.
-- **Containers are not open-able.** `InteractWithEntity` is not handled, so chests, the
-  mailbox and the crafting stations cannot be opened. The inventory model already supports two
-  inventories moving items between them; what is missing is the packet that opens one.
+- **Only a chest is open-able, and each connection has its own view of it.** The mailbox and
+  the crafting stations need their own handlers; and two players looking into one chest see
+  two different sets of contents, because the container store is per session rather than
+  shared.
 
 ## Contributing
 
