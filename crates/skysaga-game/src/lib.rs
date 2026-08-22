@@ -398,6 +398,9 @@ pub struct Session {
     /// Dig ticks accumulated per voxel, until it gives way.
     dig_damage: std::collections::HashMap<([u32; 3], [u32; 3]), u32>,
 
+    /// Whether a close raises `hasbeenopened`. See [`Session::set_raise_lid_on_close`].
+    raise_lid_on_close: bool,
+
     /// Containers whose `hasbeenopened` is currently raised.
     ///
     /// The **close** signal, not the open one. The client's open path fires only while it is
@@ -440,6 +443,7 @@ impl Session {
             position: None,
             facing_yaw: None,
             using_entity: 0,
+            raise_lid_on_close: true,
             closed_lids: BTreeSet::new(),
             voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
@@ -1207,32 +1211,73 @@ impl Session {
 
         self.using_entity = if opening { target } else { 0 };
 
+        // Whether the flag actually moves. The C# syncs dirty parameters, so it sends this
+        // only when it changed; doing the same keeps a redundant value off the wire.
+        let was_raised = self.closed_lids.contains(&target);
+
         if opening {
             self.closed_lids.remove(&target);
-        } else {
+        } else if self.raise_lid_on_close {
             self.closed_lids.insert(target);
         }
 
-        debug!(target, opening, "container");
+        let now_raised = self.closed_lids.contains(&target);
+
+        debug!(target, opening, now_raised, "container");
 
         if opening {
-            // Only the player. `hasbeenopened` is already false, so there is no edge to send
-            // and the C# -- which syncs what changed and nothing else -- sends nothing here.
-            return self.sync_player(world);
+            let mut out = Vec::new();
+
+            // **Lowered again before the next open, and the client has to be told.** Its open
+            // path fires only while `hasbeenopened` is false, so a copy left true after a
+            // close poisons every open that follows. Clearing it server-side and staying quiet
+            // is the same bug wearing a disguise.
+            if was_raised {
+                out.extend(self.sync_container(target, world));
+            }
+
+            out.extend(self.sync_player(world));
+
+            return out;
         }
 
-        // **The lid before the window, and this order is load-bearing.**
+        // **The lid before the window.**
         //
         // `usingentityid` going to 0 closes the loot *window*. `hasbeenopened` going
-        // false -> true plays the *lid* animation, and the client fires that only while its own
-        // "window open" latch is still set. Closing the window first clears the latch, so the
-        // `hasbeenopened` edge lands too late and is dropped -- the window goes, the chest
-        // stays standing open, and nothing reports an error.
-        let mut out = self.sync_container(target, world);
+        // false -> true is what the notes call the close signal, and the client acts on it only
+        // while its own "window open" latch (interaction component `+0x3c`) is still set.
+        // Closing the window first would clear that latch before the edge arrived.
+        //
+        // **Whether this is what raises or lowers the lid model is unsettled.** Observed live
+        // on 2026-08-22: after a close the window goes, the prompt returns to "Open Chest",
+        // and the chest is still standing open. Reordering these two did not change that, so
+        // either the flag means "this chest has been looted" and the raised lid is its
+        // intended appearance, or the close event needs something else again. `/lid off` stops
+        // raising it at all, which tells the two apart in one session -- see
+        // [`Session::raise_lid_on_close`].
+        let mut out = if now_raised != was_raised {
+            self.sync_container(target, world)
+        } else {
+            Vec::new()
+        };
 
         out.extend(self.sync_player(world));
 
         out
+    }
+
+    /// Whether a close raises `hasbeenopened`.
+    ///
+    /// A diagnostic lever, not a feature, in the same spirit as the C#'s `/useid`: the flag is
+    /// documented as the close signal, and the chest is nonetheless left standing open after
+    /// one. Turning it off distinguishes "the raised lid is what this flag means" from "the
+    /// close event needs something else", without a rebuild between the two.
+    pub fn set_raise_lid_on_close(&mut self, raise: bool) {
+        self.raise_lid_on_close = raise;
+    }
+
+    pub fn raises_lid_on_close(&self) -> bool {
+        self.raise_lid_on_close
     }
 
     /// Place a block or break one, and say what to send.

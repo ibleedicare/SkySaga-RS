@@ -307,11 +307,9 @@ fn closing_syncs_the_lid_before_the_window() {
 }
 
 #[test]
-fn opening_does_not_sync_the_lid_at_all() {
-    // `hasbeenopened` is already false when a chest opens, so there is no edge to send. The C#
-    // syncs only parameters that actually changed and therefore sends nothing here; a
-    // redundant false is not something the client is ever sent, and this path is delicate
-    // enough that "probably harmless" is not a good enough reason to differ.
+fn the_first_open_syncs_the_player_and_nothing_else() {
+    // `hasbeenopened` starts false, so a first open has no edge to send. The C# syncs only
+    // what changed and sends nothing about the chest here.
     let world = world();
     let mut session = playing(&world);
 
@@ -322,7 +320,34 @@ fn opening_does_not_sync_the_lid_at_all() {
     assert_eq!(
         synced(&burst),
         vec![session.player_entity_id()],
-        "opening should sync the player and nothing else",
+        "a first open should sync the player alone",
+    );
+}
+
+#[test]
+fn re_opening_lowers_the_flag_the_close_raised() {
+    // **The flag has to be lowered again before the next open, and that lowering must be
+    // sent.** The client's open path fires only while `hasbeenopened` is false, so a copy left
+    // true after a close poisons every open that follows -- the notes call it exactly that.
+    //
+    // Clearing it server-side without telling the client is the same bug wearing a disguise:
+    // the server believes the chest is openable and the client does not.
+    let world = world();
+    let mut session = playing(&world);
+
+    let chest = chest(&world);
+
+    press_e(&mut session, &world, chest); // open
+    press_e(&mut session, &world, chest); // close, raising the flag
+
+    let burst = press_e(&mut session, &world, chest); // open again
+
+    assert!(!session.has_been_opened(chest), "lowered server-side");
+
+    assert!(
+        synced(&burst).contains(&chest),
+        "and the client was told: {:?}",
+        synced(&burst),
     );
 }
 

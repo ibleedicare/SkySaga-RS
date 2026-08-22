@@ -244,6 +244,13 @@ pub enum AdminCommand {
         attachments: Vec<(String, u32)>,
     },
 
+    /// Turn the `hasbeenopened` raise on a container close on or off.
+    ///
+    /// A diagnostic lever rather than a feature: the flag is documented as the close signal,
+    /// and the chest is nonetheless left standing open after one. Switching it live is how the
+    /// two readings are told apart without a rebuild between them.
+    Lid { account: String, raise_on_close: bool },
+
     /// Put a chest in the world, in front of a player.
     ///
     /// The world is built once, so this is the only way to get a *second* chest, a filled one,
