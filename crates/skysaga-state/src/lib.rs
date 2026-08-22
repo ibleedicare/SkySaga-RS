@@ -561,6 +561,23 @@ impl AppState {
         self.read().photos.len()
     }
 
+    /// Every stored photo's id, newest first.
+    ///
+    /// The album draws them in the order given, and the newest capture is the one the player
+    /// has just taken and is looking for. The map is unordered, so the sort is what makes the
+    /// order a decision rather than a coincidence of hashing.
+    pub fn photo_ids(&self) -> Vec<String> {
+        let state = self.read();
+
+        let mut ids: Vec<&String> = state.photos.keys().collect();
+
+        ids.sort_by_key(|id| {
+            std::cmp::Reverse(state.photos.get(*id).map(|photo| photo.captured_at))
+        });
+
+        ids.into_iter().cloned().collect()
+    }
+
     /// Discard the account's character, sending the client back to its creator.
     ///
     /// Returns whether there was one to delete, so a reset is idempotent rather than an
