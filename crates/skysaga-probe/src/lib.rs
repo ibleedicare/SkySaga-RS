@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use raknet::{message_id, Peer};
-use skysaga_proto::bitstream::{BitReader, ID_USER_PACKET_ENUM};
-use skysaga_proto::packets::{EntityAdd, EntityRemoved, SetClientEntity};
+use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
+use skysaga_proto::packets::{EntityAdd, EntityRemoved, EntitySync, SetClientEntity};
 
 /// The password the server expects, from `SkySaga.Game/Program.cs`. The trailing NUL is part
 /// of it.
@@ -63,6 +63,14 @@ pub struct Observations {
     /// Entity ids the server said are gone.
     pub entities_removed: Vec<u32>,
 
+    /// Every `EntitySync`, by the entity it was about, in arrival order.
+    ///
+    /// This is what makes the probe usable for anything past the handshake. The client applies
+    /// no inventory change locally: it sends a request and waits to be told what happened. So
+    /// "did the server act on that packet" is exactly "did a sync for my entity come back",
+    /// and that question is the same one against either server.
+    pub syncs: Vec<u32>,
+
     /// Ordinals received but not understood, once each. Useful for noticing that the server
     /// started sending something new.
     pub unhandled: BTreeSet<u16>,
@@ -89,6 +97,17 @@ impl Observations {
     /// Whether this client was told `entity` is gone.
     pub fn saw_removed(&self, entity: u32) -> bool {
         self.entities_removed.contains(&entity)
+    }
+
+    /// How many `EntitySync`s arrived for `entity`.
+    pub fn syncs_of(&self, entity: u32) -> usize {
+        self.syncs.iter().filter(|about| **about == entity).count()
+    }
+
+    /// Whether this client's own body was re-synced.
+    pub fn my_entity_was_synced(&self) -> bool {
+        self.my_entity
+            .is_some_and(|entity| self.syncs_of(entity) > 0)
     }
 }
 
@@ -240,6 +259,15 @@ impl Probe {
                 }
             }
 
+            EntitySync::ID => {
+                // The id alone. Reading the payload would need the entity's definition to
+                // know how many flag bits precede it, and which parameter changed is not the
+                // question these tests ask -- "did anything come back at all" is.
+                if let Ok(sync) = EntitySync::decode(&mut reader) {
+                    self.observations.syncs.push(sync.id);
+                }
+            }
+
             other => {
                 self.observations.unhandled.insert(other + ID_USER_PACKET_ENUM);
             }
@@ -252,6 +280,45 @@ impl Probe {
     /// addressing it by guid would mean tracking a guid to no purpose.
     pub fn send(&self, data: &[u8]) {
         self.peer.broadcast(data);
+    }
+
+    /// Encode a packet and send it.
+    ///
+    /// The encoders in `skysaga-proto` are shared with the server, which decodes the same
+    /// bytes -- so a layout that is wrong here is wrong there too, and the round trip is
+    /// covered by that crate's own golden tests rather than by trusting this.
+    pub fn send_packet(&self, write: impl FnOnce(&mut BitWriter)) {
+        let mut writer = BitWriter::new();
+
+        write(&mut writer);
+
+        self.send(&writer.into_bytes());
+    }
+
+    /// The entity the server said is this client, once it has said so.
+    pub fn my_entity(&self) -> Option<u32> {
+        self.observations.my_entity
+    }
+
+    /// Run until the server has handed over a player entity, i.e. the handshake finished.
+    ///
+    /// Returns whether it did. Everything past the handshake needs this first: a packet about
+    /// "my entity" cannot be sent before the server has said which entity that is.
+    pub fn wait_for_world(&mut self, timeout: Duration) -> bool {
+        self.run_until(timeout, |seen| seen.my_entity.is_some())
+    }
+
+    /// Forget what has been seen so far.
+    ///
+    /// Called after the handshake so an assertion about "what that packet caused" is not
+    /// satisfied by something from the burst that preceded it.
+    pub fn forget(&mut self) {
+        let my_entity = self.observations.my_entity;
+
+        self.observations = Observations {
+            my_entity,
+            ..Default::default()
+        };
     }
 
     /// Close the connection, so the server sees the client go rather than time it out.

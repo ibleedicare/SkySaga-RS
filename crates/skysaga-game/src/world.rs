@@ -233,6 +233,24 @@ impl Default for WorldConfig {
     }
 }
 
+/// How many inventory slots a player has, and the layout of them.
+///
+/// Read off the client UI rather than any data file: nothing in `Entities.json` or
+/// `geodata.json` records the mapping, and it was resolved empirically by filling every slot
+/// and reading the squares back.
+///
+/// ```text
+///   0..1    equipment, hands
+///   2..5    equipment: head, torso, legs, arms
+///   6       hotbar
+///   7..8    inside the count, but no square in the UI shows them
+///   9..44   rucksack, 36 squares in a 6x6 grid
+/// ```
+pub const MAX_INVENTORY_SLOTS: u8 = 45;
+
+/// The first slot of the rucksack proper. Anything below this is worn or held.
+pub const FIRST_RUCKSACK_SLOT: usize = 9;
+
 /// The animals and props the C# seeds: name, position, and half-hearts.
 ///
 /// The Tree is placed where the C# *intends* rather than where it lands. Server.cs assigns
@@ -415,7 +433,11 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             ..Default::default()
         }),
         Component::Inventory(InventoryComponent {
-            max_inventory_slots: 36,
+            max_inventory_slots: MAX_INVENTORY_SLOTS,
+            // Every slot present and empty. The client expects the whole list: a short one
+            // leaves it with nowhere to draw, which is why an item placed in a one-element
+            // list never appeared.
+            inventory_entity_list: vec![0; MAX_INVENTORY_SLOTS as usize],
             ..Default::default()
         }),
         Component::CharacterPhysics(PhysicsComponent::default()),

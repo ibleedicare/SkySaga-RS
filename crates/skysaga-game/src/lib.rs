@@ -34,11 +34,18 @@ use std::collections::BTreeSet;
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
-use skysaga_proto::packets::{
-    BeginSync, EntityAdd, CharacterCreationResponse, ClientEntitiesSyncFinished, CreateHomeworld,
-    DebugRequestFinishTutorial, NotifyPhotoCaptured, PhotoValidated, SaveCharacterName,
-    SetCharacterCustomisationData, SetClientEntity, TransferToServer,
+use skysaga_proto::packets::inventory::{
+    InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
+    RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
 };
+use skysaga_proto::packets::{
+    BeginSync, EntityAdd, EntityRemoved, EntitySync, CharacterCreationResponse,
+    ClientEntitiesSyncFinished, CreateHomeworld, DebugRequestFinishTutorial, NotifyPhotoCaptured,
+    PhotoValidated, SaveCharacterName, SetCharacterCustomisationData, SetClientEntity,
+    TransferToServer,
+};
+use skysaga_world::inventory::{Effect, Inventories, StackLimits};
+use skysaga_world::{Component, Entity};
 use tracing::{debug, info, warn};
 
 /// A packet the client sends. Only the ones the server acts on are named.
@@ -67,6 +74,32 @@ pub enum ClientPacket {
 
     /// 284 — a photo was taken. Character creation does not finish until this is answered.
     NotifyPhotoCaptured(NotifyPhotoCaptured),
+
+    // --- the rucksack ------------------------------------------------------------------
+    //
+    // The client applies none of these locally: it sends the request and waits for the
+    // inventory to be synced back. An unhandled one is a UI that appears to freeze
+    // mid-drag rather than an error, which is why they are worth naming individually.
+    /// 185 — a drop onto an empty square: move, or split.
+    InventoryItemTransferToSlot(InventoryItemTransferToSlot),
+
+    /// 187 — a drop onto an occupied square: merge, or exchange.
+    InventoryItemSwap(InventoryItemSwap),
+
+    /// 186 — the loot window's "Take All".
+    InventoryItemTransferAll(InventoryItemTransferAll),
+
+    /// 179 — the rucksack's trash can.
+    InventoryItemDestroy(InventoryItemDestroy),
+
+    /// 147 — equip something from the rucksack.
+    RequestEquipInventoryItem(RequestEquipInventoryItem),
+
+    /// 149 — bind an item to a hotbar square.
+    RequestUiSettingsSlotChange(RequestUiSettingsSlotChange),
+
+    /// 150 — select a different hotbar square.
+    RequestUiSettingsSetActiveSlot(RequestUiSettingsSetActiveSlot),
 
     /// Anything else, by wire id.
     Unknown(u16),
@@ -105,6 +138,36 @@ impl ClientPacket {
             NotifyPhotoCaptured::ID => NotifyPhotoCaptured::decode(&mut reader)
                 .map(Self::NotifyPhotoCaptured)
                 .unwrap_or(Self::Unknown(wire_id)),
+
+            InventoryItemTransferToSlot::ID => InventoryItemTransferToSlot::decode(&mut reader)
+                .map(Self::InventoryItemTransferToSlot)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            InventoryItemSwap::ID => InventoryItemSwap::decode(&mut reader)
+                .map(Self::InventoryItemSwap)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            InventoryItemTransferAll::ID => InventoryItemTransferAll::decode(&mut reader)
+                .map(Self::InventoryItemTransferAll)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            InventoryItemDestroy::ID => InventoryItemDestroy::decode(&mut reader)
+                .map(Self::InventoryItemDestroy)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            RequestEquipInventoryItem::ID => RequestEquipInventoryItem::decode(&mut reader)
+                .map(Self::RequestEquipInventoryItem)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            RequestUiSettingsSlotChange::ID => RequestUiSettingsSlotChange::decode(&mut reader)
+                .map(Self::RequestUiSettingsSlotChange)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            RequestUiSettingsSetActiveSlot::ID => {
+                RequestUiSettingsSetActiveSlot::decode(&mut reader)
+                    .map(Self::RequestUiSettingsSetActiveSlot)
+                    .unwrap_or(Self::Unknown(wire_id))
+            }
 
             _ => Self::from_wire_id(wire_id),
         }
@@ -160,11 +223,26 @@ pub struct Session {
     player_entity_id: u32,
     character: CharacterProfile,
 
-    /// Entity ids of the items in this player's rucksack, by slot.
+    /// Every inventory this connection can address, and the item entities in them.
     ///
-    /// Held per connection rather than in the world: the player body is rebuilt from the
-    /// profile, and items are given while the session runs.
-    inventory: Vec<u32>,
+    /// Indexed by the slot layout in [`crate::world::MAX_INVENTORY_SLOTS`]: worn and held
+    /// items first, the rucksack from slot 9.
+    ///
+    /// Held per connection rather than in the world because the only inventory a connection
+    /// can reach today is its own player's -- the body is rebuilt from the profile, and items
+    /// are given while the session runs. A **shared** container, which is what a chest is,
+    /// will not fit here: two players looking into one chest have to see one set of contents,
+    /// so opening containers means moving this to the server and passing it in.
+    inventories: Inventories,
+
+    /// Hotbar square to the item name hash bound to it.
+    ///
+    /// Not storage. `hotbarslotresources` holds *resources*, so a bound stack stays in the
+    /// rucksack; this is only the server's record of what the player is holding.
+    hotbar: std::collections::HashMap<u32, u32>,
+
+    /// Which hotbar square is selected.
+    active_slot: u32,
 
     /// Which account this connection belongs to.
     ///
@@ -183,24 +261,80 @@ pub struct Session {
 
 impl Session {
     pub fn new(player_entity_id: u32) -> Self {
+        // Item entities are minted from just past the player's own id. The game server hands
+        // out ids globally and keeps this in step around every packet it dispatches (see
+        // `reserve_ids_from` / `next_entity_id`), so this base only matters to a session
+        // driven directly, as the tests do.
+        let mut inventories = Inventories::new(StackLimits::default(), player_entity_id + 1);
+
+        inventories.open(player_entity_id, crate::world::MAX_INVENTORY_SLOTS as usize);
+
         Self {
             stage: Stage::Connected,
             player_entity_id,
             character: CharacterProfile::default(),
-            inventory: Vec::new(),
+            inventories,
+            hotbar: std::collections::HashMap::new(),
+            active_slot: 0,
             account: None,
             reported: BTreeSet::new(),
         }
     }
 
-    /// The items this player is carrying, by entity id.
+    /// The items this player is carrying, by entity id and slot.
     pub fn inventory(&self) -> &[u32] {
-        &self.inventory
+        self.inventories.slots(self.player_entity_id)
     }
 
-    /// Put an item entity into the rucksack.
-    pub fn take_item(&mut self, entity_id: u32) {
-        self.inventory.push(entity_id);
+    /// Read-only access to the model, for serialising an item entity.
+    pub fn inventories(&self) -> &Inventories {
+        &self.inventories
+    }
+
+    /// What is in one of the player's slots. `Some(0)` for empty, `None` for no such slot.
+    pub fn slot(&self, slot: u32) -> Option<u32> {
+        self.inventories.slot(self.player_entity_id, slot)
+    }
+
+    /// Which of the player's slots holds `entity`.
+    pub fn slot_of(&self, entity: u32) -> Option<u32> {
+        self.inventory()
+            .iter()
+            .position(|held| *held == entity)
+            .map(|slot| slot as u32)
+    }
+
+    /// The item hash bound to the selected hotbar square.
+    ///
+    /// What the player is holding. Placing a block and digging arrive as the same
+    /// `PerformVoxelActions` packet, and this is what tells the two apart.
+    pub fn held_resource(&self) -> Option<u32> {
+        self.hotbar.get(&self.active_slot).copied()
+    }
+
+    /// Create a stack of `item` in the first free rucksack square, returning its entity id.
+    ///
+    /// `None` when the rucksack is full. Slots below
+    /// [`FIRST_RUCKSACK_SLOT`](crate::world::FIRST_RUCKSACK_SLOT) are what the player is
+    /// wearing or holding, so filling those from here would silently equip things.
+    pub fn give(&mut self, item: &str, count: u32) -> Option<u32> {
+        let slot = self.inventories.first_free_rucksack_slot(self.player_entity_id)?;
+
+        self.inventories
+            .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
+    }
+
+    /// Mint item entities from `next` upwards.
+    ///
+    /// The game server allocates entity ids globally, and calls this before dispatching a
+    /// packet so a split stack cannot collide with another connection's body.
+    pub fn reserve_ids_from(&mut self, next: u32) {
+        self.inventories.reserve_ids_from(next);
+    }
+
+    /// The next entity id this session would mint. The inverse of [`Self::reserve_ids_from`].
+    pub fn next_entity_id(&self) -> u32 {
+        self.inventories.next_entity_id()
     }
 
     /// The account this connection belongs to, if one was claimed.
@@ -311,7 +445,7 @@ impl Session {
                 // This player's own body, under the id this connection was given, carrying
                 // the name and appearance from its profile.
                 let player =
-                    world.player_body(&self.character, self.player_entity_id, &self.inventory);
+                    world.player_body(&self.character, self.player_entity_id, self.inventory());
 
                 // This player's body goes where the world's template player sits, and the
                 // other players are appended.
@@ -449,6 +583,97 @@ impl Session {
                 })]
             }
 
+            // --- the rucksack ---------------------------------------------------------
+            //
+            // Each of these is: decode (already done), call the model, turn the effects it
+            // reports into packets. Nothing about which stack merges into which lives here;
+            // that is all in `skysaga-world::inventory`, where it is testable without a
+            // socket.
+            (ClientPacket::InventoryItemTransferToSlot(packet), _) => {
+                let effects = self.inventories.transfer_to_slot(
+                    packet.source_entity,
+                    packet.source_slot,
+                    packet.target_entity,
+                    packet.target_slot,
+                    packet.count,
+                );
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::InventoryItemSwap(packet), _) => {
+                let effects = self.inventories.swap(
+                    packet.source_entity,
+                    packet.source_slot,
+                    packet.target_entity,
+                    packet.target_slot,
+                );
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::InventoryItemTransferAll(packet), _) => {
+                let effects = self
+                    .inventories
+                    .transfer_all(packet.source_entity, packet.target_entity);
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::InventoryItemDestroy(packet), _) => {
+                let effects = self
+                    .inventories
+                    .destroy(packet.entity_id, packet.slot, packet.count);
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::RequestEquipInventoryItem(packet), _) => {
+                let effects =
+                    self.inventories
+                        .equip(packet.entity_id, packet.bag_slot, packet.equip_slot);
+
+                // The hands are a hotbar bind, not a move, and the model reports no effects
+                // for them. Record what is now held, which is the whole point of the packet.
+                if packet.equip_slot < 2 {
+                    self.hotbar.remove(&self.active_slot);
+
+                    if let Some(item) = self
+                        .inventories
+                        .slot(packet.entity_id, packet.bag_slot)
+                        .filter(|item| *item != 0)
+                        .and_then(|item| self.inventories.name(item))
+                    {
+                        self.hotbar.insert(self.active_slot, item);
+                    }
+                }
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::RequestUiSettingsSlotChange(packet), _) => {
+                debug!(slot = packet.slot, resource = packet.resource, "hotbar bound");
+
+                self.hotbar.insert(packet.slot, packet.resource);
+
+                // A fresh bind is also what the player just selected: the client does not
+                // always follow one with a SetActiveSlot.
+                self.active_slot = packet.slot;
+
+                // Deliberately nothing back. `hotbarslotresources` (sync index 34) is kept by
+                // the client itself, and its encoding is not confirmed -- echoing a wrong one
+                // would draw a wrong hotbar, which is worse than drawing the client's own.
+                Vec::new()
+            }
+
+            (ClientPacket::RequestUiSettingsSetActiveSlot(packet), _) => {
+                debug!(slot = packet.slot, "hotbar square selected");
+
+                self.active_slot = packet.slot;
+
+                Vec::new()
+            }
+
             (ClientPacket::Unknown(wire_id), _) => {
                 // An unimplemented packet is the usual reason a client stalls, so it is worth
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
@@ -471,6 +696,104 @@ impl Session {
                 Vec::new()
             }
         }
+    }
+}
+
+impl Session {
+    /// Turn the model's [`Effect`]s into packets, in the order they must be sent.
+    ///
+    /// The ordering is the model's, not this function's: an `ItemCreated` arrives before the
+    /// `SlotsChanged` that points a slot at it, because a slot naming an entity the client has
+    /// never been told about draws an empty square.
+    ///
+    /// An effect that cannot be turned into a packet is dropped with a warning rather than
+    /// panicking. The two ways that happens are a data file with no `BasicInventoryItem`, and
+    /// an inventory belonging to something other than this player -- which is what a chest
+    /// will be, and is the extension point when containers arrive.
+    fn apply(&mut self, effects: Vec<Effect>, world: &World) -> Vec<Vec<u8>> {
+        effects
+            .into_iter()
+            .filter_map(|effect| self.packet_for(effect, world))
+            .collect()
+    }
+
+    fn packet_for(&self, effect: Effect, world: &World) -> Option<Vec<u8>> {
+        match effect {
+            Effect::ItemCreated { entity } => {
+                let (item, definition) = self.item_entity(entity, world)?;
+
+                Some(encode(|w| item.to_entity_add(definition).encode(w)))
+            }
+
+            Effect::ItemChanged { entity } => {
+                let (item, definition) = self.item_entity(entity, world)?;
+
+                // Only the parameter that changed. The client is never sent a full update for
+                // an entity it already holds, and sending one is not what the C# does.
+                let sync_data = item.sync_data_for(definition, &["inventoryslotdata"]);
+
+                Some(encode(|w| {
+                    let mut payload = BitWriter::new();
+                    sync_data.encode(&mut payload);
+
+                    EntitySync {
+                        id: entity,
+                        sync_data: skysaga_proto::packets::Bits::from_writer(&payload),
+                    }
+                    .encode(w)
+                }))
+            }
+
+            Effect::ItemRemoved { entity } => {
+                Some(encode(|w| EntityRemoved { entity_id: entity }.encode(w)))
+            }
+
+            Effect::SlotsChanged { owner } => {
+                if owner != self.player_entity_id {
+                    // A container. Nothing in the world has one yet, so there is no definition
+                    // to encode it from; this is where opening a chest will plug in.
+                    warn!(owner, "no definition for this inventory; not syncing it");
+
+                    return None;
+                }
+
+                let (player, definition) =
+                    world.player_entity(&self.character, owner, self.inventory())?;
+
+                let sync_data = player.sync_data_for(definition, &["inventoryentitylist"]);
+
+                Some(encode(|w| {
+                    let mut payload = BitWriter::new();
+                    sync_data.encode(&mut payload);
+
+                    EntitySync {
+                        id: owner,
+                        sync_data: skysaga_proto::packets::Bits::from_writer(&payload),
+                    }
+                    .encode(w)
+                }))
+            }
+        }
+    }
+
+    /// One item entity, ready to serialise.
+    fn item_entity<'a>(
+        &self,
+        entity: u32,
+        world: &'a World,
+    ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
+        let definition = world.item_definition().or_else(|| {
+            warn!("BasicInventoryItem is not defined; cannot serialise a stack");
+
+            None
+        })?;
+
+        let component = self.inventories.item(entity)?;
+
+        Some((
+            Entity::new(entity, vec![Component::InventoryItem(component.clone())]),
+            definition,
+        ))
     }
 }
 
