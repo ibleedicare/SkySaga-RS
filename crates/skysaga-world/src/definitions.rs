@@ -108,6 +108,13 @@ struct RawParameter {
     /// Present only for parameters that are replicated.
     #[serde(default)]
     syncindex: Option<usize>,
+
+    /// The parameter's default, when the data file gives one.
+    ///
+    /// Only `voxels` is read out of this so far, and it is the one that matters: it is what
+    /// puts an entity *in* the world grid rather than floating in front of it.
+    #[serde(default)]
+    value: Option<serde_json::Value>,
 }
 
 // --- the loaded form ---------------------------------------------------------------------------
@@ -122,11 +129,27 @@ pub struct EntityDefinition {
 
     /// sync index -> (component name, binding name), both lower-case as in the file.
     by_index: HashMap<usize, (String, String)>,
+
+    /// The cells this entity occupies, from the `voxels` parameter's default.
+    voxel_links: Vec<([i32; 3], u8)>,
 }
 
 impl EntityDefinition {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The voxel cells this entity occupies, as `(offset, voxel index)`.
+    ///
+    /// **What puts an entity in the world grid.** An entity sent without them is not part of
+    /// the terrain: the C# records that this is the difference between a chest standing in the
+    /// world and one floating in front of it.
+    ///
+    /// The numbers are `VoxelIndex` values rather than array positions -- 39 is the voxel
+    /// literally named `Entity`. Read from the entity's own data rather than hardcoded, so a
+    /// three-tall `PVP_Post` works as well as a one-cell `Chest`.
+    pub fn default_voxel_links(&self) -> Vec<([i32; 3], u8)> {
+        self.voxel_links.clone()
     }
 
     /// `CRC32(name)` — what `EntityAdd` puts on the wire.
@@ -258,11 +281,52 @@ fn definition(entity: RawEntity) -> EntityDefinition {
         }
     }
 
+    let voxel_links = entity
+        .parameters
+        .get("voxels")
+        .and_then(|parameter| parameter.value.as_ref())
+        .map(voxel_links_from)
+        .unwrap_or_default();
+
     EntityDefinition {
         name_hash: name_hash(&entity.name),
         name: entity.name,
         parameter_count,
         synced_parameter_count,
         by_index,
+        voxel_links,
     }
+}
+
+/// Read a `voxels` default: a list of `[[x, y, z], voxelIndex]`.
+///
+/// Anything malformed is skipped rather than fatal. This is one optional field of a data file
+/// the world is otherwise built from successfully, and refusing to start over it would trade a
+/// chest that does not render for a server that does not run.
+fn voxel_links_from(value: &serde_json::Value) -> Vec<([i32; 3], u8)> {
+    let Some(entries) = value.as_array() else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_array()?;
+
+            let offset = entry.first()?.as_array()?;
+            let index = entry.get(1)?.as_i64()?;
+
+            if offset.len() != 3 {
+                return None;
+            }
+
+            let mut cell = [0i32; 3];
+
+            for (axis, slot) in offset.iter().zip(&mut cell) {
+                *slot = axis.as_i64()? as i32;
+            }
+
+            Some((cell, index as u8))
+        })
+        .collect()
 }
