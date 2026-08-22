@@ -112,6 +112,15 @@ impl Inventories {
         }
     }
 
+    /// Use these stack limits from now on.
+    ///
+    /// Set once the game's own table has been read. The model is constructed before the data
+    /// file is, so it starts with the default of 64 for everything and is corrected here
+    /// rather than being unable to exist without the file.
+    pub fn set_limits(&mut self, limits: StackLimits) {
+        self.limits = limits;
+    }
+
     /// Give `owner` an inventory of `size` empty slots. Replaces any it already had.
     pub fn open(&mut self, owner: u32, size: usize) {
         self.slots.insert(owner, vec![0; size]);

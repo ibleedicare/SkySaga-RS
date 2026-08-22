@@ -5,6 +5,7 @@
 //! from a capture (as the tests do), or assembled by hand.
 
 use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
+use skysaga_world::geodata::{default_geodata_path, GeoData};
 use skysaga_world::terrain::CHUNK_SIZE;
 use skysaga_world::{
     Component, Entity, EntityDefinition, EntityDefinitions,
@@ -56,6 +57,15 @@ pub struct World {
 
     /// `BasicInventoryItem`, for stacks created while the server runs.
     pub item_definition: Option<EntityDefinition>,
+
+    /// The game's own tables: which block an item places, what a broken one drops, how large
+    /// a stack may be.
+    ///
+    /// Empty for a world decoded from a capture, which carries packets rather than data. A
+    /// server with an empty table cannot tell a placement from a dig, so it treats every
+    /// swing as a dig -- which is wrong, but wrong in the direction that cannot duplicate
+    /// items.
+    pub geodata: GeoData,
 
     /// The containers in this world, un-encoded.
     ///
@@ -451,6 +461,7 @@ impl World {
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
+            geodata: load_geodata(),
             containers,
         }
     }
@@ -595,4 +606,31 @@ fn terrain_chunks(terrain: &TerrainGenerator) -> Vec<ChunkSync> {
     debug_assert!(CHUNK_SIZE == 32);
 
     chunks
+}
+
+/// Read `geodata.json`, or carry on without it.
+///
+/// A missing or unreadable file is reported and then tolerated rather than fatal: the world
+/// itself is built from `Entities.json`, and a server that will not start because it cannot
+/// say which block "Stone" places is worse than one where placing does not work yet.
+fn load_geodata() -> GeoData {
+    let path = default_geodata_path();
+
+    match GeoData::load(&path) {
+        Ok(geodata) => {
+            tracing::info!(
+                voxels = geodata.voxel_count(),
+                path = %path.display(),
+                "read the geodata tables",
+            );
+
+            geodata
+        }
+
+        Err(error) => {
+            warn!(%error, "no geodata; placing blocks will not work");
+
+            GeoData::default()
+        }
+    }
 }
