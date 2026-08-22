@@ -40,6 +40,8 @@ crates/
   skysaga-auth/     Smilegate login                          TCP  :10106
   skysaga-web/      account / characters / conductor / social / photos
                                                              HTTP :5164
+  skysaga-chat/     the client's IRC dialect, and the server that speaks it
+                                                             TCP  :4444
   skysaga-game/     the RakNet game server and session state machine
                                                              UDP  :42069
   skysaga-server/   one binary running all of them over one shared state
@@ -75,6 +77,7 @@ Read by `skysaga-server`:
 | `SKYSAGA_WEB_PORT` | `5164` | |
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
+| `SKYSAGA_CHAT_PORT` | `4444` | the IRC server every chat message goes over |
 | `SKYSAGA_DATA_DIR` | *(the C# tree)* | directory holding `Entities.json` |
 | `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
 | `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
@@ -113,7 +116,7 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 529 tests, no network, nothing to prepare
+cargo test --workspace          # 568 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
@@ -129,10 +132,11 @@ were then dropped, which from a player's side is a UI that freezes rather than a
 one and point the tests at it:
 
 ```bash
-./scripts/run-oracle.sh                                  # C# on :43069, admin panel on :6175
+./scripts/run-oracle.sh                                  # C# on :43069, admin :6175, chat :4445
 SKYSAGA_ORACLE_GAME=127.0.0.1:43069 \
   SKYSAGA_ORACLE_ADMIN=http://127.0.0.1:6175 \
-  cargo test -p skysaga-probe
+  SKYSAGA_ORACLE_CHAT=127.0.0.1:4445 \
+  cargo test -p skysaga-probe -p skysaga-chat
 ```
 
 Without those variables the oracle tests **skip** rather than fail, so `cargo test --workspace`
@@ -186,17 +190,17 @@ Defects found while reading the original, fixed here rather than reproduced:
 - **The friends graph is not interactive.** Character search finds a character and the
   response *shapes* are all implemented, being the part that is easy to get wrong, but adding,
   accepting and blocking are acknowledged rather than recorded.
-- **No chat.** The client expects an IRC server on :4444 and retries forever without one; it
-  is noisy in the client log but does not block play.
 - **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
   verified against, is plain HTTP.
 - **Buying from the trading post is not implemented.** Browsing works: the catalogue and the
   search both answer. A purchase is a *teleport* to the seller's home island rather than an
   item transfer, so it belongs to the world-transfer work rather than to the trading routes.
-- **Only a chest is open-able, and each connection has its own view of it.** The mailbox and
-  the crafting stations need their own handlers; and two players looking into one chest see
-  two different sets of contents, because the container store is per session rather than
-  shared.
+- **Only a chest is open-able, and each connection has its own view of it.** The crafting
+  stations need their own handlers; and two players looking into one chest see two different
+  sets of contents, because the container store is per session rather than shared. Voxel edits
+  are per session for the same reason: a block one player places is not in another's world.
+- **Whispers are client-side only.** The chat server drops anything not addressed to a `#`
+  channel, so `/tell` renders locally and reaches nobody.
 
 ## Contributing
 

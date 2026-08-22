@@ -1078,6 +1078,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skysaga-chat"
+version = "0.1.0"
+dependencies = [
+ "skysaga-state",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skysaga-core"
 version = "0.1.0"
 dependencies = [
@@ -1130,6 +1139,7 @@ dependencies = [
  "anyhow",
  "axum",
  "skysaga-auth",
+ "skysaga-chat",
  "skysaga-game",
  "skysaga-state",
  "skysaga-store",

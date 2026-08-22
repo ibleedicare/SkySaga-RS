@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
+use skysaga_proto::packets::chat::{RequestChatChannelData, SendChatChannelData};
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 use skysaga_proto::packets::mail::{
     DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
@@ -166,6 +167,9 @@ pub enum ClientPacket {
     /// 231 — discard a message.
     DeleteMail(DeleteMail),
 
+    /// 225 — "which channels are there?". No body.
+    RequestChatChannelData(RequestChatChannelData),
+
     /// 232 — claim an attachment into the rucksack.
     TakeMailAttachment(TakeMailAttachment),
 
@@ -271,6 +275,10 @@ impl ClientPacket {
 
             DeleteMail::ID => DeleteMail::decode(&mut reader)
                 .map(Self::DeleteMail)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            RequestChatChannelData::ID => RequestChatChannelData::decode(&mut reader)
+                .map(Self::RequestChatChannelData)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             TakeMailAttachment::ID => TakeMailAttachment::decode(&mut reader)
@@ -913,6 +921,23 @@ impl Session {
 
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
+
+            // --- chat ---------------------------------------------------------------------
+            (ClientPacket::RequestChatChannelData(_), _) => {
+                // The channel list, and nothing else: every actual message goes over the IRC
+                // socket. Without this reply the client never issues a JOIN, so the chat
+                // server sits with a registered but silent client -- which looks exactly like
+                // an IRC server that is down.
+                info!(channels = world.chat_channels.len(), "sending the channel list");
+
+                vec![encode(|w| {
+                    SendChatChannelData {
+                        channels: world.chat_channels.clone(),
+                        trailing: [String::new(), String::new()],
+                    }
+                    .encode(w)
+                })]
+            }
 
             // --- the mailbox --------------------------------------------------------------
             (ClientPacket::MailCheck(_), _) => self.sync_mailbox(world),

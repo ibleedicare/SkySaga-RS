@@ -130,6 +130,9 @@ pub fn world_from_capture() -> World {
         // world actually held.
         containers: Vec::new(),
 
+        // The capture predates chat being handed out at all.
+        chat_channels: Vec::new(),
+
         // A capture carries packets, not data tables.
         geodata: skysaga_world::geodata::GeoData::default(),
     }
