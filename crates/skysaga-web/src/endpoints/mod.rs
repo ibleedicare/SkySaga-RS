@@ -9,6 +9,7 @@ pub mod game_conductor;
 pub mod matchmaking;
 pub mod persistent_record;
 pub mod social_graph;
+pub mod trading;
 
 use axum::extract::Request;
 use axum::Json;

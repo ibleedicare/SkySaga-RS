@@ -161,20 +161,19 @@ Defects found while reading the original, fixed here rather than reproduced:
 
 ## Known gaps
 
-- **The photo album does not load.** Photos are captured, uploaded and stored, and single
-  images are served back, but `photos/_search`, which populates the album list, is not
-  implemented, so the album spins.
-- **Every connection shares one player entity.** Fine for one player; a second player is
-  handed the same body.
-- **Movement is not replicated.** `EntityMoved` and `SetPlayerState` are received and ignored,
-  so players would not see each other move.
-- **The social graph returns empty lists.** The response *shapes* are implemented, being the
-  part that is easy to get wrong, but the interactive friends/requests/blocked graph is not.
+- **The friends graph is not interactive.** Character search finds a character and the
+  response *shapes* are all implemented, being the part that is easy to get wrong, but adding,
+  accepting and blocking are acknowledged rather than recorded.
 - **No chat.** The client expects an IRC server on :4444 and retries forever without one; it
   is noisy in the client log but does not block play.
 - **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
   verified against, is plain HTTP.
-- **Trading is unimplemented** and logs as unhandled routes.
+- **Buying from the trading post is not implemented.** Browsing works: the catalogue and the
+  search both answer. A purchase is a *teleport* to the seller's home island rather than an
+  item transfer, so it belongs to the world-transfer work rather than to the trading routes.
+- **Containers are not open-able.** `InteractWithEntity` is not handled, so chests, the
+  mailbox and the crafting stations cannot be opened. The inventory model already supports two
+  inventories moving items between them; what is missing is the packet that opens one.
 
 ## Contributing
 
