@@ -1,4 +1,6 @@
-/target
+# Unanchored, so it matches at any depth: an anchored `/target` missed
+# `launcher/target`, and 8.4 GB of build output was committed before anyone noticed.
+target/
 
 # C# build output from the golden-vector generator
 bin/
