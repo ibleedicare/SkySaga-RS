@@ -243,6 +243,19 @@ pub enum AdminCommand {
         /// message's attachment container.
         attachments: Vec<(String, u32)>,
     },
+
+    /// Put a chest in the world, in front of a player.
+    ///
+    /// The world is built once, so this is the only way to get a *second* chest, a filled one,
+    /// or one of the variants -- and testing chest behaviour against a single empty chest at a
+    /// fixed spot is testing one case.
+    Chest {
+        account: String,
+        /// The entity to create. `Chest` unless a variant was asked for.
+        entity: String,
+        /// `Item` or `Item:count` entries.
+        loot: Vec<String>,
+    },
 }
 
 /// Somewhere for changes to go.

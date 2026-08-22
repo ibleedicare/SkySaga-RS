@@ -252,3 +252,42 @@ async fn one_client_leaving_does_not_disturb_the_other() {
 
     assert!(bob.wait_for("PONG").await.is_some(), "Bob was cut off");
 }
+
+#[tokio::test]
+async fn a_chest_command_is_acknowledged() {
+    let port = start().await;
+
+    let mut alice = Client::connect(port, "Alice").await;
+
+    alice.send("JOIN #global").await;
+    alice.wait_for(" 366 ").await.expect("Alice joined");
+
+    alice.send("PRIVMSG #global /chest Dirt:10").await;
+
+    let reply = alice
+        .wait_for("queued")
+        .await
+        .expect("no acknowledgement of /chest");
+
+    assert!(reply.contains("Chest"), "{reply}");
+    assert!(reply.contains("1 item"), "{reply}");
+}
+
+#[tokio::test]
+async fn a_chest_variant_is_named_back() {
+    // The `@name` form picks a different entity. Getting it wrong silently spawns a plain
+    // Chest, which is indistinguishable from the variant not existing.
+    let port = start().await;
+
+    let mut alice = Client::connect(port, "Alice").await;
+
+    alice.send("JOIN #global").await;
+    alice.wait_for(" 366 ").await.expect("Alice joined");
+
+    alice.send("PRIVMSG #global /chest @Chest_Generic_Minor").await;
+
+    let reply = alice.wait_for("queued").await.expect("no acknowledgement");
+
+    assert!(reply.contains("Chest_Generic_Minor"), "{reply}");
+    assert!(reply.contains("0 item"), "{reply}");
+}

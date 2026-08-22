@@ -363,7 +363,60 @@ impl GameServer {
                 body,
                 attachments,
             } => self.mail(&account, &subject, &body, &attachments),
+
+            AdminCommand::Chest {
+                account,
+                entity,
+                loot,
+            } => self.chest(&account, &entity, &loot),
         }
+    }
+
+    /// Put a chest in the world, in front of a player.
+    ///
+    /// Announced only to that player. The world is fixed once built, so a spawned container
+    /// lives on the session and nobody else's session knows about it -- the same limitation as
+    /// the containers the world seeds, and it lifts at the same time.
+    fn chest(&mut self, account: &str, entity: &str, loot: &[String]) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot spawn a chest: that player is not connected");
+
+            return;
+        };
+
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        session.reserve_ids_from(self.next_entity_id);
+
+        let borrowed: Vec<&str> = loot.iter().map(String::as_str).collect();
+
+        let Some(spawned) = session.spawn_chest(&self.world, entity, &borrowed) else {
+            warn!(%account, %entity, "no such entity in Entities.json");
+
+            return;
+        };
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        // In the order the session gave them: the loot, then the chest that names it.
+        for packet in &spawned.packets {
+            self.peer.send(guid, packet);
+        }
+
+        info!(
+            %account,
+            %entity,
+            id = spawned.entity,
+            position = ?spawned.position,
+            "spawned a chest",
+        );
     }
 
     /// Put a stack of `item` into a player's rucksack.

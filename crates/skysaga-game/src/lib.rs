@@ -383,6 +383,12 @@ pub struct Session {
     /// player's world. The same limitation, and it moves at the same time.
     voxel_edits: std::collections::HashMap<([u32; 3], [u32; 3]), u8>,
 
+    /// Containers spawned while this session runs, beside the ones the world seeded.
+    ///
+    /// Per session, as the seeded containers effectively are: a chest one player spawns is
+    /// not in another player's world. The same limitation, and it moves at the same time.
+    spawned: Vec<world::Container>,
+
     /// This player's inbox.
     mailbox: Vec<Mail>,
 
@@ -437,6 +443,7 @@ impl Session {
             closed_lids: BTreeSet::new(),
             voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
+            spawned: Vec::new(),
             mailbox: Vec::new(),
             notifications: Vec::new(),
             account: None,
@@ -1010,6 +1017,135 @@ impl Session {
 }
 
 impl Session {
+    /// The container with this entity id, whether the world seeded it or a command spawned it.
+    ///
+    /// **The session first.** The world is fixed once built, so anything created while the
+    /// server runs lives here; checking only the world makes every spawned chest inert, and
+    /// checking only the session breaks the seeded one.
+    pub fn container<'a>(&'a self, id: u32, world: &'a World) -> Option<&'a world::Container> {
+        self.spawned
+            .iter()
+            .find(|container| container.id == id)
+            .or_else(|| world.container(id))
+    }
+
+    /// Put a chest in the world, in front of the player.
+    ///
+    /// `loot` entries are `Item` or `Item:count`. Returns the entity, where it went, and the
+    /// packets that announce it -- **the loot before the chest**, because the chest's slot
+    /// list names those entities and a slot pointing at one the client has not been told about
+    /// draws an empty square.
+    ///
+    /// `None` when the data file defines no such entity: the name comes from a chat message,
+    /// so it is whatever somebody typed.
+    pub fn spawn_chest(&mut self, world: &World, entity: &str, loot: &[&str]) -> Option<Spawned> {
+        let definition = world.definitions.get(entity)?.clone();
+
+        let id = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(id + 1);
+
+        let position = self.spawn_position(world);
+
+        let links = definition
+            .default_voxel_links()
+            .into_iter()
+            .map(|(offset, voxel_index)| skysaga_world::VoxelLink {
+                x: offset[0],
+                y: offset[1],
+                z: offset[2],
+                voxel_index,
+            })
+            .collect();
+
+        let built = Entity::new(
+            id,
+            world::container_components(position, links, world::CHEST_SLOTS),
+        );
+
+        self.inventories.open(id, world::CHEST_SLOTS);
+
+        // The loot, in the chest's own squares.
+        let mut packets = Vec::new();
+
+        for (slot, entry) in loot.iter().enumerate().take(world::CHEST_SLOTS) {
+            let (name, count) = match entry.split_once(':') {
+                Some((name, count)) => (name, count.parse().unwrap_or(1)),
+                None => (*entry, 1),
+            };
+
+            let Some(item) =
+                self.inventories
+                    .give(id, slot as u32, skysaga_core::name_hash(name), count)
+            else {
+                continue;
+            };
+
+            self.inventories.reserve_ids_from(self.inventories.next_entity_id());
+
+            // Announced first, so the chest's slot list never names an unknown entity.
+            if let Some((stack, item_definition)) = self.item_entity(item, world) {
+                packets.push(encode(|w| {
+                    stack.to_entity_add(item_definition).encode(w)
+                }));
+            }
+        }
+
+        let container = world::Container {
+            id,
+            name: entity.to_owned(),
+            entity: built,
+            definition,
+            slots: world::CHEST_SLOTS,
+            is_loot_chest: true,
+        };
+
+        self.spawned.push(container);
+
+        // ...and now the chest, rebuilt through `entity_now` so its slot list carries the loot.
+        if let Some((built, definition)) = self.entity_now(id, world) {
+            packets.push(encode(|w| built.to_entity_add(definition).encode(w)));
+        }
+
+        info!(entity = id, %entity, loot = loot.len(), ?position, "spawned a chest");
+
+        Some(Spawned {
+            entity: id,
+            position,
+            packets,
+        })
+    }
+
+    /// Three voxels in front of the player, or the world's spawn point if it has not moved.
+    ///
+    /// The facing is the raw value from `EntityMoved`, whose units are **not confirmed**: the
+    /// C# reads that field as a float and gets a denormal, so its own chests always land due
+    /// north whatever the player is doing. A full circle is assumed to be the field's declared
+    /// maximum. If that is wrong the chest appears on a different side of the player, three
+    /// voxels away either way, which is close enough to press E on while it stays unproven.
+    fn spawn_position(&self, world: &World) -> [u32; 3] {
+        const DISTANCE: f32 = 3.0 * world::POSITION_SCALE as f32;
+
+        /// The declared maximum of the yaw field, taken as a full turn.
+        const FULL_TURN: f32 = 25_600.0;
+
+        let Some(position) = self.position else {
+            // The client has not said where it is yet. The world's spawn point is at least on
+            // the island, where the origin is buried in terrain.
+            let spawn = world.spawn_position();
+
+            return [spawn[0], spawn[1], spawn[2] + world::POSITION_SCALE * 3];
+        };
+
+        let turns = self.facing_yaw.unwrap_or(0) as f32 / FULL_TURN;
+        let radians = turns * std::f32::consts::TAU;
+
+        [
+            position[0].saturating_add_signed((radians.sin() * DISTANCE).round() as i32),
+            position[1],
+            position[2].saturating_add_signed((radians.cos() * DISTANCE).round() as i32),
+        ]
+    }
+
     /// Open or close the container `target`, and say what to send.
     ///
     /// # There is no "open the container" packet
@@ -1038,7 +1174,7 @@ impl Session {
     /// restored, because the client reacts to a *change* and would ignore being told the same
     /// id twice.
     fn open_container(&mut self, target: u32, world: &World) -> Vec<Vec<u8>> {
-        let Some(container) = world.container(target) else {
+        let Some(container) = self.container(target, world).cloned() else {
             debug!(target, "not a container; nothing to open");
 
             return Vec::new();
@@ -1392,7 +1528,7 @@ impl Session {
     /// inventory, whether a lid is shut, where a player's `usingentityid` points -- lives on
     /// the session, so re-encoding has to fold it back in.
     fn entity_now<'a>(
-        &self,
+        &'a self,
         entity: u32,
         world: &'a World,
     ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
@@ -1434,7 +1570,7 @@ impl Session {
             return Some((player, definition));
         }
 
-        let container = world.container(entity)?;
+        let container = self.container(entity, world)?;
 
         let mut built = container.entity.clone();
 
@@ -1520,7 +1656,7 @@ impl Session {
 
     /// One item entity, ready to serialise.
     fn item_entity<'a>(
-        &self,
+        &'a self,
         entity: u32,
         world: &'a World,
     ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
@@ -1598,4 +1734,17 @@ impl Mail {
     fn set_gift_chosen(&mut self) {
         self.flags |= Self::GIFT_CHOSEN;
     }
+}
+
+/// A container that was spawned while the server was running.
+#[derive(Debug, Clone)]
+pub struct Spawned {
+    pub entity: u32,
+
+    /// Where it went, in the client's position units.
+    pub position: [u32; 3],
+
+    /// What to send so the client knows it is there, **in order**: the loot first, then the
+    /// chest whose slot list names it.
+    pub packets: Vec<Vec<u8>>,
 }

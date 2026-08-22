@@ -217,7 +217,37 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
         "help" => vec![
             "/give <item> [count] - put items in your rucksack".to_owned(),
             "/mail <subject> | <body> [item:count ...] - send yourself a message".to_owned(),
+            "/chest [@Entity] [item:count ...] - put a chest in front of you".to_owned(),
         ],
+
+        "chest" => {
+            // `/chest`, `/chest Dirt:10 Stone`, `/chest @Chest_Generic_Minor Dirt:10`.
+            //
+            // The `@name` form exists to compare chest variants against each other: the three
+            // that declare no pickup component behave differently, and telling "the client
+            // rejects this entity" apart from "the ids never arrived" needs a known-good
+            // control.
+            let mut entity = "Chest".to_owned();
+            let mut loot: Vec<String> = Vec::new();
+
+            for word in parts {
+                match word.strip_prefix('@') {
+                    Some(name) if loot.is_empty() => entity = name.to_owned(),
+                    _ => loot.push(word.to_owned()),
+                }
+            }
+
+            state.push_command(AdminCommand::Chest {
+                account: nick.to_owned(),
+                entity: entity.clone(),
+                loot: loot.clone(),
+            });
+
+            vec![format!(
+                "queued a {entity} with {} item(s)",
+                loot.len(),
+            )]
+        }
 
         "give" => {
             let Some(item) = parts.next() else {
