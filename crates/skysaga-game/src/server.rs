@@ -369,6 +369,25 @@ impl GameServer {
                 entity,
                 loot,
             } => self.chest(&account, &entity, &loot),
+
+            AdminCommand::Lid {
+                account,
+                raise_on_close,
+            } => {
+                let Some(session) = self
+                    .sessions
+                    .values_mut()
+                    .find(|session| session.account() == Some(account.as_str()))
+                else {
+                    warn!(%account, "cannot set the lid mode: that player is not connected");
+
+                    return;
+                };
+
+                session.set_raise_lid_on_close(raise_on_close);
+
+                info!(%account, raise_on_close, "lid mode");
+            }
         }
     }
 

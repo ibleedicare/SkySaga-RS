@@ -218,7 +218,25 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
             "/give <item> [count] - put items in your rucksack".to_owned(),
             "/mail <subject> | <body> [item:count ...] - send yourself a message".to_owned(),
             "/chest [@Entity] [item:count ...] - put a chest in front of you".to_owned(),
+            "/lid on|off - whether closing a chest raises hasbeenopened".to_owned(),
         ],
+
+        "lid" => {
+            let raise = !matches!(
+                parts.next().unwrap_or("on").to_ascii_lowercase().as_str(),
+                "off" | "false" | "0",
+            );
+
+            state.push_command(AdminCommand::Lid {
+                account: nick.to_owned(),
+                raise_on_close: raise,
+            });
+
+            vec![format!(
+                "closing a chest will {} hasbeenopened",
+                if raise { "raise" } else { "not touch" },
+            )]
+        }
 
         "chest" => {
             // `/chest`, `/chest Dirt:10 Stone`, `/chest @Chest_Generic_Minor Dirt:10`.
