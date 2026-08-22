@@ -1,11 +1,18 @@
 # SkySaga server emulator: Rust architecture
 
-A rewrite of the C# emulator (`server/Servers/`, ~33k LOC across four projects) in Rust.
+A rewrite in Rust of the **C# SkySaga emulator by EDITz**,
+[EDITzDev/SkySaga](https://github.com/EDITzDev/SkySaga) (~33k LOC across four projects), used
+under the MIT licence. That project is where this one starts from: the protocol it speaks, the
+behaviour it reproduces and the tests it is checked against all come from there. This port is
+a derivative work of it and carries its copyright notice — see [LICENSE](LICENSE).
 
 This document is the *design contract*. The C# server is the behavioural oracle: when this
 document and the C# disagree about bytes on the wire, the C# wins and this document is wrong.
 When they disagree about *structure*, this document wins. The point of the rewrite is that
 the structure is contributable.
+
+References to the C# tree below mean a checkout of that repository, which this one does not
+contain.
 
 ---
 
@@ -178,7 +185,7 @@ dotnet run -c Release --project tools/bitstream-golden \
   > crates/skysaga-proto/tests/fixtures/bitstream.tsv
 ```
 
-It needs the C# tree next door and `libRakNet.so`; it is a development tool, not part of the
+It needs a checkout of the upstream C# tree and `libRakNet.so`; it is a development tool, not part of the
 server. Writing the packet's shape into that generator *first*, then making Rust reproduce its
 output, is the workflow. It is what stops the tests from merely agreeing with the Rust.
 
@@ -229,7 +236,8 @@ one sitting, both segfaults or silent no-ops rather than compile errors:
 | `GetInternalID()` no-arg | `__SWIG_1` (takes a `SystemAddress`) | `__SWIG_2` |
 | `AddressOrGUID(RakNetGUID)` | `__SWIG_2` (takes a `SystemAddress`) | `__SWIG_4` |
 
-**Always check the generated C# in `server/Servers/SkySaga.RakNet/` before adding a binding.**
+**Always check the generated C# in the upstream tree's `Servers/SkySaga.RakNet/` before adding
+a binding.**
 `RakPeerInterface.cs` and friends name each overload's parameters; `RakNetPINVOKE.cs` gives
 the exact arity and types. Getting the arity wrong reads arguments off the stack.
 
