@@ -1215,9 +1215,22 @@ impl Session {
 
         debug!(target, opening, "container");
 
-        let mut out = self.sync_player(world);
+        if opening {
+            // Only the player. `hasbeenopened` is already false, so there is no edge to send
+            // and the C# -- which syncs what changed and nothing else -- sends nothing here.
+            return self.sync_player(world);
+        }
 
-        out.extend(self.sync_container(target, world));
+        // **The lid before the window, and this order is load-bearing.**
+        //
+        // `usingentityid` going to 0 closes the loot *window*. `hasbeenopened` going
+        // false -> true plays the *lid* animation, and the client fires that only while its own
+        // "window open" latch is still set. Closing the window first clears the latch, so the
+        // `hasbeenopened` edge lands too late and is dropped -- the window goes, the chest
+        // stays standing open, and nothing reports an error.
+        let mut out = self.sync_container(target, world);
+
+        out.extend(self.sync_player(world));
 
         out
     }

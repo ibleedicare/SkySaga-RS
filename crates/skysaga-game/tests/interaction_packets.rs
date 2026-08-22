@@ -265,6 +265,68 @@ fn pressing_e_again_closes_a_loot_chest() {
 }
 
 #[test]
+fn closing_syncs_the_lid_before_the_window() {
+    // **The order is the whole bug.** Both parameters are sent on a close, and sending them
+    // the obvious way round leaves the chest standing open in the world after the loot window
+    // has gone.
+    //
+    // The two do different jobs. `usingentityid` going to 0 closes the *window*.
+    // `hasbeenopened` going false -> true is what plays the *lid* animation -- and the client
+    // fires that only while its own "window open" latch is still set. Closing the window first
+    // clears the latch, so the `hasbeenopened` edge arrives too late and is dropped: the
+    // window closes, the chest stays open, and nothing anywhere reports an error.
+    //
+    // Observed live on 2026-08-22: the server logged `opening=false` and the chest did not
+    // shut.
+    let world = world();
+    let mut session = playing(&world);
+
+    let chest = chest(&world);
+    let me = session.player_entity_id();
+
+    press_e(&mut session, &world, chest);
+
+    let burst = press_e(&mut session, &world, chest);
+
+    let order = synced(&burst);
+
+    let lid = order
+        .iter()
+        .position(|id| *id == chest)
+        .expect("the lid is synced at all");
+
+    let window = order
+        .iter()
+        .position(|id| *id == me)
+        .expect("the window is synced at all");
+
+    assert!(
+        lid < window,
+        "the lid sync must precede the window sync, or the animation never plays: {order:?}",
+    );
+}
+
+#[test]
+fn opening_does_not_sync_the_lid_at_all() {
+    // `hasbeenopened` is already false when a chest opens, so there is no edge to send. The C#
+    // syncs only parameters that actually changed and therefore sends nothing here; a
+    // redundant false is not something the client is ever sent, and this path is delicate
+    // enough that "probably harmless" is not a good enough reason to differ.
+    let world = world();
+    let mut session = playing(&world);
+
+    let chest = chest(&world);
+
+    let burst = press_e(&mut session, &world, chest);
+
+    assert_eq!(
+        synced(&burst),
+        vec![session.player_entity_id()],
+        "opening should sync the player and nothing else",
+    );
+}
+
+#[test]
 fn a_third_press_opens_it_again() {
     // The two happen on separate presses and therefore in different syncs, so lowering
     // `hasbeenopened` again before the next open is safe -- and necessary, or the open path
