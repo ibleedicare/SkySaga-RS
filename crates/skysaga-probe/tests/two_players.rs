@@ -105,8 +105,8 @@ fn a_player_is_told_about_the_world() {
 
     assert_eq!(
         seen.entities.len(),
-        10,
-        "nine seeded entities plus the player",
+        11,
+        "nine seeded entities, a chest, and the player",
     );
 
     assert!(

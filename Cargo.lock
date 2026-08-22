@@ -1025,6 +1025,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1067,6 +1073,15 @@ dependencies = [
  "skysaga-core",
  "skysaga-state",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skysaga-chat"
+version = "0.1.0"
+dependencies = [
+ "skysaga-state",
  "tokio",
  "tracing",
 ]
@@ -1124,6 +1139,7 @@ dependencies = [
  "anyhow",
  "axum",
  "skysaga-auth",
+ "skysaga-chat",
  "skysaga-game",
  "skysaga-state",
  "skysaga-store",
@@ -1166,6 +1182,7 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
+ "skysaga-core",
  "skysaga-state",
  "tokio",
  "tower",
@@ -1628,6 +1645,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

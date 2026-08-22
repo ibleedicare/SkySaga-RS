@@ -124,6 +124,22 @@ pub fn world_from_capture() -> World {
         // point of this world: it is the oracle, and must not be re-derived.
         player_template: None,
         item_definition: None,
+
+        // The C# world this capture came from seeds no container -- it reaches one through
+        // its /spawn command, which was not used while capturing. An empty list is what that
+        // world actually held.
+        containers: Vec::new(),
+        creatures: Vec::new(),
+
+        // A capture carries packets, not the data file.
+        definitions: skysaga_world::EntityDefinitions::default(),
+        spawn_voxel: [0, 0, 0],
+
+        // The capture predates chat being handed out at all.
+        chat_channels: Vec::new(),
+
+        // A capture carries packets, not data tables.
+        geodata: skysaga_world::geodata::GeoData::default(),
     }
 }
 

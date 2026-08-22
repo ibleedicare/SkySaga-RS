@@ -10,16 +10,40 @@
 //! Every layout here is checked against bytes captured from the C# server or the live client,
 //! never against a reading of the C# source alone.
 
+pub mod chat;
 pub mod character_creation;
+pub mod combat;
 pub mod handshake;
+pub mod interaction;
+pub mod inventory;
+pub mod mail;
+pub mod movement;
 pub mod photo;
 pub mod transfer;
+pub mod voxel;
 
 pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
+pub use chat::{Channel, ChannelType, RequestChatChannelData, SendChatChannelData};
+pub use combat::{
+    ApplyImpulse, EntityStoppedUsingEquippedItem, EntityUsedEquippedItem, EquippedItemUsed,
+    EventEffect, IFellTooFar, KillOccurred, PerformEntityActions, PlayerDodged,
+    PlayerFallenOffTheWorld, PlayerSpawned, RequestRespawn, SetPlayerState, StopUsingEquippedItem,
+};
+pub use interaction::{Action, ExecuteEntityAction, InteractWithEntity};
+pub use inventory::{
+    InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
+    RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
+};
+pub use mail::{
+    DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
+    TakeMailAttachment,
+};
+pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use transfer::TransferToServer;
+pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     EntityRemoved, EntitySync,

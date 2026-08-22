@@ -4,13 +4,15 @@
 //! session state machine only reads it, so it can be built by [`World::home_island`], decoded
 //! from a capture (as the tests do), or assembled by hand.
 
+use skysaga_proto::packets::chat::Channel;
 use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
+use skysaga_world::geodata::{default_geodata_path, GeoData};
 use skysaga_world::terrain::CHUNK_SIZE;
 use skysaga_world::{
     Component, Entity, EntityDefinition, EntityDefinitions,
     HealthComponent, InteractionComponent,
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
-    TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLinkComponent,
+    TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLink, VoxelLinkComponent,
 };
 use tracing::warn;
 
@@ -56,6 +58,87 @@ pub struct World {
 
     /// `BasicInventoryItem`, for stacks created while the server runs.
     pub item_definition: Option<EntityDefinition>,
+
+    /// The game's own tables: which block an item places, what a broken one drops, how large
+    /// a stack may be.
+    ///
+    /// Empty for a world decoded from a capture, which carries packets rather than data. A
+    /// server with an empty table cannot tell a placement from a dig, so it treats every
+    /// swing as a dig -- which is wrong, but wrong in the direction that cannot duplicate
+    /// items.
+    pub geodata: GeoData,
+
+    /// The chat channels this world offers.
+    ///
+    /// Handed out on request over RakNet; the messages themselves go over the IRC socket that
+    /// `server_info` names. An empty list means the client never issues a `JOIN` and chat is
+    /// silent even with the IRC server running.
+    pub chat_channels: Vec<Channel>,
+
+    /// The creatures the world seeded, un-encoded.
+    pub creatures: Vec<Creature>,
+
+    /// The containers in this world, un-encoded.
+    ///
+    /// Kept beside `entities` for the same reason as `player_template`: a chest's contents and
+    /// its lid change while the server runs, so the burst's frozen encoding is not enough to
+    /// answer with later.
+    pub containers: Vec<Container>,
+
+    /// Where a player drops in, in voxels.
+    pub spawn_voxel: [u32; 3],
+
+    /// Every entity type the data file defines.
+    ///
+    /// The world itself is built once, but not everything in it is: a chest spawned by a
+    /// command needs its definition to know which parameters to write, and the name comes from
+    /// a chat message rather than from this list. Empty for a world decoded from a capture.
+    pub definitions: EntityDefinitions,
+}
+
+/// Something in the world with health: an animal, a bandit, a knight.
+///
+/// Kept un-encoded beside `entities` for the same reason as a container: what is replicated
+/// changes while the server runs. A creature's hearts move every time it is hit, and the
+/// burst's frozen encoding cannot be updated.
+#[derive(Debug, Clone)]
+pub struct Creature {
+    pub id: u32,
+    pub name: String,
+
+    pub entity: Entity,
+    pub definition: EntityDefinition,
+
+    /// In the client's position units, so a swing can be tested against it.
+    pub position: [u32; 3],
+
+    /// Hit points at full health, resolved from the entity's own `physicalproperties`.
+    ///
+    /// **Not always what the burst announced.** The world seeds its animals with the hearts
+    /// the C# gives them, which is a fixed 50 half-hearts on the Sheep and nothing at all on
+    /// the rest -- those numbers are what the handshake oracle compares against, so they are
+    /// left alone. The first hit syncs the real figure and the bar corrects itself.
+    pub max_health: u32,
+}
+
+/// A container in the world: a chest, and later a mailbox or a crafting station.
+#[derive(Debug, Clone)]
+pub struct Container {
+    pub id: u32,
+    pub name: String,
+
+    /// The entity as built, so an updated one can be re-encoded from it.
+    pub entity: Entity,
+    pub definition: EntityDefinition,
+
+    pub slots: usize,
+
+    /// Whether E closes it as well as opening it.
+    ///
+    /// A loot chest has no close button of its own, so E is the only way to shut it and a
+    /// toggle is right. Anything with an X button is re-opened instead -- see
+    /// [`crate::Session`] on why.
+    pub is_loot_chest: bool,
 }
 
 impl World {
@@ -69,6 +152,22 @@ impl World {
     /// one needs its definition to know which parameters to write.
     pub fn item_definition(&self) -> Option<&EntityDefinition> {
         self.item_definition.as_ref()
+    }
+
+    /// The container with this entity id, if it is one.
+    ///
+    /// `None` for anything else, which is what makes "press E on a sheep" do nothing rather
+    /// than open an empty window.
+    pub fn container(&self, id: u32) -> Option<&Container> {
+        self.containers.iter().find(|container| container.id == id)
+    }
+
+    /// The creature with this entity id, if it is one.
+    ///
+    /// `None` for a chest, a tree or a player, which is what keeps a swing at scenery from
+    /// resolving to a hit.
+    pub fn creature(&self, id: u32) -> Option<&Creature> {
+        self.creatures.iter().find(|creature| creature.id == id)
     }
 
     /// A player body for `profile`, under `entity_id`.
@@ -169,6 +268,9 @@ pub struct WorldConfig {
     pub biome: String,
     pub chat_host: String,
     pub chat_port: u16,
+
+    /// `type:name` pairs, comma separated. The client turns `global` into `#global`.
+    pub chat_channels: String,
     pub terrain: TerrainGenerator,
 
     /// Frozen time of day, over a 65536-tick cycle.
@@ -221,6 +323,7 @@ impl Default for WorldConfig {
             biome: "Desert".to_owned(),
             chat_host: "127.0.0.1".to_owned(),
             chat_port: 4444,
+            chat_channels: "0:global".to_owned(),
             terrain: TerrainGenerator::default(),
             time_of_day: 65536 / 2,
             fixed_time_of_day: true,
@@ -232,6 +335,24 @@ impl Default for WorldConfig {
         }
     }
 }
+
+/// How many inventory slots a player has, and the layout of them.
+///
+/// Read off the client UI rather than any data file: nothing in `Entities.json` or
+/// `geodata.json` records the mapping, and it was resolved empirically by filling every slot
+/// and reading the squares back.
+///
+/// ```text
+///   0..1    equipment, hands
+///   2..5    equipment: head, torso, legs, arms
+///   6       hotbar
+///   7..8    inside the count, but no square in the UI shows them
+///   9..44   rucksack, 36 squares in a 6x6 grid
+/// ```
+pub const MAX_INVENTORY_SLOTS: u8 = 45;
+
+/// The first slot of the rucksack proper. Anything below this is worn or held.
+pub const FIRST_RUCKSACK_SLOT: usize = 9;
 
 /// The animals and props the C# seeds: name, position, and half-hearts.
 ///
@@ -306,27 +427,83 @@ impl World {
             })],
         );
 
+        let geodata = load_geodata();
+
+        let mut creatures = Vec::new();
+
         for (name, position, half_hearts) in PROPS {
-            add(
-                name,
-                vec![
-                    Component::SmoothedTransform(TransformComponent {
-                        position: *position,
-                        ..Default::default()
-                    }),
-                    Component::Transform(TransformComponent {
-                        position: *position,
-                        ..Default::default()
-                    }),
-                    Component::Health(HealthComponent {
-                        half_hearts: *half_hearts,
-                        ..Default::default()
-                    }),
-                    Component::Inventory(InventoryComponent::default()),
-                    Component::CharacterPhysics(PhysicsComponent::default()),
-                    Component::PlayerName(PlayerNameComponent::default()),
-                ],
+            let components = creature_components(
+                *position,
+                HealthComponent {
+                    half_hearts: *half_hearts,
+                    ..Default::default()
+                },
             );
+
+            let Some(id) = add(name, components.clone()) else {
+                continue;
+            };
+
+            // The props are seeded from a fixed table, but their *health* is not in it: it
+            // comes from the same lookup a spawned creature uses, so a swing at the seeded
+            // Knight and a swing at one from `/mob` mean the same thing.
+            let Some(definition) = definitions.get(name) else {
+                continue;
+            };
+
+            let Some(max_health) = health_of(definition, &geodata) else {
+                // A prop rather than a creature -- the Tree has no physical properties, so
+                // nothing can say how much health it has and nothing may hit it.
+                continue;
+            };
+
+            creatures.push(Creature {
+                id,
+                name: (*name).to_owned(),
+                entity: Entity::new(id, components),
+                definition: definition.clone(),
+                position: *position,
+                max_health,
+            });
+        }
+
+        // A chest, so the world contains something a player can open.
+        //
+        // The C# has none either: it reaches one through its `/spawn` chat command, which is a
+        // different feature. Seeding one is the smaller choice and it makes the whole container
+        // path reachable -- without it, every interaction assertion is vacuous and the client
+        // has nothing to press E on.
+        //
+        // Kept un-encoded as well as encoded, for the same reason as the player: what is in it
+        // and whether its lid is shut both change while the server runs.
+        let mut containers = Vec::new();
+
+        if let Some(definition) = definitions.get(CHEST) {
+            let links = definition
+                .default_voxel_links()
+                .into_iter()
+                .map(|(offset, voxel_index)| VoxelLink {
+                    x: offset[0],
+                    y: offset[1],
+                    z: offset[2],
+                    voxel_index,
+                })
+                .collect();
+
+            let components = seeded_chest_components(config, links);
+
+            // `add` returns the id it assigned, which is also how a name the data file does
+            // not define is skipped without leaving a container pointing at nothing.
+            if let Some(id) = add(CHEST, components.clone()) {
+                containers.push(Container {
+                    id,
+                    name: CHEST.to_owned(),
+                    entity: Entity::new(id, components),
+                    definition: definition.clone(),
+                    slots: CHEST_SLOTS,
+                    is_loot_chest: true,
+                });
+            }
         }
 
         // The player is added last, and kept un-encoded as well: its name and appearance are
@@ -370,8 +547,130 @@ impl World {
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
+            geodata,
+            definitions: definitions.clone(),
+            creatures,
+            spawn_voxel: {
+                let spawn = config.terrain.spawn();
+                [spawn.0 as u32, spawn.1 as u32, spawn.2 as u32]
+            },
+            chat_channels: Channel::parse_list(&config.chat_channels),
+            containers,
         }
     }
+}
+
+/// The entity seeded as the world's container.
+const CHEST: &str = "Chest";
+
+/// How many squares it holds. 25 is what the live session that solved chests used.
+pub const CHEST_SLOTS: usize = 25;
+
+/// The clearance `TerrainGenerator::spawn` already builds into the height it returns.
+///
+/// Subtracting it gets back to the surface, which is where something standing on the ground
+/// belongs.
+const SPAWN_CLEARANCE_VOXELS: u32 = 3;
+
+/// Everything the chest replicates.
+///
+/// `links` are the cells it occupies, read from its own entry in `Entities.json`.
+fn seeded_chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Component> {
+    let spawn = config.terrain.spawn();
+
+    // Beside the player rather than on top of it: a container inside the spawn point is
+    // reachable but not visible, which reads as "the chest did not spawn".
+    //
+    // **On the ground, not at the spawn height.** `spawn()` already includes three voxels of
+    // clearance so the player drops in rather than starting inside terrain; using that height
+    // for a chest leaves it hanging in the air three voxels up, which is its own kind of "the
+    // chest is not there".
+    let position = [
+        (spawn.0 as u32 + 2) * POSITION_SCALE,
+        (spawn.1 as u32 - SPAWN_CLEARANCE_VOXELS + 1) * POSITION_SCALE,
+        (spawn.2 as u32 + 2) * POSITION_SCALE,
+    ];
+
+    container_components(position, links, CHEST_SLOTS)
+}
+
+/// Everything a container replicates, wherever it is and however big it is.
+///
+/// Shared by the chest the world seeds and any spawned by a command, so the two cannot drift
+/// -- which matters because two of these values are the difference between a chest that is
+/// there and one that is invisible. See `size` and the voxel link below.
+pub fn container_components(
+    position: [u32; 3],
+    links: Vec<VoxelLink>,
+    slots: usize,
+) -> Vec<Component> {
+    vec![
+        Component::Transform(TransformComponent {
+            position,
+            // **One, not zero.** `size` has no default in the data file, so an unset one is
+            // [0, 0, 0] and the chest renders as nothing at all -- present in the burst,
+            // interactable in principle, and invisible. The C# sets it explicitly for the
+            // same reason.
+            size: [1, 1, 1],
+            ..Default::default()
+        }),
+        Component::Interaction(InteractionComponent {
+            enabled: true,
+            is_loot_chest: true,
+            // False, and it must stay false to open. This is the CLOSE signal: the client's
+            // open path fires only while it is clear, and its close path on the rising edge.
+            has_been_opened: false,
+            owner_only: false,
+            allow_multiple_users: true,
+        }),
+        Component::Inventory(InventoryComponent {
+            max_inventory_slots: slots as u8,
+            // Every square present and empty, as for the player: a short list leaves the
+            // client nowhere to draw.
+            inventory_entity_list: vec![0; slots],
+            ..Default::default()
+        }),
+        Component::Owner(OwnerComponent::default()),
+        Component::Pickup(PickupComponent::default()),
+        // **What puts the chest in the world grid rather than floating in front of it.**
+        // Every entity declaring `clientinteractioncomponent` also declares this, and an empty
+        // list declines the parameter -- so a chest sent without it is not part of the terrain.
+        // The shape is per entity, which is why it is read rather than hardcoded.
+        Component::VoxelLink(VoxelLinkComponent {
+            voxels: links,
+            can_replace_voxels_of_entity_id: 0,
+        }),
+    ]
+}
+
+/// Everything a creature replicates, wherever it stands and however healthy it is.
+///
+/// Shared by the props the world seeds and anything `/mob` puts down, so the two cannot drift.
+/// The component set is the C#'s: a creature is a transform, a health bar, an inventory to
+/// loot, a physics body and a name plate.
+pub fn creature_components(position: [u32; 3], health: HealthComponent) -> Vec<Component> {
+    vec![
+        Component::SmoothedTransform(TransformComponent {
+            position,
+            ..Default::default()
+        }),
+        Component::Transform(TransformComponent {
+            position,
+            ..Default::default()
+        }),
+        Component::Health(health),
+        Component::Inventory(InventoryComponent::default()),
+        Component::CharacterPhysics(PhysicsComponent::default()),
+        Component::PlayerName(PlayerNameComponent::default()),
+    ]
+}
+
+/// How much health this entity type has, from its own `physicalproperties` default.
+///
+/// `None` for anything that declares none -- a tree, a barrel -- which is the test for
+/// "can this be fought at all". Nothing in `entities.json` states a hit point count directly.
+pub fn health_of(definition: &EntityDefinition, geodata: &GeoData) -> Option<u32> {
+    geodata.health_for(definition.physical_properties()?)
 }
 
 /// Position units are 1/32 of a voxel: a chunk origin is `chunkCoord * 32` voxels, and a
@@ -415,7 +714,11 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             ..Default::default()
         }),
         Component::Inventory(InventoryComponent {
-            max_inventory_slots: 36,
+            max_inventory_slots: MAX_INVENTORY_SLOTS,
+            // Every slot present and empty. The client expects the whole list: a short one
+            // leaves it with nowhere to draw, which is why an item placed in a one-element
+            // list never appeared.
+            inventory_entity_list: vec![0; MAX_INVENTORY_SLOTS as usize],
             ..Default::default()
         }),
         Component::CharacterPhysics(PhysicsComponent::default()),
@@ -464,4 +767,46 @@ fn terrain_chunks(terrain: &TerrainGenerator) -> Vec<ChunkSync> {
     debug_assert!(CHUNK_SIZE == 32);
 
     chunks
+}
+
+/// Read `geodata.json`, or carry on without it.
+///
+/// A missing or unreadable file is reported and then tolerated rather than fatal: the world
+/// itself is built from `Entities.json`, and a server that will not start because it cannot
+/// say which block "Stone" places is worse than one where placing does not work yet.
+fn load_geodata() -> GeoData {
+    let path = default_geodata_path();
+
+    match GeoData::load(&path) {
+        Ok(geodata) => {
+            tracing::info!(
+                voxels = geodata.voxel_count(),
+                path = %path.display(),
+                "read the geodata tables",
+            );
+
+            geodata
+        }
+
+        Err(error) => {
+            warn!(%error, "no geodata; placing blocks will not work");
+
+            GeoData::default()
+        }
+    }
+}
+
+impl World {
+    /// Where a player drops in, in the client's position units.
+    ///
+    /// Used when something has to be placed before the client has said where it is.
+    pub fn spawn_position(&self) -> [u32; 3] {
+        let spawn = self.spawn_voxel;
+
+        [
+            spawn[0] * POSITION_SCALE,
+            spawn[1] * POSITION_SCALE,
+            spawn[2] * POSITION_SCALE,
+        ]
+    }
 }

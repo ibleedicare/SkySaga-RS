@@ -1,6 +1,6 @@
 //! Wire types shared by packets and components.
 
-use crate::bitstream::{BitError, BitReader, BitWriter};
+use crate::bitstream::{ranged_bits, BitError, BitReader, BitWriter};
 
 /// `ItemSpec` — identifies an item and its materials.
 ///
@@ -98,9 +98,6 @@ impl ItemSpec {
 ///
 /// The same rule the components use: the client's `NumBitsRequired` returns the leading-zero
 /// count, so the width is `32 - that`, which is `32 - leading_zeros(max)`.
-const fn ranged_bits(max: u32) -> u32 {
-    32 - max.leading_zeros()
-}
 
 /// The count boundary the encoding switches width at.
 ///

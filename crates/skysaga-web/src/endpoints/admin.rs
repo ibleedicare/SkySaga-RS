@@ -36,6 +36,7 @@ pub fn router(token: Option<&str>) -> Router<Api> {
         .route("/admin/world", get(world))
         .route("/admin/inventory/{account}", get(inventory))
         .route("/admin/give", post(give))
+        .route("/admin/mail", post(mail))
 }
 
 /// Whether a request may use the admin API.
@@ -211,6 +212,53 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         account: give.account,
         item: give.item,
         count: give.count,
+    })
+    .into_response()
+}
+
+/// A message to put in a player's inbox.
+#[derive(Debug, Deserialize)]
+struct Mail {
+    account: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    body: String,
+    /// At most five, each `["Dirt", 10]`.
+    #[serde(default)]
+    attachments: Vec<(String, u32)>,
+}
+
+#[derive(Debug, Serialize)]
+struct MailQueued {
+    queued: bool,
+    account: String,
+    subject: String,
+    attachments: usize,
+}
+
+/// Send a player a message.
+///
+/// The only way to produce mail: nothing in the game generates any, so without this the
+/// mailbox cannot be opened onto anything. Queued like `give`, and for the same reason -- the
+/// world belongs to the game thread.
+async fn mail(State(api): State<Api>, headers: HeaderMap, Json(mail): Json<Mail>) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    api.state.push_command(AdminCommand::Mail {
+        account: mail.account.clone(),
+        subject: mail.subject.clone(),
+        body: mail.body,
+        attachments: mail.attachments.clone(),
+    });
+
+    Json(MailQueued {
+        queued: true,
+        account: mail.account,
+        subject: mail.subject,
+        attachments: mail.attachments.len(),
     })
     .into_response()
 }
