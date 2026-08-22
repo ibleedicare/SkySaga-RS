@@ -35,8 +35,6 @@
 //! `documentations/combat-and-health.md`. Every one of those is a change to this file and to
 //! nothing on the wire.
 
-use skysaga_world::geodata::EquippedAction;
-
 use crate::world::POSITION_SCALE;
 
 /// How far past its origin a target can be hit, in voxels.
@@ -111,6 +109,7 @@ pub fn distance(from: [u32; 3], target: [u32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skysaga_world::geodata::EquippedAction;
 
     /// A player's own reach, and the sword's basic swing.
     fn basic() -> EquippedAction {
