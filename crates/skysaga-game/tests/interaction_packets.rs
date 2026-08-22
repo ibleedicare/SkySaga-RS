@@ -264,20 +264,39 @@ fn pressing_e_again_closes_a_loot_chest() {
     assert!(synced(&burst).contains(&chest), "the lid animation");
 }
 
+/// Every interact sends both parameters, player first.
+///
+/// **Measured against the running C#, not inferred.** `examples/close-burst` drives both
+/// servers through spawn/open/close and prints which parameters each `EntitySync` carries:
+///
+/// ```text
+/// C#     open   player usingentityid, then chest hasbeenopened
+///        close  player usingentityid, then chest hasbeenopened
+/// ```
+///
+/// Two earlier attempts at the lid got this wrong in opposite directions -- one reversed the
+/// order on a close, the other dropped the chest sync from a first open on the grounds that
+/// nothing had changed. The C# assigns both parameters unconditionally and its setter marks
+/// them dirty on *assignment* rather than on change, so both go out every time.
 #[test]
-fn closing_syncs_the_lid_before_the_window() {
-    // **The order is the whole bug.** Both parameters are sent on a close, and sending them
-    // the obvious way round leaves the chest standing open in the world after the loot window
-    // has gone.
-    //
-    // The two do different jobs. `usingentityid` going to 0 closes the *window*.
-    // `hasbeenopened` going false -> true is what plays the *lid* animation -- and the client
-    // fires that only while its own "window open" latch is still set. Closing the window first
-    // clears the latch, so the `hasbeenopened` edge arrives too late and is dropped: the
-    // window closes, the chest stays open, and nothing anywhere reports an error.
-    //
-    // Observed live on 2026-08-22: the server logged `opening=false` and the chest did not
-    // shut.
+fn opening_syncs_the_player_then_the_chest() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chest = chest(&world);
+    let me = session.player_entity_id();
+
+    let burst = press_e(&mut session, &world, chest);
+
+    assert_eq!(
+        synced(&burst),
+        vec![me, chest],
+        "the C# sends both, player first, even on a first open where nothing changed",
+    );
+}
+
+#[test]
+fn closing_syncs_the_player_then_the_chest() {
     let world = world();
     let mut session = playing(&world);
 
@@ -288,50 +307,15 @@ fn closing_syncs_the_lid_before_the_window() {
 
     let burst = press_e(&mut session, &world, chest);
 
-    let order = synced(&burst);
-
-    let lid = order
-        .iter()
-        .position(|id| *id == chest)
-        .expect("the lid is synced at all");
-
-    let window = order
-        .iter()
-        .position(|id| *id == me)
-        .expect("the window is synced at all");
-
-    assert!(
-        lid < window,
-        "the lid sync must precede the window sync, or the animation never plays: {order:?}",
-    );
-}
-
-#[test]
-fn the_first_open_syncs_the_player_and_nothing_else() {
-    // `hasbeenopened` starts false, so a first open has no edge to send. The C# syncs only
-    // what changed and sends nothing about the chest here.
-    let world = world();
-    let mut session = playing(&world);
-
-    let chest = chest(&world);
-
-    let burst = press_e(&mut session, &world, chest);
-
-    assert_eq!(
-        synced(&burst),
-        vec![session.player_entity_id()],
-        "a first open should sync the player alone",
-    );
+    assert_eq!(synced(&burst), vec![me, chest]);
 }
 
 #[test]
 fn re_opening_lowers_the_flag_the_close_raised() {
-    // **The flag has to be lowered again before the next open, and that lowering must be
-    // sent.** The client's open path fires only while `hasbeenopened` is false, so a copy left
-    // true after a close poisons every open that follows -- the notes call it exactly that.
-    //
-    // Clearing it server-side without telling the client is the same bug wearing a disguise:
-    // the server believes the chest is openable and the client does not.
+    // The flag has to be lowered again before the next open, and the lowering has to be sent:
+    // the client's open path fires only while `hasbeenopened` is false, so a copy left true
+    // after a close poisons every open that follows. Clearing it server-side and staying quiet
+    // is the same bug wearing a disguise.
     let world = world();
     let mut session = playing(&world);
 

@@ -1211,57 +1211,32 @@ impl Session {
 
         self.using_entity = if opening { target } else { 0 };
 
-        // Whether the flag actually moves. The C# syncs dirty parameters, so it sends this
-        // only when it changed; doing the same keeps a redundant value off the wire.
-        let was_raised = self.closed_lids.contains(&target);
-
-        if opening {
+        if opening || !self.raise_lid_on_close {
             self.closed_lids.remove(&target);
-        } else if self.raise_lid_on_close {
+        } else {
             self.closed_lids.insert(target);
         }
 
-        let now_raised = self.closed_lids.contains(&target);
+        debug!(target, opening, "container");
 
-        debug!(target, opening, now_raised, "container");
-
-        if opening {
-            let mut out = Vec::new();
-
-            // **Lowered again before the next open, and the client has to be told.** Its open
-            // path fires only while `hasbeenopened` is false, so a copy left true after a
-            // close poisons every open that follows. Clearing it server-side and staying quiet
-            // is the same bug wearing a disguise.
-            if was_raised {
-                out.extend(self.sync_container(target, world));
-            }
-
-            out.extend(self.sync_player(world));
-
-            return out;
-        }
-
-        // **The lid before the window.**
+        // **Both parameters, every time, the player first.**
         //
-        // `usingentityid` going to 0 closes the loot *window*. `hasbeenopened` going
-        // false -> true is what the notes call the close signal, and the client acts on it only
-        // while its own "window open" latch (interaction component `+0x3c`) is still set.
-        // Closing the window first would clear that latch before the edge arrived.
+        // Measured against the running C# with `skysaga-probe`'s `close-burst` example, which
+        // drives both servers through spawn/open/close and prints which parameters each sync
+        // carries. The C# sends `usingentityid` then `hasbeenopened` on *both* presses, even
+        // on a first open where the flag does not change: it assigns both unconditionally, and
+        // its setter marks a parameter dirty on assignment rather than on change.
         //
-        // **Whether this is what raises or lowers the lid model is unsettled.** Observed live
-        // on 2026-08-22: after a close the window goes, the prompt returns to "Open Chest",
-        // and the chest is still standing open. Reordering these two did not change that, so
-        // either the flag means "this chest has been looted" and the raised lid is its
-        // intended appearance, or the close event needs something else again. `/lid off` stops
-        // raising it at all, which tells the two apart in one session -- see
-        // [`Session::raise_lid_on_close`].
-        let mut out = if now_raised != was_raised {
-            self.sync_container(target, world)
-        } else {
-            Vec::new()
-        };
+        // Two earlier attempts got this wrong in opposite directions. One reversed the order
+        // on a close, reasoning that the lid animation had to land before the window closed
+        // and cleared the client's "window open" latch. The other dropped the chest sync from
+        // a first open because nothing had changed. Neither shut the lid, and the second
+        // quietly reintroduced the poisoned-open-path bug the notes warn about. The order and
+        // the redundancy are now copied from the implementation that demonstrably works rather
+        // than argued from the reversing notes.
+        let mut out = self.sync_player(world);
 
-        out.extend(self.sync_player(world));
+        out.extend(self.sync_container(target, world));
 
         out
     }
