@@ -12,7 +12,7 @@ use skysaga_world::{
     Component, Entity, EntityDefinition, EntityDefinitions,
     HealthComponent, InteractionComponent,
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
-    TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLinkComponent,
+    TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLink, VoxelLinkComponent,
 };
 use tracing::warn;
 
@@ -416,7 +416,18 @@ impl World {
         let mut containers = Vec::new();
 
         if let Some(definition) = definitions.get(CHEST) {
-            let components = chest_components(config);
+            let links = definition
+                .default_voxel_links()
+                .into_iter()
+                .map(|(offset, voxel_index)| VoxelLink {
+                    x: offset[0],
+                    y: offset[1],
+                    z: offset[2],
+                    voxel_index,
+                })
+                .collect();
+
+            let components = chest_components(config, links);
 
             // `add` returns the id it assigned, which is also how a name the data file does
             // not define is skipped without leaving a container pointing at nothing.
@@ -486,21 +497,39 @@ const CHEST: &str = "Chest";
 /// How many squares it holds. 25 is what the live session that solved chests used.
 const CHEST_SLOTS: usize = 25;
 
+/// The clearance `TerrainGenerator::spawn` already builds into the height it returns.
+///
+/// Subtracting it gets back to the surface, which is where something standing on the ground
+/// belongs.
+const SPAWN_CLEARANCE_VOXELS: u32 = 3;
+
 /// Everything the chest replicates.
-fn chest_components(config: &WorldConfig) -> Vec<Component> {
+///
+/// `links` are the cells it occupies, read from its own entry in `Entities.json`.
+fn chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Component> {
     let spawn = config.terrain.spawn();
 
     // Beside the player rather than on top of it: a container inside the spawn point is
     // reachable but not visible, which reads as "the chest did not spawn".
+    //
+    // **On the ground, not at the spawn height.** `spawn()` already includes three voxels of
+    // clearance so the player drops in rather than starting inside terrain; using that height
+    // for a chest leaves it hanging in the air three voxels up, which is its own kind of "the
+    // chest is not there".
     let position = [
         (spawn.0 as u32 + 2) * POSITION_SCALE,
-        spawn.1 as u32 * POSITION_SCALE,
+        (spawn.1 as u32 - SPAWN_CLEARANCE_VOXELS + 1) * POSITION_SCALE,
         (spawn.2 as u32 + 2) * POSITION_SCALE,
     ];
 
     vec![
         Component::Transform(TransformComponent {
             position,
+            // **One, not zero.** `size` has no default in the data file, so an unset one is
+            // [0, 0, 0] and the chest renders as nothing at all -- present in the burst,
+            // interactable in principle, and invisible. The C# sets it explicitly for the
+            // same reason.
+            size: [1, 1, 1],
             ..Default::default()
         }),
         Component::Interaction(InteractionComponent {
@@ -521,7 +550,14 @@ fn chest_components(config: &WorldConfig) -> Vec<Component> {
         }),
         Component::Owner(OwnerComponent::default()),
         Component::Pickup(PickupComponent::default()),
-        Component::VoxelLink(VoxelLinkComponent::default()),
+        // **What puts the chest in the world grid rather than floating in front of it.**
+        // Every entity declaring `clientinteractioncomponent` also declares this, and an empty
+        // list declines the parameter -- so a chest sent without it is not part of the terrain.
+        // The shape is per entity, which is why it is read rather than hardcoded.
+        Component::VoxelLink(VoxelLinkComponent {
+            voxels: links,
+            can_replace_voxels_of_entity_id: 0,
+        }),
     ]
 }
 

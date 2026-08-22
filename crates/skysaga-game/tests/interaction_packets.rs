@@ -109,6 +109,76 @@ fn the_home_island_has_a_chest() {
     assert!(chest.slots > 0, "with somewhere to put things");
 }
 
+/// The chest's own components, for the three tests below.
+fn chest_component(world: &World, pick: impl Fn(&skysaga_world::Component) -> bool) -> skysaga_world::Component {
+    world.containers[0]
+        .entity
+        .components
+        .iter()
+        .find(|component| pick(component))
+        .expect("the chest declares it")
+        .clone()
+}
+
+#[test]
+fn the_chest_has_a_size() {
+    // **It did not, and that alone made it invisible.** `size` has no default in the data
+    // file, so an unset one is [0, 0, 0]: the entity is in the burst, its position is right,
+    // every interaction parameter is set -- and nothing renders. "No chest in the world" and
+    // "no chest handler" look identical from the client.
+    let world = world();
+
+    let skysaga_world::Component::Transform(transform) =
+        chest_component(&world, |c| matches!(c, skysaga_world::Component::Transform(_)))
+    else {
+        unreachable!()
+    };
+
+    assert_ne!(transform.size, [0, 0, 0], "a zero-sized entity draws nothing");
+}
+
+#[test]
+fn the_chest_occupies_a_cell_in_the_world_grid() {
+    // The other half of why it was not there. An empty voxel list declines the parameter, and
+    // an entity with no voxel link is not part of the terrain -- the C#'s own comment calls
+    // this the difference between a chest standing in the world and one floating in front of
+    // it. Read from `Entities.json`, so a taller entity works without a second special case.
+    let world = world();
+
+    let skysaga_world::Component::VoxelLink(link) =
+        chest_component(&world, |c| matches!(c, skysaga_world::Component::VoxelLink(_)))
+    else {
+        unreachable!()
+    };
+
+    assert!(!link.voxels.is_empty(), "not in the grid");
+
+    // Index 39 is the voxel literally named `Entity`.
+    assert_eq!(link.voxels[0].voxel_index, 39);
+}
+
+#[test]
+fn the_chest_stands_on_the_ground_rather_than_above_it() {
+    // `spawn()` includes three voxels of clearance so the player drops in rather than starting
+    // inside terrain. Using that height for a chest hangs it in the air, which is its own kind
+    // of "the chest is not there".
+    let world = world();
+    let config = WorldConfig::default();
+
+    let skysaga_world::Component::Transform(transform) =
+        chest_component(&world, |c| matches!(c, skysaga_world::Component::Transform(_)))
+    else {
+        unreachable!()
+    };
+
+    let spawn = config.terrain.spawn();
+
+    assert!(
+        transform.position[1] < spawn.1 as u32 * skysaga_game::world::POSITION_SCALE,
+        "the chest is at or above the player's drop-in height",
+    );
+}
+
 #[test]
 fn the_chest_is_in_the_entity_burst() {
     let world = world();
