@@ -218,6 +218,7 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
             "/give <item> [count] - put items in your rucksack".to_owned(),
             "/mail <subject> | <body> [item:count ...] - send yourself a message".to_owned(),
             "/chest [@Entity] [item:count ...] - put a chest in front of you".to_owned(),
+            "/mob <Entity> [count] - put something to fight in front of you".to_owned(),
             "/lid on|off - whether closing a chest raises hasbeenopened".to_owned(),
         ],
 
@@ -265,6 +266,32 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                 "queued a {entity} with {} item(s)",
                 loot.len(),
             )]
+        }
+
+        "mob" => {
+            // `/mob Knight`, `/mob BanditGrunt 3`. Any entity with physical properties will
+            // do -- the health, the reach and the damage all come from its own data.
+            let Some(entity) = parts.next() else {
+                return vec!["usage: /mob <Entity> [count]".to_owned()];
+            };
+
+            // Each one is an entity nothing ever removes, so a mistyped count is a world full
+            // of knights until the server restarts.
+            const MAX: u32 = 10;
+
+            let count = parts
+                .next()
+                .and_then(|count| count.parse().ok())
+                .unwrap_or(1)
+                .clamp(1, MAX);
+
+            state.push_command(AdminCommand::Mob {
+                account: nick.to_owned(),
+                entity: entity.to_owned(),
+                count,
+            });
+
+            vec![format!("queued {count} x {entity}")]
         }
 
         "give" => {

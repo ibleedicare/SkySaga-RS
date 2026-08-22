@@ -32,7 +32,27 @@ pub struct HealthComponent {
     pub debris_type: u8,
 }
 
+/// Hit points to a heart.
+///
+/// Fixed by the only entity whose hearts are known: `Durabilities > Player` is 40 and the
+/// player renders with ten whole and twenty half hearts. Nothing in the data states the scale
+/// directly, and no other entity's heart count was ever observed -- so this is the one
+/// inference the damage model rests on, and it is here rather than spread over its callers.
+pub const HEALTH_PER_HEART: u32 = 4;
+
 impl HealthComponent {
+    /// A component showing `health` hit points, in both of the units the client is sent.
+    ///
+    /// `wholehearts` and `halfhearts` are separate synced parameters rather than one value and
+    /// its remainder: the player at full health carries 10 and 20, not 10 and 0.
+    pub fn with_health(health: u32) -> Self {
+        Self {
+            whole_hearts: health / HEALTH_PER_HEART,
+            half_hearts: health / (HEALTH_PER_HEART / 2),
+            ..Default::default()
+        }
+    }
+
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match parameter.to_ascii_lowercase().as_str() {
             "wholehearts" => writer.write_bits_le(self.whole_hearts, ranged_bits(MAX_HEARTS)),

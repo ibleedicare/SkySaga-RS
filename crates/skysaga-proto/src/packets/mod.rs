@@ -12,6 +12,7 @@
 
 pub mod chat;
 pub mod character_creation;
+pub mod combat;
 pub mod handshake;
 pub mod interaction;
 pub mod inventory;
@@ -25,6 +26,11 @@ pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
 };
 pub use chat::{Channel, ChannelType, RequestChatChannelData, SendChatChannelData};
+pub use combat::{
+    ApplyImpulse, EntityStoppedUsingEquippedItem, EntityUsedEquippedItem, EquippedItemUsed,
+    EventEffect, IFellTooFar, KillOccurred, PerformEntityActions, PlayerDodged,
+    PlayerFallenOffTheWorld, PlayerSpawned, RequestRespawn, SetPlayerState, StopUsingEquippedItem,
+};
 pub use interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 pub use inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,

@@ -263,6 +263,19 @@ pub enum AdminCommand {
         /// `Item` or `Item:count` entries.
         loot: Vec<String>,
     },
+
+    /// Put something with health in the world, in front of a player.
+    ///
+    /// The only way to get a fight: nothing in the world spawns creatures, and the handful the
+    /// island seeds stand in one place. Their health comes from the entity's own
+    /// `physicalproperties`, so a `Sheep` and a `Yeti` are as different here as in the game.
+    Mob {
+        account: String,
+        /// An `Entities.json` name -- `Knight`, `BanditGrunt`, `Yeti`.
+        entity: String,
+        /// How many to put down. Capped, since each one is an entity nothing removes.
+        count: u32,
+    },
 }
 
 /// Somewhere for changes to go.

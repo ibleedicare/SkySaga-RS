@@ -293,6 +293,22 @@ impl GameServer {
                             self.peer.send(guid, &packet);
                         }
                     }
+
+                    // ...and anything addressed to everyone *else*: the swing echoes, which
+                    // are what make another player's sword move. Same inlining, same reason.
+                    let broadcasts = self
+                        .sessions
+                        .get_mut(&guid)
+                        .map(Session::take_broadcasts)
+                        .unwrap_or_default();
+
+                    for packet in broadcasts {
+                        for other in self.sessions.keys() {
+                            if *other != guid {
+                                self.peer.send(*other, &packet);
+                            }
+                        }
+                    }
                 }
 
                 _ => {}
@@ -370,6 +386,12 @@ impl GameServer {
                 loot,
             } => self.chest(&account, &entity, &loot),
 
+            AdminCommand::Mob {
+                account,
+                entity,
+                count,
+            } => self.mob(&account, &entity, count),
+
             AdminCommand::Lid {
                 account,
                 raise_on_close,
@@ -436,6 +458,53 @@ impl GameServer {
             position = ?spawned.position,
             "spawned a chest",
         );
+    }
+
+    /// Put creatures in the world, in front of a player.
+    ///
+    /// Announced only to that player, as a spawned chest is: the world is fixed once built, so
+    /// anything created after it lives on the session. Every one lands at the same spot --
+    /// they have no AI to walk them apart, so a stack of three is three overlapping bodies
+    /// that take three separate fights to clear.
+    fn mob(&mut self, account: &str, entity: &str, count: u32) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot spawn a creature: that player is not connected");
+
+            return;
+        };
+
+        for _ in 0..count {
+            let Some(session) = self.sessions.get_mut(&guid) else {
+                return;
+            };
+
+            session.reserve_ids_from(self.next_entity_id);
+
+            let Some(spawned) = session.spawn_creature(&self.world, entity) else {
+                warn!(%account, %entity, "not an entity with physical properties");
+
+                return;
+            };
+
+            self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+            for packet in &spawned.packets {
+                self.peer.send(guid, packet);
+            }
+
+            info!(
+                %account,
+                %entity,
+                id = spawned.entity,
+                position = ?spawned.position,
+                "spawned a creature",
+            );
+        }
     }
 
     /// Put a stack of `item` into a player's rucksack.

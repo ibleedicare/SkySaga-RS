@@ -24,6 +24,7 @@
 //! C->S ClientReadyToPlay          -> SetClientEntity, DebugRequestFinishTutorial
 //! ```
 
+pub mod combat;
 pub mod server;
 pub mod world;
 
@@ -35,6 +36,12 @@ use std::collections::BTreeSet;
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
 use skysaga_proto::packets::chat::{RequestChatChannelData, SendChatChannelData};
+use skysaga_proto::packets::combat::{
+    EntityStoppedUsingEquippedItem, EntityUsedEquippedItem, EquippedItemUsed, EventEffect,
+    IFellTooFar, KillOccurred, PerformEntityActions, PlayerDodged, PlayerFallenOffTheWorld,
+    PlayerSpawned,
+    RequestRespawn, SetPlayerState, StopUsingEquippedItem,
+};
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 use skysaga_proto::packets::mail::{
     DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
@@ -52,9 +59,36 @@ use skysaga_proto::packets::{
     PhotoValidated, SaveCharacterName, SetCharacterCustomisationData, SetClientEntity,
     TransferToServer,
 };
+use skysaga_world::geodata::EquippedAction;
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
-use skysaga_world::{Component, Entity};
+use skysaga_world::{Component, Entity, HealthComponent};
 use tracing::{debug, info, warn};
+
+/// What a hard landing costs, in hit points.
+///
+/// **Ours to choose.** `IFellTooFar` carries no height and the client's own reaction to it is
+/// an empty function, so a fall means exactly what the server decides it means. One heart is
+/// enough to be felt without making the island lethal, and ten of them is a death, which is
+/// what makes the death-and-respawn loop reachable at all while nothing else can hurt a
+/// player.
+const FALL_DAMAGE: u32 = 4;
+
+/// A player's full health: `PhysicalProperties > player > Durability > Player > Health`.
+const PLAYER_HEALTH: u32 = 40;
+
+/// Reach for an attacker whose properties cannot be resolved, in voxels.
+///
+/// `Reaches > Default`. Reached only when the data file is missing, where every other number
+/// is a default too.
+const DEFAULT_REACH: f32 = 2.0;
+
+/// The `EventEffect` type played on a hit.
+///
+/// **Unconfirmed.** Two of the 0x61 effect ids are known -- 0x2E is block and 0x21 is spawn --
+/// and neither is the hit spark. The client's dispatch has recovered cases at 4, 0x1c, 0x27,
+/// 0x2a, 0x2b, 0x2e and 0x3d, and 4 is the lowest of them; an id with no case falls to a
+/// default that plays a generic effect, so a wrong guess is a wrong spark and never a stall.
+const HIT_EFFECT: u32 = 4;
 
 /// How many squares a mail attachment container declares.
 ///
@@ -150,6 +184,36 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+
+    // --- combat --------------------------------------------------------------------------
+    //
+    // The whole client-to-server half of a fight. There is no hit packet: what arrives is
+    // "the button went down", and the server decides everything that follows.
+    /// 194 — the swing. Carries the CRC of a GeoData action, which is the damage table.
+    EquippedItemUsed(EquippedItemUsed),
+
+    /// 152 — **the hit**. The client's own detection, naming the entity it struck.
+    PerformEntityActions(PerformEntityActions),
+
+    /// 195 — the button came up. Echoed so other players' animations end.
+    StopUsingEquippedItem(StopUsingEquippedItem),
+
+    /// 169 — "I am attacking / dodging / dead". Relayed by the server layer as bytes.
+    SetPlayerState(SetPlayerState),
+
+    /// 292 — a roll. Decoded so it stops reading as an unhandled packet.
+    PlayerDodged(PlayerDodged),
+
+    /// 158 — "I landed hard". Zero fields, and the client's own reaction is a no-op: what a
+    /// fall costs is entirely the server's choice.
+    IFellTooFar,
+
+    /// 290 — "I am below the world". Zero fields, sent **once** and latched. Answering with
+    /// nothing leaves the player frozen forever.
+    PlayerFallenOffTheWorld,
+
+    /// 221 — the respawn button on the death screen. Zero fields.
+    RequestRespawn,
 
     // --- the mailbox --------------------------------------------------------------------
     //
@@ -261,6 +325,26 @@ impl ClientPacket {
                 .map(Self::PerformVoxelActions)
                 .unwrap_or(Self::Unknown(wire_id)),
 
+            EquippedItemUsed::ID => EquippedItemUsed::decode(&mut reader)
+                .map(Self::EquippedItemUsed)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            PerformEntityActions::ID => PerformEntityActions::decode(&mut reader)
+                .map(Self::PerformEntityActions)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            StopUsingEquippedItem::ID => StopUsingEquippedItem::decode(&mut reader)
+                .map(Self::StopUsingEquippedItem)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            SetPlayerState::ID => SetPlayerState::decode(&mut reader)
+                .map(Self::SetPlayerState)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            PlayerDodged::ID => PlayerDodged::decode(&mut reader)
+                .map(Self::PlayerDodged)
+                .unwrap_or(Self::Unknown(wire_id)),
+
             MailCheck::ID => MailCheck::decode(&mut reader)
                 .map(Self::MailCheck)
                 .unwrap_or(Self::Unknown(wire_id)),
@@ -296,6 +380,14 @@ impl ClientPacket {
             136 => Self::ClientReadyToSync,
             137 => Self::ClientReadyToPlay,
             138 => Self::ClientInitialSyncFinished,
+
+            // The body-less combat packets. Their arrival is the whole message.
+            id if id == IFellTooFar::ID + ID_USER_PACKET_ENUM => Self::IFellTooFar,
+            id if id == PlayerFallenOffTheWorld::ID + ID_USER_PACKET_ENUM => {
+                Self::PlayerFallenOffTheWorld
+            }
+            id if id == RequestRespawn::ID + ID_USER_PACKET_ENUM => Self::RequestRespawn,
+
             other => Self::Unknown(other),
         }
     }
@@ -415,6 +507,38 @@ pub struct Session {
     /// probe and the capture tool connect without going through the conductor.
     account: Option<String>,
 
+    /// Creatures spawned while this session runs, beside the ones the world seeded.
+    ///
+    /// Per session, as containers are: a bandit one player spawns is not in another player's
+    /// world. The same limitation, and it moves at the same time.
+    creatures: Vec<world::Creature>,
+
+    /// Hit points taken off each creature, by entity id.
+    ///
+    /// Damage rather than remaining health, so the world's own creatures need no mutable
+    /// copy: what is left is the definition's maximum minus this.
+    damage: std::collections::HashMap<u32, u32>,
+
+    /// Hit points taken off this player.
+    player_damage: u32,
+
+    /// What each equip slot is currently swinging, by `location`.
+    ///
+    /// **The join between the two halves of a hit.** `EquippedItemUsed` names the action but
+    /// not the target; `PerformEntityActions` names the target but not the action. The slot id
+    /// is the only field they share, so this is what makes a landed blow worth anything.
+    ///
+    /// Set on the swing and cleared on the release, so a hit arriving from a slot that is not
+    /// swinging is dropped rather than credited to whatever was used last.
+    armed: std::collections::HashMap<u32, EquippedAction>,
+
+    /// Packets for the *other* connections, drained by the server layer.
+    ///
+    /// The swing echo is the first thing a session produces that is not addressed to the
+    /// client that caused it: `EntityUsedEquippedItem` is what makes another player's sword
+    /// move, and the swinger's own client discards it.
+    broadcasts: Vec<Vec<u8>>,
+
     /// Wire ids already reported as unhandled.
     ///
     /// EntityMoved alone arrives dozens of times a minute, so warning per packet buries every
@@ -448,6 +572,11 @@ impl Session {
             voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
             spawned: Vec::new(),
+            creatures: Vec::new(),
+            damage: std::collections::HashMap::new(),
+            player_damage: 0,
+            armed: std::collections::HashMap::new(),
+            broadcasts: Vec::new(),
             mailbox: Vec::new(),
             notifications: Vec::new(),
             account: None,
@@ -932,6 +1061,66 @@ impl Session {
 
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
+
+            // --- combat -------------------------------------------------------------------
+            (ClientPacket::EquippedItemUsed(packet), _) => self.equipped_item_used(packet, world),
+
+            (ClientPacket::PerformEntityActions(packet), _) => {
+                self.perform_entity_action(packet, world)
+            }
+
+            (ClientPacket::StopUsingEquippedItem(packet), _) => {
+                // The slot is no longer swinging, so a hit arriving after this is not worth
+                // the action that was armed.
+                self.armed.remove(&packet.location);
+
+                // Nothing back to the swinger -- their own client already ended the animation.
+                // The other players' clients did not, and this is what tells them.
+                self.broadcasts.push(encode(|w| {
+                    EntityStoppedUsingEquippedItem {
+                        entity_id: self.player_entity_id,
+                        location: packet.location,
+                    }
+                    .encode(w)
+                }));
+
+                Vec::new()
+            }
+
+            (ClientPacket::SetPlayerState(packet), _) => {
+                // Relayed as raw bytes by the server layer, which is why nothing is built
+                // here. Decoded so the state is in the log rather than an unhandled id.
+                debug!(state = packet.state_id, "player state");
+
+                Vec::new()
+            }
+
+            (ClientPacket::PlayerDodged(packet), _) => {
+                // No immunity window yet: nothing attacks the player, so there is nothing for
+                // one to protect against. Named rather than left unhandled because it arrives
+                // paired with SetPlayerState on every roll.
+                debug!(direction = packet.direction, "dodge");
+
+                Vec::new()
+            }
+
+            (ClientPacket::IFellTooFar, _) => {
+                debug!("a hard landing");
+
+                self.hurt_player(FALL_DAMAGE, world)
+            }
+
+            (ClientPacket::PlayerFallenOffTheWorld, _) => {
+                // **Answer or the client freezes.** It has already ragdolled itself and it
+                // latches this packet, so it will never ask again. Respawning outright rather
+                // than killing: falling through the world is the server's geometry failing,
+                // not the player's mistake.
+                warn!("a player fell out of the world");
+
+                self.respawn(world)
+            }
+
+            (ClientPacket::RequestRespawn, _) => self.respawn(world),
 
             // --- chat ---------------------------------------------------------------------
             (ClientPacket::RequestChatChannelData(_), _) => {
@@ -1575,6 +1764,11 @@ impl Session {
                         use_entity.using_entity_id = self.using_entity;
                     }
 
+                    // The template carries full health; what this player has left is here.
+                    Component::Health(health) => {
+                        *health = HealthComponent::with_health(self.player_health());
+                    }
+
                     // The whole inbox is this one parameter.
                     Component::MailBox(mailbox) => {
                         mailbox.mail = self
@@ -1603,6 +1797,21 @@ impl Session {
             return Some((player, definition));
         }
 
+        // A creature, whose only mutable state is what is left of it.
+        if let Some(creature) = self.creature(entity, world) {
+            let health = creature.max_health.saturating_sub(self.damage_to(entity));
+
+            let mut built = creature.entity.clone();
+
+            for component in &mut built.components {
+                if let Component::Health(current) = component {
+                    *current = HealthComponent::with_health(health);
+                }
+            }
+
+            return Some((built, &creature.definition));
+        }
+
         let container = self.container(entity, world)?;
 
         let mut built = container.entity.clone();
@@ -1622,6 +1831,356 @@ impl Session {
         }
 
         Some((built, &container.definition))
+    }
+
+    // --- combat --------------------------------------------------------------------------
+
+    /// The creature with this entity id, whether the world seeded it or a command spawned it.
+    ///
+    /// The session first, for the same reason as a container: the world is fixed once built,
+    /// so anything created while the server runs lives here.
+    pub fn creature<'a>(&'a self, id: u32, world: &'a World) -> Option<&'a world::Creature> {
+        self.creatures
+            .iter()
+            .find(|creature| creature.id == id)
+            .or_else(|| world.creature(id))
+    }
+
+    /// Hit points left on a creature, or `None` if that id is not one.
+    pub fn creature_health(&self, id: u32) -> Option<u32> {
+        let creature = self.creatures.iter().find(|creature| creature.id == id)?;
+
+        Some(creature.max_health.saturating_sub(self.damage_to(id)))
+    }
+
+    fn damage_to(&self, id: u32) -> u32 {
+        self.damage.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Hit points left on this player.
+    pub fn player_health(&self) -> u32 {
+        self.player_max_health().saturating_sub(self.player_damage)
+    }
+
+    /// This player's full health, from `Durabilities > Player`.
+    ///
+    /// A constant rather than a lookup: the world is not in scope everywhere this is needed,
+    /// and every player in every build of 10414 resolves to the same row.
+    pub fn player_max_health(&self) -> u32 {
+        PLAYER_HEALTH
+    }
+
+    /// Packets addressed to the other connections, if any. Drains.
+    pub fn take_broadcasts(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.broadcasts)
+    }
+
+    /// Put a creature in the world, three voxels in front of the player.
+    pub fn spawn_creature(&mut self, world: &World, entity: &str) -> Option<Spawned> {
+        let position = self.spawn_position(world);
+
+        self.spawn_creature_at(world, entity, position)
+    }
+
+    /// Put a creature at a known place.
+    ///
+    /// `None` when the data file defines no such entity, or when it defines one with no
+    /// physical properties -- a tree is an entity too, and one with no health is not something
+    /// this can put in a fight.
+    pub fn spawn_creature_at(
+        &mut self,
+        world: &World,
+        entity: &str,
+        position: [u32; 3],
+    ) -> Option<Spawned> {
+        let definition = world.definitions.get(entity)?.clone();
+
+        let max_health = world::health_of(&definition, &world.geodata).or_else(|| {
+            warn!(%entity, "no physical properties, so no health; not spawning it");
+
+            None
+        })?;
+
+        let id = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(id + 1);
+
+        let built = Entity::new(
+            id,
+            world::creature_components(position, HealthComponent::with_health(max_health)),
+        );
+
+        let packets = vec![encode(|w| built.to_entity_add(&definition).encode(w))];
+
+        info!(entity = id, %entity, max_health, ?position, "spawned a creature");
+
+        self.creatures.push(world::Creature {
+            id,
+            name: entity.to_owned(),
+            entity: built,
+            definition,
+            position,
+            max_health,
+        });
+
+        Some(Spawned {
+            entity: id,
+            position,
+            packets,
+        })
+    }
+
+    /// The attack button went down: remember what is being swung, and echo it.
+    ///
+    /// **No damage happens here.** This packet says what is in use, not what it touched --
+    /// the client's own hit detection reports that separately, in
+    /// [`PerformEntityActions`](Self::perform_entity_action). The action is held per equip
+    /// slot because that slot id is the only thing joining the two.
+    fn equipped_item_used(&mut self, packet: EquippedItemUsed, world: &World) -> Vec<Vec<u8>> {
+        // Everyone else sees the swing whether or not it connects -- a miss is still an
+        // animation.
+        self.broadcasts.push(encode(|w| {
+            EntityUsedEquippedItem {
+                entity_id: self.player_entity_id,
+                location: packet.location,
+                equipped_action: packet.equipped_action,
+                action_type: packet.action_type,
+            }
+            .encode(w)
+        }));
+
+        self.armed.remove(&packet.location);
+
+        let Some(hash) = packet.equipped_action else {
+            return Vec::new();
+        };
+
+        let Some(action) = world.geodata.equipped_action(hash).cloned() else {
+            debug!(hash, "a swing naming an action this data file does not have");
+
+            return Vec::new();
+        };
+
+        debug!(
+            location = packet.location,
+            action = %action.name,
+            damage = action.attack_strength,
+            "armed",
+        );
+
+        self.armed.insert(packet.location, action);
+
+        Vec::new()
+    }
+
+    /// The swing connected: apply what the armed action is worth to the entity named.
+    ///
+    /// # The client decided this, not the server
+    ///
+    /// `PerformEntityActions` carries the entity its own hit detection resolved, which is
+    /// better than anything the server can work out: it knows the swing's real arc, the
+    /// animation's active window and where both bodies are between position updates. The
+    /// server checks only that the target is a living creature within a plausible distance,
+    /// which is the difference between trusting a client and taking dictation from one.
+    ///
+    /// # Order matters
+    ///
+    /// The victim's `EntitySync` goes out before its `KillOccurred`, and the `EntityRemoved`
+    /// after both. The client bails out of `KillOccurred` entirely if the victim does not
+    /// resolve, so removing the corpse first would swallow the kill feed.
+    fn perform_entity_action(
+        &mut self,
+        packet: PerformEntityActions,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(action) = self.armed.get(&packet.location).cloned() else {
+            // A hit from a slot nothing armed. Dropped rather than guessed at: assuming a
+            // default action here would make an unarmed hand hit as hard as a sword.
+            debug!(location = packet.location, "a hit with nothing armed");
+
+            return Vec::new();
+        };
+
+        // Not every use is an attack: placing a block, eating and opening a portal all arm the
+        // same slot, and none of them names an `ActionEntity`.
+        if action.attack_strength == 0 {
+            debug!(action = %action.name, "not an attack");
+
+            return Vec::new();
+        }
+
+        let Some(creature) = self.creature(packet.entity_id, world).cloned() else {
+            // A chest, a tree, another player, or an id belonging to nothing.
+            debug!(target = packet.entity_id, "hit something that is not a creature");
+
+            return Vec::new();
+        };
+
+        if creature.max_health <= self.damage_to(creature.id) {
+            debug!(target = creature.id, "hit a corpse");
+
+            return Vec::new();
+        }
+
+        // The one thing the server does check, and deliberately a loose one: a claim from the
+        // far side of the island is refused and nothing finer. See `combat::MAX_HIT_DISTANCE`
+        // for why a tight bound here threw away two hits in five of a real fight.
+        if let Some(position) = self.position {
+            let attacker = combat::Attacker {
+                position,
+                reach: self.player_reach(world),
+            };
+
+            if !combat::in_range(&attacker, creature.position) {
+                warn!(
+                    target = creature.id,
+                    distance = combat::distance(position, creature.position),
+                    limit = combat::MAX_HIT_DISTANCE,
+                    "refusing a hit from implausibly far away",
+                );
+
+                return Vec::new();
+            }
+        }
+
+        self.hit(&creature, &action, packet.position, world)
+    }
+
+    /// Take one swing's damage off `creature` and say what to send.
+    fn hit(
+        &mut self,
+        creature: &world::Creature,
+        action: &EquippedAction,
+        where_it_landed: [u32; 3],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let target = creature.id;
+
+        let before = creature.max_health.saturating_sub(self.damage_to(target));
+        let after = before.saturating_sub(action.attack_strength);
+
+        self.damage
+            .insert(target, creature.max_health.saturating_sub(after));
+
+        info!(
+            target,
+            creature = %creature.name,
+            action = %action.name,
+            damage = before - after,
+            health = after,
+            "hit",
+        );
+
+        // The hit spark and the floating number. `amount` is in the same half-heart units the
+        // health component uses, which is what its shared field width says.
+        //
+        // Drawn where the client said the blow landed rather than at the creature's origin,
+        // which is at its feet: a spark under a knight reads as a miss.
+        let mut out = vec![encode(|w| {
+            EventEffect {
+                effect_type: HIT_EFFECT,
+                entity_a: self.player_entity_id,
+                entity_b: target,
+                resource_a: None,
+                resource_b: None,
+                position: where_it_landed,
+                direction: EventEffect::direction_from([0.0, 1.0, 0.0]),
+                amount: (before - after) / 2,
+            }
+            .encode(w)
+        })];
+
+        // ...and the heart bar itself, which is an ordinary parameter sync.
+        out.extend(self.sync_health(target, world));
+
+        if after == 0 {
+            out.push(encode(|w| {
+                KillOccurred {
+                    killer: self.player_entity_id,
+                    victim: target,
+                    weapon: None,
+                }
+                .encode(w)
+            }));
+
+            // Only after the kill: the client resolves the victim before it draws anything.
+            out.push(encode(|w| EntityRemoved { entity_id: target }.encode(w)));
+        }
+
+        out
+    }
+
+    /// How far this player can reach, from `Durabilities`-adjacent `Reaches`.
+    fn player_reach(&self, world: &World) -> f32 {
+        world
+            .definitions
+            .get("Player")
+            .and_then(|definition| definition.physical_properties())
+            .and_then(|properties| world.geodata.reach_for(properties))
+            .unwrap_or(DEFAULT_REACH)
+    }
+
+    /// Sync an entity's hearts. Works for a creature and for the player alike.
+    fn sync_health(&self, entity: u32, world: &World) -> Vec<Vec<u8>> {
+        self.sync_of(entity, &["wholehearts", "halfhearts"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// Take health off this player, and say what to send.
+    ///
+    /// Falling is the one thing the client decides for itself: it reports `IFellTooFar` as a
+    /// fact and waits to be told what it cost. **The cost is ours to choose** -- the packet
+    /// carries no height and the client's own reaction to it is an empty function.
+    fn hurt_player(&mut self, damage: u32, world: &World) -> Vec<Vec<u8>> {
+        if self.player_health() == 0 {
+            // Already dead and waiting on a respawn. A second fall must not raise a second
+            // death screen.
+            return Vec::new();
+        }
+
+        self.player_damage = (self.player_damage + damage).min(self.player_max_health());
+
+        let mut out = self.sync_health(self.player_entity_id, world);
+
+        if self.player_health() == 0 {
+            info!("the player died");
+
+            // Killer and victim alike: nothing else did this, and the client renders a
+            // self-kill as the death screen the same way.
+            out.push(encode(|w| {
+                KillOccurred {
+                    killer: self.player_entity_id,
+                    victim: self.player_entity_id,
+                    weapon: None,
+                }
+                .encode(w)
+            }));
+        }
+
+        out
+    }
+
+    /// Put the player back on their feet, at the world's spawn point.
+    ///
+    /// **`PlayerSpawned` is the only code path that closes the death screen.** It also
+    /// teleports and resets the camera, which is why it is the answer to falling off the world
+    /// as well as to pressing respawn.
+    fn respawn(&mut self, world: &World) -> Vec<Vec<u8>> {
+        self.player_damage = 0;
+
+        let position = world.spawn_position();
+
+        self.position = Some(position);
+
+        info!(?position, "respawning the player");
+
+        let mut out = vec![encode(|w| {
+            PlayerSpawned::at(self.player_entity_id, position, 0.0).encode(w)
+        })];
+
+        out.extend(self.sync_health(self.player_entity_id, world));
+
+        out
     }
 
     /// Turn the model's [`Effect`]s into packets, in the order they must be sent.
