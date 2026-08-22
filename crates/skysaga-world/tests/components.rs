@@ -598,3 +598,98 @@ mod character_customisation {
         assert!(writer.into_bytes().is_empty());
     }
 }
+
+// --- BasicInventoryItem, against the captured bytes ----------------------------------------
+//
+// A stack of items in a rucksack. Checked against a capture of the C# server, which sends two
+// of these for its default loadout: 4 flags, 4 set, 368 payload bits.
+//
+// This is the test that would have caught the first attempt, which wrote only
+// `inventoryslotdata` and produced an item the client accepted and never drew.
+
+mod inventory_item {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_proto::types::InventorySlotData;
+    use skysaga_world::{
+        default_entities_path, Component, Entity, EntityDefinitions, InventoryItemComponent,
+    };
+
+    fn stack() -> InventoryItemComponent {
+        InventoryItemComponent {
+            slot_data: InventorySlotData {
+                name: Some(0x1234_5678),
+                count: 10,
+                // A uuid is 36 characters, as the C# writes.
+                item_uuid: "3e195905-a077-48ab-9310-53df2276a402".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn it_is_named_as_entities_json_names_it() {
+        assert_eq!(
+            Component::InventoryItem(InventoryItemComponent::default()).name(),
+            "inventoryitemcomponent",
+        );
+    }
+
+    /// The captured entity sets every one of its four parameters. A component that declines one
+    /// silently removes it from the packet, which is how the first attempt produced an
+    /// invisible item.
+    #[test]
+    fn all_four_parameters_are_written() {
+        let component = Component::InventoryItem(stack());
+
+        for parameter in [
+            "allowaddingtofoundinbiomes",
+            "hasbeentransferred",
+            "inventoryslotdata",
+            "itemlocked",
+        ] {
+            let mut writer = BitWriter::new();
+
+            assert!(
+                component.sync(parameter, &mut writer),
+                "{parameter} must be written",
+            );
+        }
+    }
+
+    /// 365 bits: 33 for the optional name, 8 for the flagged count, 1 unknown bit, 8 for the
+    /// second flagged count, 17 for the last field, and 298 for a 36-character uuid string.
+    #[test]
+    fn the_slot_data_is_365_bits() {
+        let mut writer = BitWriter::new();
+
+        stack().slot_data.encode(&mut writer);
+
+        assert_eq!(writer.bits_used(), 365);
+    }
+
+    /// The whole entity is 368 bits, which is what the C# server put on the wire.
+    #[test]
+    fn the_whole_entity_matches_the_captured_payload_size() {
+        let definitions = EntityDefinitions::load(default_entities_path()).expect("Entities.json");
+        let definition = definitions
+            .get("BasicInventoryItem")
+            .expect("BasicInventoryItem is defined");
+
+        let entity = Entity::new(1, vec![Component::InventoryItem(stack())]);
+        let sync = entity.sync_data(definition);
+
+        assert_eq!(sync.present.len(), 4, "four declared parameters");
+        assert_eq!(
+            sync.present.iter().filter(|set| **set).count(),
+            4,
+            "all four set, as the capture has them",
+        );
+
+        assert_eq!(
+            sync.parameters.len(),
+            368,
+            "368 payload bits, as captured from the C# server",
+        );
+    }
+}

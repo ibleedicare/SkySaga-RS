@@ -60,6 +60,45 @@ impl Entity {
         }
     }
 
+    /// Build a sync body carrying only `parameters`.
+    ///
+    /// An update, rather than a fresh entity. The C# marks a component changed and its next
+    /// tick syncs only what changed; everything else stays absent, and the client leaves those
+    /// values alone. Sending every parameter in an update is not obviously harmful but it is
+    /// not what the client is ever sent, so it is not what this does.
+    ///
+    /// Names are matched case-insensitively against the parameter half of the definition.
+    pub fn sync_data_for(&self, definition: &EntityDefinition, parameters: &[&str]) -> SyncData {
+        let mut present = vec![false; definition.synced_parameter_count()];
+        let mut payload = BitWriter::new();
+
+        for index in 0..definition.synced_parameter_count() {
+            let Some((component_name, parameter)) = definition.parameter_at(index) else {
+                continue;
+            };
+
+            if !parameters
+                .iter()
+                .any(|wanted| wanted.eq_ignore_ascii_case(parameter))
+            {
+                continue;
+            }
+
+            let Some(component) = self.component(component_name) else {
+                continue;
+            };
+
+            if component.sync(parameter, &mut payload) {
+                present[index] = true;
+            }
+        }
+
+        SyncData {
+            present,
+            parameters: Bits::from_writer(&payload),
+        }
+    }
+
     /// The `EntityAdd` announcing this entity to a client.
     pub fn to_entity_add(&self, definition: &EntityDefinition) -> EntityAdd {
         let mut sync = BitWriter::new();

@@ -10,8 +10,7 @@ use std::sync::Arc;
 use raknet::{message_id, Guid, Peer};
 use skysaga_proto::bitstream::BitWriter;
 use skysaga_proto::packets::{Bits, EntityAdd, EntityRemoved, EntitySync};
-use skysaga_proto::types::InventorySlotData;
-use skysaga_world::{Component, Entity, InventoryItemComponent};
+use skysaga_world::{Component, Entity};
 use skysaga_state::{AdminCommand, AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
@@ -241,7 +240,14 @@ impl GameServer {
                     // and lose the appearance they had just chosen.
                     let transferring = matches!(incoming, ClientPacket::CreateHomeworld(_));
 
+                    // A packet may mint entities -- splitting a stack does -- and ids are
+                    // allocated globally so one connection's split cannot collide with
+                    // another's body. Hand the session the allocator, then take it back.
+                    session.reserve_ids_from(self.next_entity_id);
+
                     let replies = session.handle_with(incoming, &self.world, &others);
+
+                    self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
 
                     let profile = session.character().clone();
                     let account = session.account().map(str::to_owned);
@@ -363,37 +369,45 @@ impl GameServer {
             return;
         };
 
-        let item_entity = self.next_entity_id;
-        self.next_entity_id += 1;
-
-        let Some(definition) = self.world.item_definition() else {
+        let Some(definition) = self.world.item_definition().cloned() else {
             warn!("cannot give: BasicInventoryItem is not defined");
 
             return;
         };
 
-        let stack = Entity::new(
-            item_entity,
-            vec![Component::InventoryItem(InventoryItemComponent {
-                slot_data: InventorySlotData {
-                    name: Some(skysaga_core::name_hash(item)),
-                    count,
-                    item_uuid: uuid::Uuid::new_v4().to_string(),
-                    ..Default::default()
-                },
-            })],
-        );
-
-        let add = stack.to_entity_add(definition);
-
-        self.peer.send(guid, &encode(|w| add.encode(w)));
-
-        // Now the slot can point at it.
         let Some(session) = self.sessions.get_mut(&guid) else {
             return;
         };
 
-        session.take_item(item_entity);
+        // Ids come from the server's allocator, so a stack can never collide with another
+        // connection's body.
+        session.reserve_ids_from(self.next_entity_id);
+
+        let Some(item_entity) = session.give(item, count) else {
+            warn!(%account, "cannot give: the rucksack is full");
+
+            return;
+        };
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        let slot = session.slot_of(item_entity).unwrap_or_default();
+
+        // The client must know the entity before a slot points at it, or the slot references
+        // an entity it has never been told about and the square draws empty.
+        if let Some(component) = session.inventories().item(item_entity) {
+            let stack = Entity::new(
+                item_entity,
+                vec![Component::InventoryItem(component.clone())],
+            );
+
+            self.peer
+                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        }
+
+        let Some(session) = self.sessions.get(&guid) else {
+            return;
+        };
 
         let profile = session.character().clone();
         let inventory = session.inventory().to_vec();
@@ -406,7 +420,11 @@ impl GameServer {
         {
             let mut payload = BitWriter::new();
 
-            entity.sync_data(definition).encode(&mut payload);
+            // Only the inventory. The C# syncs what changed and nothing else, and the
+            // client is never sent a full update for an entity it already holds.
+            entity
+                .sync_data_for(definition, &["inventoryentitylist"])
+                .encode(&mut payload);
 
             let sync = EntitySync {
                 id: entity_id,
@@ -416,7 +434,7 @@ impl GameServer {
             self.peer.send(guid, &encode(|w| sync.encode(w)));
         }
 
-        info!(%account, %item, count, entity = item_entity, "gave an item");
+        info!(%account, %item, count, slot, entity = item_entity, "gave an item");
     }
 
     /// Send to every connection except `from`.

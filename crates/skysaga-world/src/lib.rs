@@ -6,6 +6,7 @@
 pub mod components;
 pub mod definitions;
 pub mod entity;
+pub mod inventory;
 pub mod terrain;
 
 pub use components::{
