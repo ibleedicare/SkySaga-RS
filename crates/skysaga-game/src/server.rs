@@ -281,6 +281,18 @@ impl GameServer {
                     for reply in replies {
                         self.peer.send(guid, &reply);
                     }
+
+                    // Anything the session wants to send that this packet did not ask for.
+                    //
+                    // Inlined rather than a call to `flush_notifications`: the receive loop
+                    // holds a borrow of `self.peer`, so a `&mut self` method cannot be called
+                    // from inside it. `sessions` and `peer` are disjoint fields, which is what
+                    // makes this form legal where the method call is not.
+                    if let Some(session) = self.sessions.get_mut(&guid) {
+                        for packet in session.take_notifications() {
+                            self.peer.send(guid, &packet);
+                        }
+                    }
                 }
 
                 _ => {}
@@ -344,6 +356,13 @@ impl GameServer {
                 item,
                 count,
             } => self.give(&account, &item, count),
+
+            AdminCommand::Mail {
+                account,
+                subject,
+                body,
+                attachments,
+            } => self.mail(&account, &subject, &body, &attachments),
         }
     }
 
@@ -435,6 +454,93 @@ impl GameServer {
         }
 
         info!(%account, %item, count, slot, entity = item_entity, "gave an item");
+    }
+
+    /// Send whatever a session has queued that no client packet asked for.
+    ///
+    /// The mail doorbell, so far. `Session::handle` answers a request; this is how something
+    /// that happens *to* a player -- a message arriving while the panel is shut -- reaches
+    /// them.
+    fn flush_notifications(&mut self, guid: Guid) {
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        for packet in session.take_notifications() {
+            self.peer.send(guid, &packet);
+        }
+    }
+
+    /// Put a message in a player's inbox.
+    ///
+    /// The attachment container is announced **once, here**, before anything references it. A
+    /// repeat `EntityAdd` for an id the client already holds makes it destroy the entity and
+    /// build a fresh one, and every slot list still naming the old object is then holding a
+    /// dangling pointer -- which is the one shape that faults the client's contents recompute.
+    /// Later changes ride `EntitySync`, which is the path `give` already proves.
+    fn mail(&mut self, account: &str, subject: &str, body: &str, attachments: &[(String, u32)]) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot send mail: that player is not connected");
+
+            return;
+        };
+
+        let Some(definition) = self.world.item_definition().cloned() else {
+            warn!("cannot send mail: BasicInventoryItem is not defined");
+
+            return;
+        };
+
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        session.reserve_ids_from(self.next_entity_id);
+
+        let borrowed: Vec<(&str, u32)> = attachments
+            .iter()
+            .map(|(name, count)| (name.as_str(), *count))
+            .collect();
+
+        let uuid = session.compose(subject, body, &borrowed);
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        // Announce the attachment items themselves, so the container's slot list names
+        // entities the client has been told about.
+        let Some(mail) = session.mail(&uuid).cloned() else {
+            return;
+        };
+
+        let items: Vec<(u32, skysaga_world::InventoryItemComponent)> = session
+            .inventories()
+            .slots(mail.attachment_entity)
+            .iter()
+            .copied()
+            .filter(|item| *item != 0)
+            .filter_map(|item| {
+                session
+                    .inventories()
+                    .item(item)
+                    .map(|component| (item, component.clone()))
+            })
+            .collect();
+
+        for (id, component) in items {
+            let stack = Entity::new(id, vec![Component::InventoryItem(component)]);
+
+            self.peer
+                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        }
+
+        self.flush_notifications(guid);
+
+        info!(%account, subject, uuid = %mail.uuid, "sent mail");
     }
 
     /// Send to every connection except `from`.

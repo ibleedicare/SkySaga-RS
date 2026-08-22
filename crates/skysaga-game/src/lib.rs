@@ -35,6 +35,10 @@ use std::collections::BTreeSet;
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction, InteractWithEntity};
+use skysaga_proto::packets::mail::{
+    DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
+    TakeMailAttachment,
+};
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection};
 use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
@@ -50,6 +54,20 @@ use skysaga_proto::packets::{
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
 use skysaga_world::{Component, Entity};
 use tracing::{debug, info, warn};
+
+/// How many squares a mail attachment container declares.
+///
+/// The client's own `MailItem` container is five, take-only.
+pub const MAIL_ATTACHMENT_SLOTS: usize = 5;
+
+/// Where the mail UI starts reading a container's inventory.
+///
+/// **Not zero.** The panel takes the attachment list from index 9 and derives the count from
+/// `maxinventoryslots` minus the empties from there on, so the list has to be
+/// `MAIL_ATTACHMENT_SLOTS + 9` entries with the attachments at 9 and up. Filling 0..4 of a
+/// five-entry list rendered nothing and walked the client off the end of the array -- three
+/// sessions were spent on the wire format before the layout turned out to be the problem.
+pub const MAIL_ATTACHMENT_BASE: usize = 9;
 
 /// How many dig ticks break a block.
 ///
@@ -131,6 +149,25 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+
+    // --- the mailbox --------------------------------------------------------------------
+    //
+    // All the mail data goes the other way, as `Player.mailitemlist` inside an ordinary
+    // entity sync. These are requests carrying at most two strings.
+    /// 230 — "send me my inbox". No body; the id is the whole message.
+    MailCheck(MailCheck),
+
+    /// 228 — a message was opened.
+    MailRead(MailRead),
+
+    /// 229 — a gift option was picked. Does not say which.
+    MailGiftSelected(MailGiftSelected),
+
+    /// 231 — discard a message.
+    DeleteMail(DeleteMail),
+
+    /// 232 — claim an attachment into the rucksack.
+    TakeMailAttachment(TakeMailAttachment),
 
     /// Anything else, by wire id.
     Unknown(u16),
@@ -218,6 +255,26 @@ impl ClientPacket {
 
             PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
                 .map(Self::PerformVoxelActions)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            MailCheck::ID => MailCheck::decode(&mut reader)
+                .map(Self::MailCheck)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            MailRead::ID => MailRead::decode(&mut reader)
+                .map(Self::MailRead)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            MailGiftSelected::ID => MailGiftSelected::decode(&mut reader)
+                .map(Self::MailGiftSelected)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            DeleteMail::ID => DeleteMail::decode(&mut reader)
+                .map(Self::DeleteMail)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TakeMailAttachment::ID => TakeMailAttachment::decode(&mut reader)
+                .map(Self::TakeMailAttachment)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             _ => Self::from_wire_id(wire_id),
@@ -318,6 +375,12 @@ pub struct Session {
     /// player's world. The same limitation, and it moves at the same time.
     voxel_edits: std::collections::HashMap<([u32; 3], [u32; 3]), u8>,
 
+    /// This player's inbox.
+    mailbox: Vec<Mail>,
+
+    /// Packets to send that no client packet asked for -- the mail doorbell, so far.
+    notifications: Vec<Vec<u8>>,
+
     /// Dig ticks accumulated per voxel, until it gives way.
     dig_damage: std::collections::HashMap<([u32; 3], [u32; 3]), u32>,
 
@@ -366,6 +429,8 @@ impl Session {
             closed_lids: BTreeSet::new(),
             voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
+            mailbox: Vec::new(),
+            notifications: Vec::new(),
             account: None,
             reported: BTreeSet::new(),
         }
@@ -420,6 +485,12 @@ impl Session {
     pub fn give(&mut self, item: &str, count: u32) -> Option<u32> {
         let slot = self.inventories.first_free_rucksack_slot(self.player_entity_id)?;
 
+        self.inventories
+            .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
+    }
+
+    /// Create a stack of `item` in one particular square, for tests and for seeding.
+    pub fn give_at(&mut self, slot: u32, item: &str, count: u32) -> Option<u32> {
         self.inventories
             .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
     }
@@ -843,6 +914,51 @@ impl Session {
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
 
+            // --- the mailbox --------------------------------------------------------------
+            (ClientPacket::MailCheck(_), _) => self.sync_mailbox(world),
+
+            (ClientPacket::MailRead(packet), _) => {
+                // No reply: the client set its own read bit before sending. Recording it is
+                // what stops the next re-sync popping the message back to unread.
+                if let Some(mail) = self.mail_mut(&packet.message_uuid) {
+                    mail.set_read();
+
+                    debug!(uuid = %packet.message_uuid, "mail read");
+                }
+
+                Vec::new()
+            }
+
+            (ClientPacket::MailGiftSelected(packet), _) => {
+                if let Some(mail) = self.mail_mut(&packet.message_uuid) {
+                    mail.set_gift_chosen();
+
+                    debug!(uuid = %packet.message_uuid, "mail gift chosen");
+                }
+
+                Vec::new()
+            }
+
+            (ClientPacket::DeleteMail(packet), _) => {
+                let before = self.mailbox.len();
+
+                self.mailbox.retain(|mail| mail.uuid != packet.message_uuid);
+
+                if self.mailbox.len() == before {
+                    return Vec::new();
+                }
+
+                debug!(uuid = %packet.message_uuid, "mail deleted");
+
+                // The client does not remove the row itself; it goes when the list comes back
+                // without it.
+                self.sync_mailbox(world)
+            }
+
+            (ClientPacket::TakeMailAttachment(packet), _) => {
+                self.claim_attachment(&packet.message_uuid, &packet.item_uuid, world)
+            }
+
             (ClientPacket::Unknown(wire_id), _) => {
                 // An unimplemented packet is the usual reason a client stalls, so it is worth
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
@@ -984,6 +1100,153 @@ impl Session {
         vec![Self::chunk_edit(packet.chunk, voxel, material)]
     }
 
+    // --- the mailbox --------------------------------------------------------------------
+
+    /// Every message in this player's inbox.
+    pub fn mailbox(&self) -> &[Mail] {
+        &self.mailbox
+    }
+
+    /// One message, by uuid.
+    pub fn mail(&self, uuid: &str) -> Option<&Mail> {
+        self.mailbox.iter().find(|mail| mail.uuid == uuid)
+    }
+
+    fn mail_mut(&mut self, uuid: &str) -> Option<&mut Mail> {
+        self.mailbox.iter_mut().find(|mail| mail.uuid == uuid)
+    }
+
+    /// Put a message in this player's inbox, with `attachments` as real item entities.
+    ///
+    /// Returns its uuid. The doorbell packet is queued rather than returned, because composing
+    /// is not something the client asked for: it happens on an admin command or a server
+    /// event, with no packet of the player's to answer. See [`Self::take_notifications`].
+    pub fn compose(&mut self, subject: &str, body: &str, attachments: &[(&str, u32)]) -> String {
+        let uuid = self.next_uuid();
+
+        // The attachment container is an entity like any other, and the items in it are item
+        // entities like any other -- exactly as a chest holds loot.
+        let container = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(container + 1);
+
+        self.inventories
+            .open(container, MAIL_ATTACHMENT_SLOTS + MAIL_ATTACHMENT_BASE);
+
+        for (index, (item, count)) in attachments.iter().enumerate().take(MAIL_ATTACHMENT_SLOTS) {
+            self.inventories.give(
+                container,
+                (MAIL_ATTACHMENT_BASE + index) as u32,
+                skysaga_core::name_hash(item),
+                *count,
+            );
+        }
+
+        self.mailbox.push(Mail {
+            uuid: uuid.clone(),
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+            attachment_entity: container,
+            flags: 0,
+        });
+
+        info!(%uuid, subject, attachments = attachments.len(), "mail composed");
+
+        // The doorbell. Its handler does nothing but send MailCheck back, which is how a
+        // message arriving while the panel is shut still lights the icon.
+        self.notifications.push(encode(|w| {
+            NewMailReceived {
+                message_uuid: uuid.clone(),
+            }
+            .encode(w)
+        }));
+
+        uuid
+    }
+
+    /// Packets the server should send that no client packet asked for.
+    ///
+    /// Draining, so a notification goes out once. `Session::handle` answers a request; this is
+    /// how something that happens *to* a player reaches them.
+    pub fn take_notifications(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.notifications)
+    }
+
+    /// Send the inbox, then say it is complete.
+    ///
+    /// **Both packets, in that order.** The client's panel renders its loading state and draws
+    /// no rows until `RemoteMailSynced` arrives -- even when `mailitemlist` was synced
+    /// perfectly. The channel is reliable-ordered, so sending them in order is enough.
+    ///
+    /// The attachment containers are deliberately **not** re-announced here. A repeat
+    /// `EntityAdd` for an id the client holds makes it destroy the entity and build a fresh
+    /// one, leaving every slot list that still names the old object holding a dangling
+    /// pointer -- and that pointer is the one the client's contents-recompute dereferences.
+    /// Announce once, at compose time, and let later changes ride `EntitySync`.
+    fn sync_mailbox(&mut self, world: &World) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+
+        if let Some(sync) = self.sync_of(self.player_entity_id, &["mailitemlist"], world) {
+            out.push(sync);
+        }
+
+        out.push(encode(|w| RemoteMailSynced.encode(w)));
+
+        debug!(messages = self.mailbox.len(), "mailbox synced");
+
+        out
+    }
+
+    /// Move one attachment into the rucksack.
+    ///
+    /// The client identifies the item by uuid rather than by slot, and has already blanked its
+    /// own copy of that square -- so doing nothing leaves the item *nowhere* until a re-bind
+    /// restores it. Every path here therefore re-syncs, including the failures.
+    fn claim_attachment(&mut self, message: &str, item_uuid: &str, world: &World) -> Vec<Vec<u8>> {
+        let Some(container) = self.mail(message).map(|mail| mail.attachment_entity) else {
+            return Vec::new();
+        };
+
+        let Some(source) = (0..self.inventories.slots(container).len() as u32).find(|slot| {
+            self.inventories
+                .slot(container, *slot)
+                .filter(|item| *item != 0)
+                .and_then(|item| self.inventories.item(item))
+                .is_some_and(|item| item.slot_data.item_uuid == item_uuid)
+        }) else {
+            debug!(item_uuid, message, "that item is not attached to that message");
+
+            return Vec::new();
+        };
+
+        let Some(target) = self.inventories.first_free_rucksack_slot(self.player_entity_id) else {
+            warn!("rucksack full; the attachment stays in the message");
+
+            // Re-sync anyway, so the client gets its blanked square back.
+            return self.sync_mailbox(world);
+        };
+
+        let effects =
+            self.inventories
+                .transfer_to_slot(container, source, self.player_entity_id, target, 0);
+
+        let mut out = self.apply(effects, world);
+
+        out.extend(self.sync_mailbox(world));
+
+        out
+    }
+
+    /// A uuid for a message, derived rather than drawn at random.
+    ///
+    /// Keeps the session a function from values to values: a random uuid would make every
+    /// compose produce different bytes and put the whole flow beyond exact assertion.
+    fn next_uuid(&self) -> String {
+        format!(
+            "00000000-0000-4000-9000-{:012x}",
+            self.player_entity_id as u64 * 1_000_000 + self.mailbox.len() as u64,
+        )
+    }
+
     /// One dig tick on a voxel. The block gives way once enough of them land.
     ///
     /// **The three crack stages the player sees are client-side.** It streams one packet per
@@ -1113,8 +1376,33 @@ impl Session {
                 world.player_entity(&self.character, entity, self.inventory())?;
 
             for component in &mut player.components {
-                if let Component::UseEntity(use_entity) = component {
-                    use_entity.using_entity_id = self.using_entity;
+                match component {
+                    Component::UseEntity(use_entity) => {
+                        use_entity.using_entity_id = self.using_entity;
+                    }
+
+                    // The whole inbox is this one parameter.
+                    Component::MailBox(mailbox) => {
+                        mailbox.mail = self
+                            .mailbox
+                            .iter()
+                            .map(|mail| skysaga_world::MailItem {
+                                subject: mail.subject.clone(),
+                                body: mail.body.clone(),
+                                unknown: String::new(),
+                                // Not a clock: the session is a pure function from values to
+                                // values, and a real timestamp would make every sync differ.
+                                // The client renders it as a date and nothing depends on it.
+                                timestamp: 0,
+                                message_uuid: mail.uuid.clone(),
+                                attachment_entity: mail.attachment_entity,
+                                text_arguments: Vec::new(),
+                                flags: mail.flags,
+                            })
+                            .collect();
+                    }
+
+                    _ => {}
                 }
             }
 
@@ -1232,4 +1520,57 @@ fn encode(write: impl FnOnce(&mut BitWriter)) -> Vec<u8> {
     write(&mut writer);
 
     writer.into_bytes()
+}
+
+/// One message in a player's inbox.
+///
+/// The whole inbox is a single entity parameter -- `Player.mailitemlist`, sync index 50 -- so
+/// this is the server's own record, and [`Session::sync_mailbox`] is what turns it into the
+/// list the client reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mail {
+    pub uuid: String,
+    pub subject: String,
+    pub body: String,
+
+    /// The container entity holding this message's attachments.
+    ///
+    /// An entity with an inventory, exactly as a chest is. Its slot layout is the awkward
+    /// part -- see [`MAIL_ATTACHMENT_BASE`].
+    pub attachment_entity: u32,
+
+    /// The flag byte the client reads.
+    ///
+    /// | bit | meaning |
+    /// |---:|---|
+    /// | 0 | read |
+    /// | 1 | unknown; nothing sets it |
+    /// | 2 | this message offers a gift choice |
+    /// | 3 | a gift has been chosen |
+    pub flags: u8,
+}
+
+impl Mail {
+    const READ: u8 = 1 << 0;
+    const GIFT_CHOSEN: u8 = 1 << 3;
+
+    pub fn is_read(&self) -> bool {
+        self.flags & Self::READ != 0
+    }
+
+    pub fn gift_chosen(&self) -> bool {
+        self.flags & Self::GIFT_CHOSEN != 0
+    }
+
+    pub fn attachment_entity(&self) -> u32 {
+        self.attachment_entity
+    }
+
+    fn set_read(&mut self) {
+        self.flags |= Self::READ;
+    }
+
+    fn set_gift_chosen(&mut self) {
+        self.flags |= Self::GIFT_CHOSEN;
+    }
 }

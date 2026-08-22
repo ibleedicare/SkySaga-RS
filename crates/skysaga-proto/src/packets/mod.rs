@@ -14,6 +14,7 @@ pub mod character_creation;
 pub mod handshake;
 pub mod interaction;
 pub mod inventory;
+pub mod mail;
 pub mod movement;
 pub mod photo;
 pub mod transfer;
@@ -26,6 +27,10 @@ pub use interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 pub use inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
+};
+pub use mail::{
+    DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
+    TakeMailAttachment,
 };
 pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
