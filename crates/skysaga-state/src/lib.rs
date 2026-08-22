@@ -230,6 +230,19 @@ pub enum AdminCommand {
         item: String,
         count: u32,
     },
+
+    /// Put a message in a player's inbox.
+    ///
+    /// The only way to produce mail at all: nothing in the game generates it yet, and the
+    /// mailbox cannot be exercised without a message in it.
+    Mail {
+        account: String,
+        subject: String,
+        body: String,
+        /// Item name and count, at most five. Each becomes a real item entity in the
+        /// message's attachment container.
+        attachments: Vec<(String, u32)>,
+    },
 }
 
 /// Somewhere for changes to go.
