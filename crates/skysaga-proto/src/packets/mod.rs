@@ -13,6 +13,7 @@
 pub mod character_creation;
 pub mod handshake;
 pub mod inventory;
+pub mod movement;
 pub mod photo;
 pub mod transfer;
 
@@ -23,6 +24,7 @@ pub use inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
 };
+pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use transfer::TransferToServer;
 pub use handshake::{

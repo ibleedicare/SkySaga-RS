@@ -25,16 +25,12 @@
 //! idiom); whole-word fields use [`BitWriter::write_u32`], which is big-endian. See the
 //! `bitstream` module docs.
 
-use skysaga_core::bits::num_bits_required;
 
-use crate::bitstream::{BitError, BitReader, BitWriter};
+use crate::bitstream::{ranged_bits, BitError, BitReader, BitWriter};
 
 /// Width of a value whose declared maximum is `max`, as the client computes it.
 ///
 /// `32 - NumBitsRequired(max)` in the C#, which is `32 - leading_zeros(max)`.
-const fn ranged_bits(max: u32) -> u32 {
-    32 - num_bits_required(max)
-}
 
 /// `MapDefinition` — the world's dimensions, biome and game mode.
 #[derive(Debug, Clone, PartialEq, Eq)]

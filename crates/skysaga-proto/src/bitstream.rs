@@ -524,3 +524,16 @@ impl<'a> BitReader<'a> {
         Ok(wire.saturating_sub(ID_USER_PACKET_ENUM))
     }
 }
+
+/// Width of a ranged field whose declared maximum is `max`.
+///
+/// The client's `NumBitsRequired` returns the *leading-zero* count, so the width it uses is
+/// `32 - that`, which is `32 - leading_zeros(max)`. A field declared with a maximum of 45
+/// is therefore 6 bits, and one declared `0x10000` is 17.
+///
+/// Note this is the width only. Which of [`BitWriter::write_u32`] and
+/// [`BitWriter::write_bits_le`] to pair it with is a separate question, and rule 3 above is
+/// the one that decides it.
+pub const fn ranged_bits(max: u32) -> u32 {
+    32 - skysaga_core::bits::num_bits_required(max)
+}
