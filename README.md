@@ -237,8 +237,8 @@ weapon's `AttackStrength` with its action's was never recovered from the client,
 action's is used alone rather than guessed at. All of those are changes to
 `skysaga-game/src/combat.rs` and to nothing on the wire.
 
-Reversing notes: [documentations/combat-and-health.md](../documentations/combat-and-health.md)
-and [documentations/enemies-and-ai.md](../documentations/enemies-and-ai.md).
+Reversing notes for all of this live in the parent working tree rather than here, as
+`documentations/combat-and-health.md` and `documentations/enemies-and-ai.md`.
 
 ## Known gaps
 
@@ -272,7 +272,7 @@ as a derivative work of that project and carries its MIT copyright notice, as th
 requires.
 
 The licence covers this source and nothing else: not the game client, and not the data files
-this server reads. See the [top-level LICENSE](../LICENSE) for the full statement.
+this server reads. [LICENSE](LICENSE) states that in full.
 
 ## Contributing
 
