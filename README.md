@@ -40,6 +40,8 @@ crates/
   skysaga-auth/     Smilegate login                          TCP  :10106
   skysaga-web/      account / characters / conductor / social / photos
                                                              HTTP :5164
+  skysaga-chat/     the client's IRC dialect, and the server that speaks it
+                                                             TCP  :4444
   skysaga-game/     the RakNet game server and session state machine
                                                              UDP  :42069
   skysaga-server/   one binary running all of them over one shared state
@@ -75,7 +77,8 @@ Read by `skysaga-server`:
 | `SKYSAGA_WEB_PORT` | `5164` | |
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
-| `SKYSAGA_DATA_DIR` | *(the C# tree)* | directory holding `Entities.json` |
+| `SKYSAGA_CHAT_PORT` | `4444` | the IRC server every chat message goes over |
+| `SKYSAGA_DATA_DIR` | *(a checkout of the upstream C# tree)* | directory holding `Entities.json` |
 | `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
 | `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
@@ -113,10 +116,33 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 310 tests, no network, nothing to prepare
+cargo test --workspace          # 647 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
+
+**Some of them drive a headless client over a real socket.** `skysaga-probe` speaks the
+protocol without rendering anything, so "does the server actually answer that packet" is a
+test that runs in a second rather than a Wine client and a human looking at a screen. The
+`parity_*` files use it: they start this server in-process, play a scenario, and assert what
+came back. That is the layer where the inventory packets were failing — they decoded fine and
+were then dropped, which from a player's side is a UI that freezes rather than an error.
+
+**Those same scenarios can be replayed against the running C# server.** Start it beside this
+one and point the tests at it:
+
+```bash
+./scripts/run-oracle.sh                                  # C# on :43069, admin :6175, chat :4445
+SKYSAGA_ORACLE_GAME=127.0.0.1:43069 \
+  SKYSAGA_ORACLE_ADMIN=http://127.0.0.1:6175 \
+  SKYSAGA_ORACLE_CHAT=127.0.0.1:4445 \
+  cargo test -p skysaga-probe -p skysaga-chat
+```
+
+Without those variables the oracle tests **skip** rather than fail, so `cargo test --workspace`
+stays runnable with nothing prepared. Two behavioural differences were found this way rather
+than by reading the C#, and both are now asserted on each side: it echoes a mover its own
+position, and its idea of which way a player faces is always approximately zero.
 
 **The C# server is the oracle, not this code's own opinion.** The fixtures under
 `crates/*/tests/` were captured by running the real C# servers and recording what they put on
@@ -159,22 +185,94 @@ Defects found while reading the original, fixed here rather than reproduced:
   every character rendered with the client's built-in defaults no matter what was chosen in
   the creator.
 
+## Combat
+
+Swinging at a creature hurts it, killing it removes it, and dying raises the death screen.
+
+```
+/mob Knight          put something to fight three voxels in front of you
+/mob BanditGrunt 3   ...or three of them
+/give Metal_Crude_Sword
+```
+
+Equip the sword into a hand from the rucksack, walk up to what you spawned, and swing.
+
+**A hit is two packets.** `EquippedItemUsed` says *what* is being swung, naming a GeoData
+action by CRC; the client's own hit detection then sends `PerformEntityActions` naming *what it
+struck*. They share only the equip-slot id, so the server holds the action per slot to join
+them. It then decides what the blow is worth, and whether the named target is close enough to
+believe: distance only, since the client knows which way it swung and the yaw field's units are
+unproven.
+
+That correction cost a working afternoon. `combat-and-health.md` said the client sends no hit
+packet at all, generalising from captures where nothing was ever struck; the first version of
+this trusted it, swept for its own targets, passed every test, and did no damage in game.
+
+The numbers are the game's own, not invented:
+
+| what | where it comes from |
+|---|---|
+| damage | `EquippedActions[swing].ActionEntity` → `AttackActions[].AttackStrength` |
+| how far a hit is believed | that action's `EntityAreaOfEffect.RangeFactor` → `AreaOfEffects[]` |
+| the attacker's reach | `Player.physicalproperties` → `PhysicalProperties` → `Reaches[]` |
+| a creature's health | its own `physicalproperties` → `Durabilities[].Health` |
+
+So `Basic_Diagonal` does 7 points, `Heavy_Chop` does 14, a sheep has 6 and a knight has 35:
+one swing for the sheep, three for the knight. The mapping was checked against ten real
+`EquippedItemUsed` captures whose CRCs all resolve to real action names
+(`skysaga-proto/tests/combat.rs`).
+
+Two things are worth knowing before reading the code:
+
+- **`KillOccurred` is what makes a client dead.** It does not derive death from `wholehearts`
+  reaching zero; syncing a corpse's health to nothing leaves it standing.
+- **`PlayerSpawned` is the only thing that closes the death screen**, which is also why it is
+  the answer to `PlayerFallenOffTheWorld`. That packet is *latched*: the client sends it once
+  and never again, so a server that ignores it leaves the player frozen below the world
+  permanently. This one answers it.
+
+Not modelled: enemy AI (nothing moves or fights back), stamina, blocking, parrying, dodge
+immunity, knockback, and the weapon's own contribution to damage: the formula combining a
+weapon's `AttackStrength` with its action's was never recovered from the client, so the
+action's is used alone rather than guessed at. All of those are changes to
+`skysaga-game/src/combat.rs` and to nothing on the wire.
+
+Reversing notes: [documentations/combat-and-health.md](../documentations/combat-and-health.md)
+and [documentations/enemies-and-ai.md](../documentations/enemies-and-ai.md).
+
 ## Known gaps
 
-- **The photo album does not load.** Photos are captured, uploaded and stored, and single
-  images are served back, but `photos/_search`, which populates the album list, is not
-  implemented, so the album spins.
-- **Every connection shares one player entity.** Fine for one player; a second player is
-  handed the same body.
-- **Movement is not replicated.** `EntityMoved` and `SetPlayerState` are received and ignored,
-  so players would not see each other move.
-- **The social graph returns empty lists.** The response *shapes* are implemented, being the
-  part that is easy to get wrong, but the interactive friends/requests/blocked graph is not.
-- **No chat.** The client expects an IRC server on :4444 and retries forever without one; it
-  is noisy in the client log but does not block play.
+- **The friends graph is not interactive.** Character search finds a character and the
+  response *shapes* are all implemented, being the part that is easy to get wrong, but adding,
+  accepting and blocking are acknowledged rather than recorded.
 - **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
   verified against, is plain HTTP.
-- **Trading is unimplemented** and logs as unhandled routes.
+- **Buying from the trading post is not implemented.** Browsing works: the catalogue and the
+  search both answer. A purchase is a *teleport* to the seller's home island rather than an
+  item transfer, so it belongs to the world-transfer work rather than to the trading routes.
+- **Only a chest is open-able, and each connection has its own view of it.** The crafting
+  stations need their own handlers; and two players looking into one chest see two different
+  sets of contents, because the container store is per session rather than shared. Voxel edits
+  are per session for the same reason: a block one player places is not in another's world.
+- **Nothing fights back.** Creatures have health and can be killed, but there is no AI: they
+  stand where they were spawned. The trait tables the game ships (`AIAwarenessTraits`,
+  `AIPersistenceTraits`, the relationship tables) are documented and unread; the client runs
+  no AI either, so all of it is server work that has not been done.
+- **Whispers are client-side only.** The chat server drops anything not addressed to a `#`
+  channel, so `/tell` renders locally and reaches nobody.
+
+## Licence and attribution
+
+MIT, see [LICENSE](LICENSE).
+
+This crate tree is original code, but it is a **rewrite of the C# emulator by EDITz**,
+[EDITzDev/SkySaga](https://github.com/EDITzDev/SkySaga), which is both its reference
+implementation and the oracle half the test suite is written against. It is therefore treated
+as a derivative work of that project and carries its MIT copyright notice, as the licence
+requires.
+
+The licence covers this source and nothing else: not the game client, and not the data files
+this server reads. See the [top-level LICENSE](../LICENSE) for the full statement.
 
 ## Contributing
 

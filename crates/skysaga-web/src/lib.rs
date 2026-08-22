@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>, config: WebConfig) -> Router {
         .merge(endpoints::matchmaking::router())
         .merge(endpoints::persistent_record::router())
         .merge(endpoints::social_graph::router())
+        .merge(endpoints::trading::router())
         .fallback(endpoints::not_implemented)
         .with_state(api)
 }

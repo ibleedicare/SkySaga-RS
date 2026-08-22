@@ -230,6 +230,52 @@ pub enum AdminCommand {
         item: String,
         count: u32,
     },
+
+    /// Put a message in a player's inbox.
+    ///
+    /// The only way to produce mail at all: nothing in the game generates it yet, and the
+    /// mailbox cannot be exercised without a message in it.
+    Mail {
+        account: String,
+        subject: String,
+        body: String,
+        /// Item name and count, at most five. Each becomes a real item entity in the
+        /// message's attachment container.
+        attachments: Vec<(String, u32)>,
+    },
+
+    /// Turn the `hasbeenopened` raise on a container close on or off.
+    ///
+    /// A diagnostic lever rather than a feature: the flag is documented as the close signal,
+    /// and the chest is nonetheless left standing open after one. Switching it live is how the
+    /// two readings are told apart without a rebuild between them.
+    Lid { account: String, raise_on_close: bool },
+
+    /// Put a chest in the world, in front of a player.
+    ///
+    /// The world is built once, so this is the only way to get a *second* chest, a filled one,
+    /// or one of the variants -- and testing chest behaviour against a single empty chest at a
+    /// fixed spot is testing one case.
+    Chest {
+        account: String,
+        /// The entity to create. `Chest` unless a variant was asked for.
+        entity: String,
+        /// `Item` or `Item:count` entries.
+        loot: Vec<String>,
+    },
+
+    /// Put something with health in the world, in front of a player.
+    ///
+    /// The only way to get a fight: nothing in the world spawns creatures, and the handful the
+    /// island seeds stand in one place. Their health comes from the entity's own
+    /// `physicalproperties`, so a `Sheep` and a `Yeti` are as different here as in the game.
+    Mob {
+        account: String,
+        /// An `Entities.json` name -- `Knight`, `BanditGrunt`, `Yeti`.
+        entity: String,
+        /// How many to put down. Capped, since each one is an entity nothing removes.
+        count: u32,
+    },
 }
 
 /// Somewhere for changes to go.
@@ -559,6 +605,23 @@ impl AppState {
     /// How many photos are stored.
     pub fn photo_count(&self) -> usize {
         self.read().photos.len()
+    }
+
+    /// Every stored photo's id, newest first.
+    ///
+    /// The album draws them in the order given, and the newest capture is the one the player
+    /// has just taken and is looking for. The map is unordered, so the sort is what makes the
+    /// order a decision rather than a coincidence of hashing.
+    pub fn photo_ids(&self) -> Vec<String> {
+        let state = self.read();
+
+        let mut ids: Vec<&String> = state.photos.keys().collect();
+
+        ids.sort_by_key(|id| {
+            std::cmp::Reverse(state.photos.get(*id).map(|photo| photo.captured_at))
+        });
+
+        ids.into_iter().cloned().collect()
     }
 
     /// Discard the account's character, sending the client back to its creator.

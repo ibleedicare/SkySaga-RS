@@ -10,8 +10,7 @@ use std::sync::Arc;
 use raknet::{message_id, Guid, Peer};
 use skysaga_proto::bitstream::BitWriter;
 use skysaga_proto::packets::{Bits, EntityAdd, EntityRemoved, EntitySync};
-use skysaga_proto::types::InventorySlotData;
-use skysaga_world::{Component, Entity, InventoryItemComponent};
+use skysaga_world::{Component, Entity};
 use skysaga_state::{AdminCommand, AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
@@ -241,7 +240,14 @@ impl GameServer {
                     // and lose the appearance they had just chosen.
                     let transferring = matches!(incoming, ClientPacket::CreateHomeworld(_));
 
+                    // A packet may mint entities -- splitting a stack does -- and ids are
+                    // allocated globally so one connection's split cannot collide with
+                    // another's body. Hand the session the allocator, then take it back.
+                    session.reserve_ids_from(self.next_entity_id);
+
                     let replies = session.handle_with(incoming, &self.world, &others);
+
+                    self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
 
                     let profile = session.character().clone();
                     let account = session.account().map(str::to_owned);
@@ -274,6 +280,34 @@ impl GameServer {
 
                     for reply in replies {
                         self.peer.send(guid, &reply);
+                    }
+
+                    // Anything the session wants to send that this packet did not ask for.
+                    //
+                    // Inlined rather than a call to `flush_notifications`: the receive loop
+                    // holds a borrow of `self.peer`, so a `&mut self` method cannot be called
+                    // from inside it. `sessions` and `peer` are disjoint fields, which is what
+                    // makes this form legal where the method call is not.
+                    if let Some(session) = self.sessions.get_mut(&guid) {
+                        for packet in session.take_notifications() {
+                            self.peer.send(guid, &packet);
+                        }
+                    }
+
+                    // ...and anything addressed to everyone *else*: the swing echoes, which
+                    // are what make another player's sword move. Same inlining, same reason.
+                    let broadcasts = self
+                        .sessions
+                        .get_mut(&guid)
+                        .map(Session::take_broadcasts)
+                        .unwrap_or_default();
+
+                    for packet in broadcasts {
+                        for other in self.sessions.keys() {
+                            if *other != guid {
+                                self.peer.send(*other, &packet);
+                            }
+                        }
                     }
                 }
 
@@ -338,6 +372,138 @@ impl GameServer {
                 item,
                 count,
             } => self.give(&account, &item, count),
+
+            AdminCommand::Mail {
+                account,
+                subject,
+                body,
+                attachments,
+            } => self.mail(&account, &subject, &body, &attachments),
+
+            AdminCommand::Chest {
+                account,
+                entity,
+                loot,
+            } => self.chest(&account, &entity, &loot),
+
+            AdminCommand::Mob {
+                account,
+                entity,
+                count,
+            } => self.mob(&account, &entity, count),
+
+            AdminCommand::Lid {
+                account,
+                raise_on_close,
+            } => {
+                let Some(session) = self
+                    .sessions
+                    .values_mut()
+                    .find(|session| session.account() == Some(account.as_str()))
+                else {
+                    warn!(%account, "cannot set the lid mode: that player is not connected");
+
+                    return;
+                };
+
+                session.set_raise_lid_on_close(raise_on_close);
+
+                info!(%account, raise_on_close, "lid mode");
+            }
+        }
+    }
+
+    /// Put a chest in the world, in front of a player.
+    ///
+    /// Announced only to that player. The world is fixed once built, so a spawned container
+    /// lives on the session and nobody else's session knows about it -- the same limitation as
+    /// the containers the world seeds, and it lifts at the same time.
+    fn chest(&mut self, account: &str, entity: &str, loot: &[String]) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot spawn a chest: that player is not connected");
+
+            return;
+        };
+
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        session.reserve_ids_from(self.next_entity_id);
+
+        let borrowed: Vec<&str> = loot.iter().map(String::as_str).collect();
+
+        let Some(spawned) = session.spawn_chest(&self.world, entity, &borrowed) else {
+            warn!(%account, %entity, "no such entity in Entities.json");
+
+            return;
+        };
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        // In the order the session gave them: the loot, then the chest that names it.
+        for packet in &spawned.packets {
+            self.peer.send(guid, packet);
+        }
+
+        info!(
+            %account,
+            %entity,
+            id = spawned.entity,
+            position = ?spawned.position,
+            "spawned a chest",
+        );
+    }
+
+    /// Put creatures in the world, in front of a player.
+    ///
+    /// Announced only to that player, as a spawned chest is: the world is fixed once built, so
+    /// anything created after it lives on the session. Every one lands at the same spot --
+    /// they have no AI to walk them apart, so a stack of three is three overlapping bodies
+    /// that take three separate fights to clear.
+    fn mob(&mut self, account: &str, entity: &str, count: u32) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot spawn a creature: that player is not connected");
+
+            return;
+        };
+
+        for _ in 0..count {
+            let Some(session) = self.sessions.get_mut(&guid) else {
+                return;
+            };
+
+            session.reserve_ids_from(self.next_entity_id);
+
+            let Some(spawned) = session.spawn_creature(&self.world, entity) else {
+                warn!(%account, %entity, "not an entity with physical properties");
+
+                return;
+            };
+
+            self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+            for packet in &spawned.packets {
+                self.peer.send(guid, packet);
+            }
+
+            info!(
+                %account,
+                %entity,
+                id = spawned.entity,
+                position = ?spawned.position,
+                "spawned a creature",
+            );
         }
     }
 
@@ -363,37 +529,45 @@ impl GameServer {
             return;
         };
 
-        let item_entity = self.next_entity_id;
-        self.next_entity_id += 1;
-
-        let Some(definition) = self.world.item_definition() else {
+        let Some(definition) = self.world.item_definition().cloned() else {
             warn!("cannot give: BasicInventoryItem is not defined");
 
             return;
         };
 
-        let stack = Entity::new(
-            item_entity,
-            vec![Component::InventoryItem(InventoryItemComponent {
-                slot_data: InventorySlotData {
-                    name: Some(skysaga_core::name_hash(item)),
-                    count,
-                    item_uuid: uuid::Uuid::new_v4().to_string(),
-                    ..Default::default()
-                },
-            })],
-        );
-
-        let add = stack.to_entity_add(definition);
-
-        self.peer.send(guid, &encode(|w| add.encode(w)));
-
-        // Now the slot can point at it.
         let Some(session) = self.sessions.get_mut(&guid) else {
             return;
         };
 
-        session.take_item(item_entity);
+        // Ids come from the server's allocator, so a stack can never collide with another
+        // connection's body.
+        session.reserve_ids_from(self.next_entity_id);
+
+        let Some(item_entity) = session.give(item, count) else {
+            warn!(%account, "cannot give: the rucksack is full");
+
+            return;
+        };
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        let slot = session.slot_of(item_entity).unwrap_or_default();
+
+        // The client must know the entity before a slot points at it, or the slot references
+        // an entity it has never been told about and the square draws empty.
+        if let Some(component) = session.inventories().item(item_entity) {
+            let stack = Entity::new(
+                item_entity,
+                vec![Component::InventoryItem(component.clone())],
+            );
+
+            self.peer
+                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        }
+
+        let Some(session) = self.sessions.get(&guid) else {
+            return;
+        };
 
         let profile = session.character().clone();
         let inventory = session.inventory().to_vec();
@@ -406,7 +580,11 @@ impl GameServer {
         {
             let mut payload = BitWriter::new();
 
-            entity.sync_data(definition).encode(&mut payload);
+            // Only the inventory. The C# syncs what changed and nothing else, and the
+            // client is never sent a full update for an entity it already holds.
+            entity
+                .sync_data_for(definition, &["inventoryentitylist"])
+                .encode(&mut payload);
 
             let sync = EntitySync {
                 id: entity_id,
@@ -416,7 +594,94 @@ impl GameServer {
             self.peer.send(guid, &encode(|w| sync.encode(w)));
         }
 
-        info!(%account, %item, count, entity = item_entity, "gave an item");
+        info!(%account, %item, count, slot, entity = item_entity, "gave an item");
+    }
+
+    /// Send whatever a session has queued that no client packet asked for.
+    ///
+    /// The mail doorbell, so far. `Session::handle` answers a request; this is how something
+    /// that happens *to* a player -- a message arriving while the panel is shut -- reaches
+    /// them.
+    fn flush_notifications(&mut self, guid: Guid) {
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        for packet in session.take_notifications() {
+            self.peer.send(guid, &packet);
+        }
+    }
+
+    /// Put a message in a player's inbox.
+    ///
+    /// The attachment container is announced **once, here**, before anything references it. A
+    /// repeat `EntityAdd` for an id the client already holds makes it destroy the entity and
+    /// build a fresh one, and every slot list still naming the old object is then holding a
+    /// dangling pointer -- which is the one shape that faults the client's contents recompute.
+    /// Later changes ride `EntitySync`, which is the path `give` already proves.
+    fn mail(&mut self, account: &str, subject: &str, body: &str, attachments: &[(String, u32)]) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot send mail: that player is not connected");
+
+            return;
+        };
+
+        let Some(definition) = self.world.item_definition().cloned() else {
+            warn!("cannot send mail: BasicInventoryItem is not defined");
+
+            return;
+        };
+
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        session.reserve_ids_from(self.next_entity_id);
+
+        let borrowed: Vec<(&str, u32)> = attachments
+            .iter()
+            .map(|(name, count)| (name.as_str(), *count))
+            .collect();
+
+        let uuid = session.compose(subject, body, &borrowed);
+
+        self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+        // Announce the attachment items themselves, so the container's slot list names
+        // entities the client has been told about.
+        let Some(mail) = session.mail(&uuid).cloned() else {
+            return;
+        };
+
+        let items: Vec<(u32, skysaga_world::InventoryItemComponent)> = session
+            .inventories()
+            .slots(mail.attachment_entity)
+            .iter()
+            .copied()
+            .filter(|item| *item != 0)
+            .filter_map(|item| {
+                session
+                    .inventories()
+                    .item(item)
+                    .map(|component| (item, component.clone()))
+            })
+            .collect();
+
+        for (id, component) in items {
+            let stack = Entity::new(id, vec![Component::InventoryItem(component)]);
+
+            self.peer
+                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        }
+
+        self.flush_notifications(guid);
+
+        info!(%account, subject, uuid = %mail.uuid, "sent mail");
     }
 
     /// Send to every connection except `from`.

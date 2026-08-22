@@ -88,15 +88,85 @@ async fn dispatch(request: axum::extract::Request) -> Response {
         .into_response();
     }
 
+    if let Some(name) = path.split("/character/find/name/").nth(1) {
+        return Json(find_by_name(name)).into_response();
+    }
+
     // Bare arrays -- see the module docs.
-    if path.ends_with("/blocked")
-        || path.contains("/character/find/name/")
-        || path.contains("/friendrequest")
-    {
+    if path.ends_with("/blocked") || path.contains("/friendrequest") {
         return Json(json!([])).into_response();
     }
 
     Json(json!({ "result": {} })).into_response()
+}
+
+/// Character search: echo the searched name back as a single match.
+///
+/// There is no directory of characters to search, so the name the player typed is the answer.
+/// That is what the C# does too, and it is what makes the "add a friend" tab usable with one
+/// client: an empty result is indistinguishable from a broken search.
+///
+/// The uuid is **derived from the name** rather than drawn at random. It is what the client
+/// sends back to make the friend request, so it has to be the same id on the next search and
+/// after a restart.
+fn find_by_name(raw: &str) -> Vec<PlayerView> {
+    let name = percent_decode(raw);
+
+    if name.trim().is_empty() {
+        return Vec::new();
+    }
+
+    // v5, so the id is a pure function of the name. The namespace is arbitrary and fixed; any
+    // constant would do, and this one is `Uuid::NAMESPACE_OID`.
+    let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).to_string();
+
+    vec![PlayerView {
+        uuid: uuid.clone(),
+        character_uuid: uuid,
+        name: name.clone(),
+        character_name: name,
+        current_world: "Home Island".to_owned(),
+        homeworld: "Home Island".to_owned(),
+        current_world_biome: "Desert".to_owned(),
+        current_world_adventure: String::new(),
+        cost: 0,
+        details: PlayerDetails { blocked: false },
+    }]
+}
+
+/// Undo the percent-encoding the client applies to the path.
+///
+/// Names may contain spaces, and echoing the raw segment shows the player `Some%20One` in
+/// their own search results. Malformed escapes are left as written rather than dropped: this
+/// is a name to show back, not something to parse.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                match u8::from_str_radix(&raw[index + 1..index + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        index += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn ends_with_any(path: &str, suffixes: &[&str]) -> bool {

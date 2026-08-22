@@ -7,6 +7,7 @@ license.workspace = true
 description = "Account, character, matchmaking and game-conductor HTTP API."
 
 [dependencies]
+skysaga-core = { workspace = true }
 skysaga-state = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

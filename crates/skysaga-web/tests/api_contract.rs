@@ -1020,6 +1020,31 @@ mod admin {
         }
     }
 
+    /// ...including the ones that change something.
+    ///
+    /// The loop above only reaches routes answering GET, so the two POSTs -- the only admin
+    /// routes that *write* -- were the ones it could not have caught.
+    #[tokio::test]
+    async fn every_admin_route_that_changes_something_is_guarded_too() {
+        let api = api();
+
+        for (path, body) in [
+            ("/admin/give", json!({"account": "Alice", "item": "Dirt"})),
+            ("/admin/mail", json!({"account": "Alice", "subject": "hi"})),
+        ] {
+            let (status, _) = api
+                .send(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} is unguarded");
+        }
+    }
+
     /// With no token configured the admin API is not there at all. A server started normally
     /// has no admin surface, rather than one that anybody can call.
     #[tokio::test]
