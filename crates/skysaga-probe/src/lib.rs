@@ -74,6 +74,13 @@ pub struct Observations {
     /// Ordinals received but not understood, once each. Useful for noticing that the server
     /// started sending something new.
     pub unhandled: BTreeSet<u16>,
+
+    /// Every packet, verbatim, in arrival order.
+    ///
+    /// For answering "what exactly did that server send", which is the question a comparison
+    /// between two implementations comes down to. Counting is enough for most assertions;
+    /// this is for the times it is not.
+    pub raw: Vec<Vec<u8>>,
 }
 
 impl Observations {
@@ -230,6 +237,8 @@ impl Probe {
     }
 
     fn observe(&mut self, data: &[u8]) {
+        self.observations.raw.push(data.to_vec());
+
         let mut reader = BitReader::from_bytes(data);
 
         let Ok(ordinal) = reader.read_packet_id() else {
