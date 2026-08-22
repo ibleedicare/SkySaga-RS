@@ -130,6 +130,10 @@ pub fn world_from_capture() -> World {
         // world actually held.
         containers: Vec::new(),
 
+        // A capture carries packets, not the data file.
+        definitions: skysaga_world::EntityDefinitions::default(),
+        spawn_voxel: [0, 0, 0],
+
         // The capture predates chat being handed out at all.
         chat_channels: Vec::new(),
 

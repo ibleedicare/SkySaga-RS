@@ -81,6 +81,16 @@ pub struct World {
     /// its lid change while the server runs, so the burst's frozen encoding is not enough to
     /// answer with later.
     pub containers: Vec<Container>,
+
+    /// Where a player drops in, in voxels.
+    pub spawn_voxel: [u32; 3],
+
+    /// Every entity type the data file defines.
+    ///
+    /// The world itself is built once, but not everything in it is: a chest spawned by a
+    /// command needs its definition to know which parameters to write, and the name comes from
+    /// a chat message rather than from this list. Empty for a world decoded from a capture.
+    pub definitions: EntityDefinitions,
 }
 
 /// A container in the world: a chest, and later a mailbox or a crafting station.
@@ -427,7 +437,7 @@ impl World {
                 })
                 .collect();
 
-            let components = chest_components(config, links);
+            let components = seeded_chest_components(config, links);
 
             // `add` returns the id it assigned, which is also how a name the data file does
             // not define is skipped without leaving a container pointing at nothing.
@@ -485,6 +495,11 @@ impl World {
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
             geodata: load_geodata(),
+            definitions: definitions.clone(),
+            spawn_voxel: {
+                let spawn = config.terrain.spawn();
+                [spawn.0 as u32, spawn.1 as u32, spawn.2 as u32]
+            },
             chat_channels: Channel::parse_list(&config.chat_channels),
             containers,
         }
@@ -495,7 +510,7 @@ impl World {
 const CHEST: &str = "Chest";
 
 /// How many squares it holds. 25 is what the live session that solved chests used.
-const CHEST_SLOTS: usize = 25;
+pub const CHEST_SLOTS: usize = 25;
 
 /// The clearance `TerrainGenerator::spawn` already builds into the height it returns.
 ///
@@ -506,7 +521,7 @@ const SPAWN_CLEARANCE_VOXELS: u32 = 3;
 /// Everything the chest replicates.
 ///
 /// `links` are the cells it occupies, read from its own entry in `Entities.json`.
-fn chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Component> {
+fn seeded_chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Component> {
     let spawn = config.terrain.spawn();
 
     // Beside the player rather than on top of it: a container inside the spawn point is
@@ -522,6 +537,19 @@ fn chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Componen
         (spawn.2 as u32 + 2) * POSITION_SCALE,
     ];
 
+    container_components(position, links, CHEST_SLOTS)
+}
+
+/// Everything a container replicates, wherever it is and however big it is.
+///
+/// Shared by the chest the world seeds and any spawned by a command, so the two cannot drift
+/// -- which matters because two of these values are the difference between a chest that is
+/// there and one that is invisible. See `size` and the voxel link below.
+pub fn container_components(
+    position: [u32; 3],
+    links: Vec<VoxelLink>,
+    slots: usize,
+) -> Vec<Component> {
     vec![
         Component::Transform(TransformComponent {
             position,
@@ -542,10 +570,10 @@ fn chest_components(config: &WorldConfig, links: Vec<VoxelLink>) -> Vec<Componen
             allow_multiple_users: true,
         }),
         Component::Inventory(InventoryComponent {
-            max_inventory_slots: CHEST_SLOTS as u8,
+            max_inventory_slots: slots as u8,
             // Every square present and empty, as for the player: a short list leaves the
             // client nowhere to draw.
-            inventory_entity_list: vec![0; CHEST_SLOTS],
+            inventory_entity_list: vec![0; slots],
             ..Default::default()
         }),
         Component::Owner(OwnerComponent::default()),
@@ -681,5 +709,20 @@ fn load_geodata() -> GeoData {
 
             GeoData::default()
         }
+    }
+}
+
+impl World {
+    /// Where a player drops in, in the client's position units.
+    ///
+    /// Used when something has to be placed before the client has said where it is.
+    pub fn spawn_position(&self) -> [u32; 3] {
+        let spawn = self.spawn_voxel;
+
+        [
+            spawn[0] * POSITION_SCALE,
+            spawn[1] * POSITION_SCALE,
+            spawn[2] * POSITION_SCALE,
+        ]
     }
 }

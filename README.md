@@ -116,7 +116,7 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 568 tests, no network, nothing to prepare
+cargo test --workspace          # 588 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
