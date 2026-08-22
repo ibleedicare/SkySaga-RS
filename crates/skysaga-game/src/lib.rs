@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
+use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -100,6 +101,18 @@ pub enum ClientPacket {
 
     /// 150 — select a different hotbar square.
     RequestUiSettingsSetActiveSlot(RequestUiSettingsSetActiveSlot),
+
+    // --- where the player is ------------------------------------------------------------
+    //
+    // Neither is answered: the client has already moved itself and is not waiting to be told
+    // it may. They are decoded because the *server* needs the answers, and because
+    // `EntityMoved` arrives dozens of times a minute -- as an unhandled packet it was the
+    // loudest line in the log, which is the noise that hides a real gap.
+    /// 236 — a player is here now.
+    EntityMoved(EntityMoved),
+
+    /// 240 — a player is looking that way.
+    SetLookAtDirection(SetLookAtDirection),
 
     /// Anything else, by wire id.
     Unknown(u16),
@@ -168,6 +181,14 @@ impl ClientPacket {
                     .map(Self::RequestUiSettingsSetActiveSlot)
                     .unwrap_or(Self::Unknown(wire_id))
             }
+
+            EntityMoved::ID => EntityMoved::decode(&mut reader)
+                .map(Self::EntityMoved)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            SetLookAtDirection::ID => SetLookAtDirection::decode(&mut reader)
+                .map(Self::SetLookAtDirection)
+                .unwrap_or(Self::Unknown(wire_id)),
 
             _ => Self::from_wire_id(wire_id),
         }
@@ -244,6 +265,16 @@ pub struct Session {
     /// Which hotbar square is selected.
     active_slot: u32,
 
+    /// Where the client last said this player is, in the client's own units.
+    ///
+    /// `None` until it says so. Not defaulted to the spawn point: anything reading this has
+    /// to tell "standing at the origin" from "has not reported yet", and a default makes
+    /// those the same value.
+    position: Option<[u32; 3]>,
+
+    /// Which way the player is facing, from the same packet.
+    facing_yaw: Option<u32>,
+
     /// Which account this connection belongs to.
     ///
     /// Claimed from the conductor's reservation when the connection arrives, because the
@@ -276,6 +307,8 @@ impl Session {
             inventories,
             hotbar: std::collections::HashMap::new(),
             active_slot: 0,
+            position: None,
+            facing_yaw: None,
             account: None,
             reported: BTreeSet::new(),
         }
@@ -302,6 +335,16 @@ impl Session {
             .iter()
             .position(|held| *held == entity)
             .map(|slot| slot as u32)
+    }
+
+    /// Where the client last said this player is, or `None` if it has not said yet.
+    pub fn position(&self) -> Option<[u32; 3]> {
+        self.position
+    }
+
+    /// Which way the player is facing, or `None` if the client has not said yet.
+    pub fn facing_yaw(&self) -> Option<u32> {
+        self.facing_yaw
     }
 
     /// The item hash bound to the selected hotbar square.
@@ -670,6 +713,27 @@ impl Session {
                 debug!(slot = packet.slot, "hotbar square selected");
 
                 self.active_slot = packet.slot;
+
+                Vec::new()
+            }
+
+            // --- where the player is ---------------------------------------------------
+            (ClientPacket::EntityMoved(packet), _) => {
+                // Only about this connection's own body. A client claiming to move another
+                // player's entity must not change what this session believes about itself;
+                // relaying the bytes on is the server layer's business and is unaffected.
+                if packet.entity_id == self.player_entity_id {
+                    self.position = Some(packet.position);
+                    self.facing_yaw = Some(packet.yaw);
+                }
+
+                Vec::new()
+            }
+
+            (ClientPacket::SetLookAtDirection(packet), _) => {
+                // Decoded and dropped, as in the C#. Nothing reads a look direction yet; the
+                // value of handling it is that it stops burying the log.
+                debug!(?packet, "look direction");
 
                 Vec::new()
             }
