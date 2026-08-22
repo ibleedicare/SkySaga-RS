@@ -273,6 +273,41 @@ async fn a_chest_command_is_acknowledged() {
     assert!(reply.contains("1 item"), "{reply}");
 }
 
+/// `/mob <Entity> [count]` -- the only way to get something to fight.
+#[tokio::test]
+async fn a_mob_command_is_acknowledged() {
+    let port = start().await;
+
+    let mut alice = Client::connect(port, "Alice").await;
+
+    alice.send("JOIN #global").await;
+    alice.wait_for(" 366 ").await.expect("Alice joined");
+
+    alice.send("PRIVMSG #global /mob Knight 3").await;
+
+    let reply = alice.wait_for("queued").await.expect("no acknowledgement of /mob");
+
+    assert!(reply.contains("Knight"), "{reply}");
+    assert!(reply.contains('3'), "{reply}");
+}
+
+/// Named with no entity, it says what it wants rather than queueing a blank one.
+#[tokio::test]
+async fn a_mob_command_with_no_entity_asks_for_one() {
+    let port = start().await;
+
+    let mut alice = Client::connect(port, "Alice").await;
+
+    alice.send("JOIN #global").await;
+    alice.wait_for(" 366 ").await.expect("Alice joined");
+
+    alice.send("PRIVMSG #global /mob").await;
+
+    let reply = alice.wait_for("usage").await.expect("no usage line");
+
+    assert!(reply.contains("/mob"), "{reply}");
+}
+
 #[tokio::test]
 async fn a_chest_variant_is_named_back() {
     // The `@name` form picks a different entity. Getting it wrong silently spawns a plain

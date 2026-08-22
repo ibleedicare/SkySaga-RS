@@ -116,7 +116,7 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 588 tests, no network, nothing to prepare
+cargo test --workspace          # 647 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
@@ -185,6 +185,61 @@ Defects found while reading the original, fixed here rather than reproduced:
   every character rendered with the client's built-in defaults no matter what was chosen in
   the creator.
 
+## Combat
+
+Swinging at a creature hurts it, killing it removes it, and dying raises the death screen.
+
+```
+/mob Knight          put something to fight three voxels in front of you
+/mob BanditGrunt 3   ...or three of them
+/give Metal_Crude_Sword
+```
+
+Equip the sword into a hand from the rucksack, walk up to what you spawned, and swing.
+
+**A hit is two packets.** `EquippedItemUsed` says *what* is being swung, naming a GeoData
+action by CRC; the client's own hit detection then sends `PerformEntityActions` naming *what it
+struck*. They share only the equip-slot id, so the server holds the action per slot to join
+them. It then decides what the blow is worth, and whether the named target is close enough to
+believe: distance only, since the client knows which way it swung and the yaw field's units are
+unproven.
+
+That correction cost a working afternoon. `combat-and-health.md` said the client sends no hit
+packet at all, generalising from captures where nothing was ever struck; the first version of
+this trusted it, swept for its own targets, passed every test, and did no damage in game.
+
+The numbers are the game's own, not invented:
+
+| what | where it comes from |
+|---|---|
+| damage | `EquippedActions[swing].ActionEntity` → `AttackActions[].AttackStrength` |
+| how far a hit is believed | that action's `EntityAreaOfEffect.RangeFactor` → `AreaOfEffects[]` |
+| the attacker's reach | `Player.physicalproperties` → `PhysicalProperties` → `Reaches[]` |
+| a creature's health | its own `physicalproperties` → `Durabilities[].Health` |
+
+So `Basic_Diagonal` does 7 points, `Heavy_Chop` does 14, a sheep has 6 and a knight has 35:
+one swing for the sheep, three for the knight. The mapping was checked against ten real
+`EquippedItemUsed` captures whose CRCs all resolve to real action names
+(`skysaga-proto/tests/combat.rs`).
+
+Two things are worth knowing before reading the code:
+
+- **`KillOccurred` is what makes a client dead.** It does not derive death from `wholehearts`
+  reaching zero; syncing a corpse's health to nothing leaves it standing.
+- **`PlayerSpawned` is the only thing that closes the death screen**, which is also why it is
+  the answer to `PlayerFallenOffTheWorld`. That packet is *latched*: the client sends it once
+  and never again, so a server that ignores it leaves the player frozen below the world
+  permanently. This one answers it.
+
+Not modelled: enemy AI (nothing moves or fights back), stamina, blocking, parrying, dodge
+immunity, knockback, and the weapon's own contribution to damage: the formula combining a
+weapon's `AttackStrength` with its action's was never recovered from the client, so the
+action's is used alone rather than guessed at. All of those are changes to
+`skysaga-game/src/combat.rs` and to nothing on the wire.
+
+Reversing notes: [documentations/combat-and-health.md](../documentations/combat-and-health.md)
+and [documentations/enemies-and-ai.md](../documentations/enemies-and-ai.md).
+
 ## Known gaps
 
 - **The friends graph is not interactive.** Character search finds a character and the
@@ -199,6 +254,10 @@ Defects found while reading the original, fixed here rather than reproduced:
   stations need their own handlers; and two players looking into one chest see two different
   sets of contents, because the container store is per session rather than shared. Voxel edits
   are per session for the same reason: a block one player places is not in another's world.
+- **Nothing fights back.** Creatures have health and can be killed, but there is no AI: they
+  stand where they were spawned. The trait tables the game ships (`AIAwarenessTraits`,
+  `AIPersistenceTraits`, the relationship tables) are documented and unread; the client runs
+  no AI either, so all of it is server work that has not been done.
 - **Whispers are client-side only.** The chat server drops anything not addressed to a `#`
   channel, so `/tell` renders locally and reaches nobody.
 

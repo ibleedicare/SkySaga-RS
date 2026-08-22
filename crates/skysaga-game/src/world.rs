@@ -75,6 +75,9 @@ pub struct World {
     /// silent even with the IRC server running.
     pub chat_channels: Vec<Channel>,
 
+    /// The creatures the world seeded, un-encoded.
+    pub creatures: Vec<Creature>,
+
     /// The containers in this world, un-encoded.
     ///
     /// Kept beside `entities` for the same reason as `player_template`: a chest's contents and
@@ -91,6 +94,31 @@ pub struct World {
     /// command needs its definition to know which parameters to write, and the name comes from
     /// a chat message rather than from this list. Empty for a world decoded from a capture.
     pub definitions: EntityDefinitions,
+}
+
+/// Something in the world with health: an animal, a bandit, a knight.
+///
+/// Kept un-encoded beside `entities` for the same reason as a container: what is replicated
+/// changes while the server runs. A creature's hearts move every time it is hit, and the
+/// burst's frozen encoding cannot be updated.
+#[derive(Debug, Clone)]
+pub struct Creature {
+    pub id: u32,
+    pub name: String,
+
+    pub entity: Entity,
+    pub definition: EntityDefinition,
+
+    /// In the client's position units, so a swing can be tested against it.
+    pub position: [u32; 3],
+
+    /// Hit points at full health, resolved from the entity's own `physicalproperties`.
+    ///
+    /// **Not always what the burst announced.** The world seeds its animals with the hearts
+    /// the C# gives them, which is a fixed 50 half-hearts on the Sheep and nothing at all on
+    /// the rest -- those numbers are what the handshake oracle compares against, so they are
+    /// left alone. The first hit syncs the real figure and the bar corrects itself.
+    pub max_health: u32,
 }
 
 /// A container in the world: a chest, and later a mailbox or a crafting station.
@@ -132,6 +160,14 @@ impl World {
     /// than open an empty window.
     pub fn container(&self, id: u32) -> Option<&Container> {
         self.containers.iter().find(|container| container.id == id)
+    }
+
+    /// The creature with this entity id, if it is one.
+    ///
+    /// `None` for a chest, a tree or a player, which is what keeps a swing at scenery from
+    /// resolving to a hit.
+    pub fn creature(&self, id: u32) -> Option<&Creature> {
+        self.creatures.iter().find(|creature| creature.id == id)
     }
 
     /// A player body for `profile`, under `entity_id`.
@@ -391,27 +427,44 @@ impl World {
             })],
         );
 
+        let geodata = load_geodata();
+
+        let mut creatures = Vec::new();
+
         for (name, position, half_hearts) in PROPS {
-            add(
-                name,
-                vec![
-                    Component::SmoothedTransform(TransformComponent {
-                        position: *position,
-                        ..Default::default()
-                    }),
-                    Component::Transform(TransformComponent {
-                        position: *position,
-                        ..Default::default()
-                    }),
-                    Component::Health(HealthComponent {
-                        half_hearts: *half_hearts,
-                        ..Default::default()
-                    }),
-                    Component::Inventory(InventoryComponent::default()),
-                    Component::CharacterPhysics(PhysicsComponent::default()),
-                    Component::PlayerName(PlayerNameComponent::default()),
-                ],
+            let components = creature_components(
+                *position,
+                HealthComponent {
+                    half_hearts: *half_hearts,
+                    ..Default::default()
+                },
             );
+
+            let Some(id) = add(name, components.clone()) else {
+                continue;
+            };
+
+            // The props are seeded from a fixed table, but their *health* is not in it: it
+            // comes from the same lookup a spawned creature uses, so a swing at the seeded
+            // Knight and a swing at one from `/mob` mean the same thing.
+            let Some(definition) = definitions.get(name) else {
+                continue;
+            };
+
+            let Some(max_health) = health_of(definition, &geodata) else {
+                // A prop rather than a creature -- the Tree has no physical properties, so
+                // nothing can say how much health it has and nothing may hit it.
+                continue;
+            };
+
+            creatures.push(Creature {
+                id,
+                name: (*name).to_owned(),
+                entity: Entity::new(id, components),
+                definition: definition.clone(),
+                position: *position,
+                max_health,
+            });
         }
 
         // A chest, so the world contains something a player can open.
@@ -494,8 +547,9 @@ impl World {
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
-            geodata: load_geodata(),
+            geodata,
             definitions: definitions.clone(),
+            creatures,
             spawn_voxel: {
                 let spawn = config.terrain.spawn();
                 [spawn.0 as u32, spawn.1 as u32, spawn.2 as u32]
@@ -587,6 +641,36 @@ pub fn container_components(
             can_replace_voxels_of_entity_id: 0,
         }),
     ]
+}
+
+/// Everything a creature replicates, wherever it stands and however healthy it is.
+///
+/// Shared by the props the world seeds and anything `/mob` puts down, so the two cannot drift.
+/// The component set is the C#'s: a creature is a transform, a health bar, an inventory to
+/// loot, a physics body and a name plate.
+pub fn creature_components(position: [u32; 3], health: HealthComponent) -> Vec<Component> {
+    vec![
+        Component::SmoothedTransform(TransformComponent {
+            position,
+            ..Default::default()
+        }),
+        Component::Transform(TransformComponent {
+            position,
+            ..Default::default()
+        }),
+        Component::Health(health),
+        Component::Inventory(InventoryComponent::default()),
+        Component::CharacterPhysics(PhysicsComponent::default()),
+        Component::PlayerName(PlayerNameComponent::default()),
+    ]
+}
+
+/// How much health this entity type has, from its own `physicalproperties` default.
+///
+/// `None` for anything that declares none -- a tree, a barrel -- which is the test for
+/// "can this be fought at all". Nothing in `entities.json` states a hit point count directly.
+pub fn health_of(definition: &EntityDefinition, geodata: &GeoData) -> Option<u32> {
+    geodata.health_for(definition.physical_properties()?)
 }
 
 /// Position units are 1/32 of a voxel: a chunk origin is `chunkCoord * 32` voxels, and a

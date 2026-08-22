@@ -132,6 +132,9 @@ pub struct EntityDefinition {
 
     /// The cells this entity occupies, from the `voxels` parameter's default.
     voxel_links: Vec<([i32; 3], u8)>,
+
+    /// The `PhysicalProperties` row this entity uses, from its `physicalproperties` default.
+    physical_properties: Option<String>,
 }
 
 impl EntityDefinition {
@@ -150,6 +153,18 @@ impl EntityDefinition {
     /// three-tall `PVP_Post` works as well as a one-cell `Chest`.
     pub fn default_voxel_links(&self) -> Vec<([i32; 3], u8)> {
         self.voxel_links.clone()
+    }
+
+    /// The `geodata.json > PhysicalProperties` row this entity is built from.
+    ///
+    /// **How much health a creature has, and how far it can reach.** The parameter is a plain
+    /// string default -- `Sheep` is `creature_sheep_standard`, `Player` is `player` -- and it
+    /// is the only link from an entity to its combat numbers: nothing in `entities.json`
+    /// states a hit point count.
+    ///
+    /// `None` for entities that declare no such parameter, which is most of the props.
+    pub fn physical_properties(&self) -> Option<&str> {
+        self.physical_properties.as_deref()
     }
 
     /// `CRC32(name)` — what `EntityAdd` puts on the wire.
@@ -288,6 +303,13 @@ fn definition(entity: RawEntity) -> EntityDefinition {
         .map(voxel_links_from)
         .unwrap_or_default();
 
+    let physical_properties = entity
+        .parameters
+        .get("physicalproperties")
+        .and_then(|parameter| parameter.value.as_ref())
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+
     EntityDefinition {
         name_hash: name_hash(&entity.name),
         name: entity.name,
@@ -295,6 +317,7 @@ fn definition(entity: RawEntity) -> EntityDefinition {
         synced_parameter_count,
         by_index,
         voxel_links,
+        physical_properties,
     }
 }
 
