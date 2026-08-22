@@ -17,6 +17,7 @@ pub mod inventory;
 pub mod movement;
 pub mod photo;
 pub mod transfer;
+pub mod voxel;
 
 pub use character_creation::{
     CharacterCreationResponse, CreateHomeworld, SaveCharacterName, SetCharacterCustomisationData,
@@ -29,6 +30,7 @@ pub use inventory::{
 pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use transfer::TransferToServer;
+pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     EntityRemoved, EntitySync,

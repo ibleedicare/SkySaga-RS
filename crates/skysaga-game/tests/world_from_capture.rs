@@ -129,6 +129,9 @@ pub fn world_from_capture() -> World {
         // its /spawn command, which was not used while capturing. An empty list is what that
         // world actually held.
         containers: Vec::new(),
+
+        // A capture carries packets, not data tables.
+        geodata: skysaga_world::geodata::GeoData::default(),
     }
 }
 

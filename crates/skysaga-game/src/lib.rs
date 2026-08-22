@@ -36,6 +36,7 @@ use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction, InteractWithEntity};
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection};
+use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -49,6 +50,12 @@ use skysaga_proto::packets::{
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
 use skysaga_world::{Component, Entity};
 use tracing::{debug, info, warn};
+
+/// How many dig ticks break a block.
+///
+/// From the C#. The client streams one packet per tick and every field is identical across
+/// the run, so the count is the server's to keep.
+pub const DIG_TICKS_TO_BREAK: u32 = 3;
 
 /// A packet the client sends. Only the ones the server acts on are named.
 ///
@@ -121,6 +128,9 @@ pub enum ClientPacket {
 
     /// 154 — who touched what. Carries no verb, so nothing can be decided from it.
     InteractWithEntity(InteractWithEntity),
+
+    /// 151 — a block was placed or broken. Every build action ends up here.
+    PerformVoxelActions(PerformVoxelActions),
 
     /// Anything else, by wire id.
     Unknown(u16),
@@ -204,6 +214,10 @@ impl ClientPacket {
 
             InteractWithEntity::ID => InteractWithEntity::decode(&mut reader)
                 .map(Self::InteractWithEntity)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
+                .map(Self::PerformVoxelActions)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             _ => Self::from_wire_id(wire_id),
@@ -298,6 +312,15 @@ pub struct Session {
     /// and closes it when that goes back to 0.
     using_entity: u32,
 
+    /// Voxels this player has changed: (chunk, voxel) to the new material.
+    ///
+    /// Held per connection, as containers are, so a block one player places is not in another
+    /// player's world. The same limitation, and it moves at the same time.
+    voxel_edits: std::collections::HashMap<([u32; 3], [u32; 3]), u8>,
+
+    /// Dig ticks accumulated per voxel, until it gives way.
+    dig_damage: std::collections::HashMap<([u32; 3], [u32; 3]), u32>,
+
     /// Containers whose `hasbeenopened` is currently raised.
     ///
     /// The **close** signal, not the open one. The client's open path fires only while it is
@@ -341,6 +364,8 @@ impl Session {
             facing_yaw: None,
             using_entity: 0,
             closed_lids: BTreeSet::new(),
+            voxel_edits: std::collections::HashMap::new(),
+            dig_damage: std::collections::HashMap::new(),
             account: None,
             reported: BTreeSet::new(),
         }
@@ -516,6 +541,11 @@ impl Session {
                 self.stage = Stage::SentEntities;
 
                 info!(entities = world.entities.len(), "sending entities");
+
+                // Stack limits come from the game's own table, not from the default of 64:
+                // fourteen items override it, and a limit that is merely assumed silently
+                // loses the overflow when two stacks merge.
+                self.inventories.set_limits(world.geodata.stack_limits());
 
                 // Give every container in the world an inventory in this session's model, so
                 // a drag into a chest has somewhere to land. Done here rather than in `new`
@@ -810,6 +840,9 @@ impl Session {
                 Vec::new()
             }
 
+            // --- building and digging ----------------------------------------------------
+            (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
+
             (ClientPacket::Unknown(wire_id), _) => {
                 // An unimplemented packet is the usual reason a client stalls, so it is worth
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
@@ -910,6 +943,117 @@ impl Session {
         out.extend(self.sync_container(target, world));
 
         out
+    }
+
+    /// Place a block or break one, and say what to send.
+    ///
+    /// **Place and break are the same packet.** What tells them apart is only whether the
+    /// slot that acted is a hand holding a placeable block; anything else -- a tool, an empty
+    /// hand, a hit from the torso -- digs. Before that distinction existed in the C#, swinging
+    /// an anvil at the ground broke the block.
+    ///
+    /// The client predicts the change locally and waits to be told it really happened, so an
+    /// unanswered dig is a block that vanishes and comes back. That reads as lag rather than
+    /// as a missing handler, which is why this is worth answering even though nothing else
+    /// depends on it yet.
+    fn perform_voxel_action(&mut self, packet: PerformVoxelActions, world: &World) -> Vec<Vec<u8>> {
+        // Only a hand can be holding anything, and only a placeable block places. The hotbar
+        // keeps resource *hashes*, so it can still name an item the player has run out of --
+        // hence the check that a stack actually exists before one is taken from it.
+        let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
+
+        let Some((item, material)) = placing else {
+            return self.dig(packet.chunk, packet.voxel);
+        };
+
+        // Taking from the stack also confirms there was one to take.
+        if !self.take_one(item) {
+            debug!(item, "the hotbar names a block the player does not have");
+
+            return self.dig(packet.chunk, packet.voxel);
+        }
+
+        // The new block goes into the empty voxel next to the face that was clicked, not into
+        // the one that was hit.
+        let voxel = packet.placement_voxel();
+
+        self.voxel_edits.insert((packet.chunk, voxel), material);
+
+        debug!(?packet.chunk, ?voxel, material, "place");
+
+        vec![Self::chunk_edit(packet.chunk, voxel, material)]
+    }
+
+    /// One dig tick on a voxel. The block gives way once enough of them land.
+    ///
+    /// **The three crack stages the player sees are client-side.** It streams one packet per
+    /// tick, every one identical, and the server counts them and decides. Breaking on the
+    /// first would make every block give way three times too fast, which is the sort of
+    /// difference that is invisible in a unit test and obvious in the game.
+    fn dig(&mut self, chunk: [u32; 3], voxel: [u32; 3]) -> Vec<Vec<u8>> {
+        let ticks = self.dig_damage.entry((chunk, voxel)).or_insert(0);
+
+        *ticks += 1;
+
+        if *ticks < DIG_TICKS_TO_BREAK {
+            debug!(?chunk, ?voxel, ticks = *ticks, "dig tick");
+
+            return Vec::new();
+        }
+
+        self.dig_damage.remove(&(chunk, voxel));
+
+        self.voxel_edits
+            .insert((chunk, voxel), PartialChunkEditsSync::AIR);
+
+        debug!(?chunk, ?voxel, "dug through");
+
+        vec![Self::chunk_edit(chunk, voxel, PartialChunkEditsSync::AIR)]
+    }
+
+    /// The item hash the player is holding, and the block it places, if it places one.
+    fn held_block(&self, world: &World) -> Option<(u32, u8)> {
+        let held = self.held_resource()?;
+
+        // The hotbar carries a hash and the table is keyed by name, so this is a reverse
+        // lookup: which placeable block's resource hashes to what the hand holds.
+        let material = world.geodata.placeable_for_hash(held)?;
+
+        Some((held, material))
+    }
+
+    /// Take one item of `hash` out of the rucksack. False when there is none.
+    fn take_one(&mut self, hash: u32) -> bool {
+        let Some(slot) = (0..self.inventory().len() as u32).find(|slot| {
+            self.inventories
+                .slot(self.player_entity_id, *slot)
+                .filter(|item| *item != 0)
+                .and_then(|item| self.inventories.name(item))
+                == Some(hash)
+        }) else {
+            return false;
+        };
+
+        !self.inventories.destroy(self.player_entity_id, slot, 1).is_empty()
+    }
+
+    /// One `PartialChunkEditsSync` changing a single voxel.
+    fn chunk_edit(chunk: [u32; 3], voxel: [u32; 3], material: u8) -> Vec<u8> {
+        encode(|w| {
+            PartialChunkEditsSync {
+                chunk,
+                edits: vec![ChunkEdit {
+                    voxel_index: material,
+                    voxels: vec![voxel],
+                }],
+            }
+            .encode(w)
+        })
+    }
+
+    /// Every voxel this session has changed, for anything that has to rebuild the terrain.
+    pub fn voxel_edits(&self) -> &std::collections::HashMap<([u32; 3], [u32; 3]), u8> {
+        &self.voxel_edits
     }
 
     /// The entity this player has a container open on, or 0.
