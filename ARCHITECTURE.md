@@ -112,21 +112,6 @@ except for glue that has no behaviour of its own (a `main` that binds a port).
 
 ---
 
-## Improvements deliberately carried in
-
-Real defects found in the C# while reading it, fixed as part of the port rather than
-faithfully reproduced:
-
-- **Auth server assumes one `read()` returns the whole packet** (`SmilegateAuth/Program.cs:22`).
-  TCP may split it. `read_exact` on the 5-byte header, then on the body.
-- **Auth server is single-connection, serial.** One task per connection.
-- **`Session` and `_characterUUID` are process-wide singletons.** Keyed by account here.
-- **The game server drains one packet per 30 ms tick** (`Server.cs`), a 33 packet/s ceiling
-  for the entire server. Drain until empty.
-- **`ToFrozenSet()` rebuilt every tick** for structures that are build-once.
-
----
-
 ## Ports
 
 Unchanged from the C# so the existing launch scripts keep working:
@@ -142,15 +127,9 @@ Unchanged from the C# so the existing launch scripts keep working:
 
 ## Addendum: `skysaga-proto`
 
-`skysaga-proto` landed ahead of the RakNet transport, because the wire formats are pure
-functions and can be tested without one. It holds:
-
-- `bitstream`: a pure-Rust reimplementation of the subset of RakNet's `BitStream` the game
-  uses, verified byte-for-byte against the real `libRakNet.so`.
-- `customisation`: `CustomisationData`: gender, tribe, skin/eye/clothing materials and the
-  hair attachment.
-- `packets`: one module per area of the protocol — the handshake, character creation,
-  movement, inventory, voxels, interaction, chat, mail, photos, combat.
+`bitstream` is a pure-Rust reimplementation of the subset of RakNet's `BitStream` the game
+uses, verified byte-for-byte against the real `libRakNet.so`. Because it is pure, a wire
+format can be written and tested with no transport underneath it.
 
 **`skysaga-state` depends on `skysaga-proto`** for `CustomisationData`. That is deliberate:
 a character's appearance *is* a protocol value, and defining a parallel type in `state` would
@@ -177,24 +156,19 @@ the Rust.
 
 ## Addendum: the RakNet transport
 
-Two crates, and they are the only place `unsafe` appears in the port:
+Two crates, and the only FFI in the port:
 
 - `raknet-sys`: 26 `extern "C"` declarations, no code.
-- `raknet`: a safe wrapper: `Peer`, `Packet`, `Guid`, with `Drop` on both handles.
+- `raknet`: a safe wrapper: `Peer`, `Packet`, `Guid`, with `Drop` on both handles. The only
+  `unsafe` in the workspace is here.
 
-### No C++ shim, after all
+`libRakNet.so` exports 1879 unmangled `extern "C"` functions, so Rust calls them directly with
+no C++ shim in between.
 
-The roadmap called for a hand-written C++ shim over SLikeNet, on the grounds that the SWIG
-wrapper carries the LP64 `long` bug (`Write< long >` is 32 bits on MSVC, 64 on Linux). Two
-things retired that plan:
-
-1. The flake already narrows `long` to `int32_t` when it builds the wrapper.
-2. **`skysaga-proto` has its own `BitStream`,** so nothing in Rust calls RakNet's. The only
-   surface used is byte-oriented send and receive, which the bug never touched.
-
-`libRakNet.so` exports 1879 unmangled `extern "C"` functions, so Rust calls them directly.
-The roadmap's ~30-function shim became 26 declarations and no build step: no C++ toolchain,
-no flake changes, nothing to keep in sync.
+**Do not call RakNet's own `BitStream` from Rust.** The SWIG wrapper carries the LP64 `long`
+bug — `Write< long >` is 32 bits on MSVC and 64 on Linux — which silently corrupts every
+field after it. `skysaga-proto` has its own `BitStream` precisely so nothing has to; the only
+surface used here is byte-oriented send and receive, which the bug never touched.
 
 ### The one trap: SWIG overload numbering
 
