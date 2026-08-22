@@ -56,6 +56,33 @@ pub struct World {
 
     /// `BasicInventoryItem`, for stacks created while the server runs.
     pub item_definition: Option<EntityDefinition>,
+
+    /// The containers in this world, un-encoded.
+    ///
+    /// Kept beside `entities` for the same reason as `player_template`: a chest's contents and
+    /// its lid change while the server runs, so the burst's frozen encoding is not enough to
+    /// answer with later.
+    pub containers: Vec<Container>,
+}
+
+/// A container in the world: a chest, and later a mailbox or a crafting station.
+#[derive(Debug, Clone)]
+pub struct Container {
+    pub id: u32,
+    pub name: String,
+
+    /// The entity as built, so an updated one can be re-encoded from it.
+    pub entity: Entity,
+    pub definition: EntityDefinition,
+
+    pub slots: usize,
+
+    /// Whether E closes it as well as opening it.
+    ///
+    /// A loot chest has no close button of its own, so E is the only way to shut it and a
+    /// toggle is right. Anything with an X button is re-opened instead -- see
+    /// [`crate::Session`] on why.
+    pub is_loot_chest: bool,
 }
 
 impl World {
@@ -69,6 +96,14 @@ impl World {
     /// one needs its definition to know which parameters to write.
     pub fn item_definition(&self) -> Option<&EntityDefinition> {
         self.item_definition.as_ref()
+    }
+
+    /// The container with this entity id, if it is one.
+    ///
+    /// `None` for anything else, which is what makes "press E on a sheep" do nothing rather
+    /// than open an empty window.
+    pub fn container(&self, id: u32) -> Option<&Container> {
+        self.containers.iter().find(|container| container.id == id)
     }
 
     /// A player body for `profile`, under `entity_id`.
@@ -347,6 +382,34 @@ impl World {
             );
         }
 
+        // A chest, so the world contains something a player can open.
+        //
+        // The C# has none either: it reaches one through its `/spawn` chat command, which is a
+        // different feature. Seeding one is the smaller choice and it makes the whole container
+        // path reachable -- without it, every interaction assertion is vacuous and the client
+        // has nothing to press E on.
+        //
+        // Kept un-encoded as well as encoded, for the same reason as the player: what is in it
+        // and whether its lid is shut both change while the server runs.
+        let mut containers = Vec::new();
+
+        if let Some(definition) = definitions.get(CHEST) {
+            let components = chest_components(config);
+
+            // `add` returns the id it assigned, which is also how a name the data file does
+            // not define is skipped without leaving a container pointing at nothing.
+            if let Some(id) = add(CHEST, components.clone()) {
+                containers.push(Container {
+                    id,
+                    name: CHEST.to_owned(),
+                    entity: Entity::new(id, components),
+                    definition: definition.clone(),
+                    slots: CHEST_SLOTS,
+                    is_loot_chest: true,
+                });
+            }
+        }
+
         // The player is added last, and kept un-encoded as well: its name and appearance are
         // filled in per connection, once the player has been through the creator.
         let player_definition = definitions
@@ -388,8 +451,54 @@ impl World {
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
+            containers,
         }
     }
+}
+
+/// The entity seeded as the world's container.
+const CHEST: &str = "Chest";
+
+/// How many squares it holds. 25 is what the live session that solved chests used.
+const CHEST_SLOTS: usize = 25;
+
+/// Everything the chest replicates.
+fn chest_components(config: &WorldConfig) -> Vec<Component> {
+    let spawn = config.terrain.spawn();
+
+    // Beside the player rather than on top of it: a container inside the spawn point is
+    // reachable but not visible, which reads as "the chest did not spawn".
+    let position = [
+        (spawn.0 as u32 + 2) * POSITION_SCALE,
+        spawn.1 as u32 * POSITION_SCALE,
+        (spawn.2 as u32 + 2) * POSITION_SCALE,
+    ];
+
+    vec![
+        Component::Transform(TransformComponent {
+            position,
+            ..Default::default()
+        }),
+        Component::Interaction(InteractionComponent {
+            enabled: true,
+            is_loot_chest: true,
+            // False, and it must stay false to open. This is the CLOSE signal: the client's
+            // open path fires only while it is clear, and its close path on the rising edge.
+            has_been_opened: false,
+            owner_only: false,
+            allow_multiple_users: true,
+        }),
+        Component::Inventory(InventoryComponent {
+            max_inventory_slots: CHEST_SLOTS as u8,
+            // Every square present and empty, as for the player: a short list leaves the
+            // client nowhere to draw.
+            inventory_entity_list: vec![0; CHEST_SLOTS],
+            ..Default::default()
+        }),
+        Component::Owner(OwnerComponent::default()),
+        Component::Pickup(PickupComponent::default()),
+        Component::VoxelLink(VoxelLinkComponent::default()),
+    ]
 }
 
 /// Position units are 1/32 of a voxel: a chunk origin is `chunkCoord * 32` voxels, and a

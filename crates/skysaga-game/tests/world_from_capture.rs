@@ -124,6 +124,11 @@ pub fn world_from_capture() -> World {
         // point of this world: it is the oracle, and must not be re-derived.
         player_template: None,
         item_definition: None,
+
+        // The C# world this capture came from seeds no container -- it reaches one through
+        // its /spawn command, which was not used while capturing. An empty list is what that
+        // world actually held.
+        containers: Vec::new(),
     }
 }
 

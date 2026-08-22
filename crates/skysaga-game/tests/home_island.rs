@@ -23,7 +23,11 @@ fn the_island_has_terrain_and_entities() {
     let world = home_island();
 
     assert_eq!(world.chunks.len(), 16, "a 4x4 island");
-    assert_eq!(world.entities.len(), 10, "9 seeded entities plus the player");
+    assert_eq!(
+        world.entities.len(),
+        11,
+        "9 seeded entities, a chest, and the player",
+    );
     assert_ne!(world.player_entity_id, 0, "the player was created");
 }
 
@@ -209,14 +213,15 @@ fn a_session_over_the_island_emits_a_complete_handshake() {
         })
         .collect();
 
-    // ServerInfo, MapDefinition, BeginSync, 16 chunks, 10 entities, sync-finished,
-    // SetClientEntity, tutorial.
-    assert_eq!(ids.len(), 3 + 16 + 10 + 3);
+    // ServerInfo, MapDefinition, BeginSync, 16 chunks, 11 entities, sync-finished,
+    // SetClientEntity, tutorial. The eleventh entity is the chest, without which there is
+    // nothing in the world to press E on.
+    assert_eq!(ids.len(), 3 + 16 + 11 + 3);
 
     assert_eq!(&ids[..3], &[192, 140, 141]);
     assert!(ids[3..19].iter().all(|&id| id == 142), "the chunks");
-    assert!(ids[19..29].iter().all(|&id| id == 234), "the entities");
-    assert_eq!(&ids[29..], &[139, 238, 162]);
+    assert!(ids[19..30].iter().all(|&id| id == 234), "the entities");
+    assert_eq!(&ids[30..], &[139, 238, 162]);
 
     // Every packet re-parses -- nothing is truncated or misframed.
     for bytes in &emitted {
