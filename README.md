@@ -202,6 +202,19 @@ Defects found while reading the original, fixed here rather than reproduced:
 - **Whispers are client-side only.** The chat server drops anything not addressed to a `#`
   channel, so `/tell` renders locally and reaches nobody.
 
+## Licence and attribution
+
+MIT, see [LICENSE](LICENSE).
+
+This crate tree is original code, but it is a **rewrite of the C# emulator by EDITz**,
+[EDITzDev/SkySaga](https://github.com/EDITzDev/SkySaga), which is both its reference
+implementation and the oracle half the test suite is written against. It is therefore treated
+as a derivative work of that project and carries its MIT copyright notice, as the licence
+requires.
+
+The licence covers this source and nothing else: not the game client, and not the data files
+this server reads. See the [top-level LICENSE](../LICENSE) for the full statement.
+
 ## Contributing
 
 The layout is chosen so that adding something is adding a file:
