@@ -8,6 +8,7 @@ pub mod definitions;
 pub mod entity;
 pub mod geodata;
 pub mod inventory;
+pub mod loot;
 pub mod terrain;
 
 pub use components::{

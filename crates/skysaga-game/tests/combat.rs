@@ -174,6 +174,40 @@ fn added(burst: &[Vec<u8>]) -> Vec<u32> {
         .collect()
 }
 
+/// What the player is carrying, as `(resource, count)`, in slot order.
+///
+/// The rucksack holds entity ids; each names a stack whose component carries the item's name
+/// hash. The hash is matched back to a name by hashing the candidates, since the wire never
+/// carries the string.
+fn carried(session: &Session) -> Vec<(String, u32)> {
+    const KNOWN: &[&str] = &[
+        "Feather",
+        "Animal_Meat",
+        "Wool",
+        "Mushroom",
+        "Metal_Crude_Sword",
+        "Arrow",
+        "Dirt",
+        "Stone",
+    ];
+
+    session
+        .inventory()
+        .iter()
+        .filter(|entity| **entity != 0)
+        .filter_map(|entity| session.inventories().item(*entity))
+        .map(|stack| {
+            let name = KNOWN
+                .iter()
+                .find(|candidate| Some(skysaga_core::name_hash(candidate)) == stack.slot_data.name)
+                .map(|found| (*found).to_owned())
+                .unwrap_or_else(|| format!("{:#010x}", stack.slot_data.name.unwrap_or(0)));
+
+            (name, stack.slot_data.count)
+        })
+        .collect()
+}
+
 /// Stand at a known spot with a creature two voxels in front, and return its entity id.
 ///
 /// Two voxels because the player's own reach is `Medium` -- 1.5 voxels -- widened by the
@@ -442,6 +476,96 @@ fn a_swing_naming_an_unknown_action_is_dropped() {
 // --- killing ---------------------------------------------------------------------------------
 
 /// A sheep has six points and a basic swing does seven.
+#[test]
+fn killing_a_chicken_yields_three_feathers() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // Five hit points, and a basic swing does seven.
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    assert_eq!(session.creature_health(chicken), Some(0), "it died");
+
+    // `NPC_Chicken_LootTable`: FeatherLoot at 100%, quantity 3, and a list of one resource.
+    // Nothing about that is chance, so the assertion can be exact.
+    assert_eq!(
+        carried(&session),
+        vec![("Feather".to_owned(), 3)],
+        "three feathers in the rucksack",
+    );
+
+    // ...and the client is told, or the square stays empty until something else syncs it.
+    assert!(
+        !added(&replies).is_empty(),
+        "the stack was announced as an entity",
+    );
+}
+
+/// The stack is announced before the slot list names it.
+///
+/// The same ordering rule the rest of the inventory follows: a slot pointing at an entity the
+/// client has never been told about draws an empty square.
+#[test]
+fn a_drop_is_announced_before_the_slot_points_at_it() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let stack = added(&replies).first().copied().expect("a stack entity");
+
+    let add_at = replies
+        .iter()
+        .position(|bytes| added(std::slice::from_ref(bytes)).contains(&stack))
+        .expect("the add");
+
+    let sync_at = replies
+        .iter()
+        .position(|bytes| synced(std::slice::from_ref(bytes)).contains(&session.player_entity_id()))
+        .expect("the player's slot list");
+
+    assert!(add_at < sync_at, "add at {add_at}, slot sync at {sync_at}");
+}
+
+/// A creature the data gives no table drops nothing, and that is not an error.
+#[test]
+fn killing_something_with_no_loot_table_drops_nothing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // `SmallDinosaur` is killable and no loot table names it.
+    let dino = creature_in_front(&mut session, &world, "SmallDinosaur");
+
+    for _ in 0..3 {
+        swing_at(&mut session, &world, "Heavy_Chop", dino, in_front());
+    }
+
+    assert_eq!(session.creature_health(dino), Some(0), "it died");
+    assert!(carried(&session).is_empty(), "nothing dropped");
+}
+
+/// Loot is rolled once, on the blow that kills. Hitting the corpse again yields nothing.
+#[test]
+fn a_corpse_cannot_be_farmed() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let after_the_kill = carried(&session);
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    assert_eq!(carried(&session), after_the_kill, "no second helping");
+}
+
 #[test]
 fn one_swing_kills_a_sheep() {
     let world = world();

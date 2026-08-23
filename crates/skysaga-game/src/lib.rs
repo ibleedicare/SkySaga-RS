@@ -60,6 +60,7 @@ use skysaga_proto::packets::{
     TransferToServer,
 };
 use skysaga_world::geodata::EquippedAction;
+use skysaga_world::loot::Seeded;
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
 use skysaga_world::{Component, Entity, HealthComponent};
 use tracing::{debug, info, warn};
@@ -532,6 +533,13 @@ pub struct Session {
     /// swinging is dropped rather than credited to whatever was used last.
     armed: std::collections::HashMap<u32, EquippedAction>,
 
+    /// Where loot rolls come from.
+    ///
+    /// Seeded from the player's entity id rather than a clock, so this crate keeps its
+    /// no-I/O rule and a session's drops are reproducible. Two players rolling the same
+    /// table get different results because their bodies have different ids.
+    loot_rolls: Seeded,
+
     /// Packets for the *other* connections, drained by the server layer.
     ///
     /// The swing echo is the first thing a session produces that is not addressed to the
@@ -576,6 +584,7 @@ impl Session {
             damage: std::collections::HashMap::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
+            loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
             notifications: Vec::new(),
@@ -2102,8 +2111,63 @@ impl Session {
                 .encode(w)
             }));
 
+            // Rolled on the killing blow and only then, so a corpse cannot be farmed.
+            out.extend(self.award_loot(&creature, world));
+
             // Only after the kill: the client resolves the victim before it draws anything.
             out.push(encode(|w| EntityRemoved { entity_id: target }.encode(w)));
+        }
+
+        out
+    }
+
+    /// Roll what `creature` was carrying and put it in the killer's rucksack.
+    ///
+    /// # Straight into the rucksack, for now
+    ///
+    /// The real game drops loot on the floor as a pickup entity, and the C# does that for ore
+    /// seams. Doing it here needs a pickup entity and the `ResourcePickup` round trip; putting
+    /// the items in directly is the same thing minus the walk, and it keeps the drop table --
+    /// which is the part with the data behind it -- separate from the delivery mechanism.
+    ///
+    /// # Nothing to drop is an ordinary outcome
+    ///
+    /// Most of the bestiary has a table; the dinosaurs and the test entities have none, and a
+    /// table whose entries all fail their chance rolls yields nothing either.
+    fn award_loot(&mut self, creature: &world::Creature, world: &World) -> Vec<Vec<u8>> {
+        let dropped = world
+            .geodata
+            .loot_for(&creature.name, &mut self.loot_rolls);
+
+        if dropped.is_empty() {
+            debug!(creature = %creature.name, "dropped nothing");
+
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+
+        for (item, count) in dropped {
+            let Some(entity) = self.give(&item, count) else {
+                warn!(%item, count, "cannot award loot: the rucksack is full");
+
+                continue;
+            };
+
+            info!(creature = %creature.name, %item, count, entity, "loot");
+
+            // The stack first, then the slot list that names it -- the same order every other
+            // inventory change follows, because a slot pointing at an unknown entity draws an
+            // empty square.
+            out.extend(self.apply(
+                vec![
+                    Effect::ItemCreated { entity },
+                    Effect::SlotsChanged {
+                        owner: self.player_entity_id,
+                    },
+                ],
+                world,
+            ));
         }
 
         out
