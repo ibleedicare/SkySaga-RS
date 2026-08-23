@@ -770,6 +770,7 @@ mod snapshot {
             biome: "Sky_Island".into(),
             chunks: 16,
             entities: 10,
+            spawn_voxel: [64, 18, 64],
         }
     }
 
@@ -781,6 +782,11 @@ mod snapshot {
             stage: "Playing".into(),
             inventory_slots: 36,
             inventory_items: Vec::new(),
+            // A player who has not moved yet, which is the state a snapshot most often catches
+            // one in: the client says nothing about where it is until it walks.
+            position: None,
+            facing_yaw: None,
+            using_entity_id: 0,
         }
     }
 

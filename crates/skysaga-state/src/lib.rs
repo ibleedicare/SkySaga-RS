@@ -199,6 +199,9 @@ pub struct WorldSummary {
     pub biome: String,
     pub chunks: usize,
     pub entities: usize,
+    /// The voxel a player appears at. Reported in voxels rather than wire units, because
+    /// what a caller wants to do with it is name a voxel near it.
+    pub spawn_voxel: [u32; 3],
 }
 
 /// One connected client.
@@ -214,6 +217,12 @@ pub struct PlayerSummary {
     pub inventory_slots: u8,
     /// Entity ids of the items held. Empty until something gives the player items.
     pub inventory_items: Vec<u32>,
+    /// Where the client last said it was, in 1/64 of a voxel. `None` until it moves.
+    pub position: Option<[u32; 3]>,
+    /// Which way it was facing, in 1/32 of a degree. `None` until it moves.
+    pub facing_yaw: Option<i32>,
+    /// The container the player has open, or 0. The whole loot-window protocol is this number.
+    pub using_entity_id: u32,
 }
 
 /// Something an administrator asked for, waiting to be carried out.

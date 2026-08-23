@@ -80,6 +80,16 @@ struct Player {
     #[serde(rename = "entityId")]
     entity_id: u32,
     stage: String,
+    /// Where the client last said it was, in 1/64 of a voxel. `null` until it moves, which is
+    /// worth telling apart from the origin: something placed relative to a player the server
+    /// cannot locate lands in the wrong place rather than failing.
+    position: Option<[u32; 3]>,
+    /// Which way it is facing, in 1/32 of a degree, signed.
+    #[serde(rename = "facingYaw")]
+    facing_yaw: Option<i32>,
+    /// The container it has open, or 0.
+    #[serde(rename = "usingEntityId")]
+    using_entity_id: u32,
 }
 
 impl From<&PlayerSummary> for Player {
@@ -89,6 +99,9 @@ impl From<&PlayerSummary> for Player {
             character: player.character.clone(),
             entity_id: player.entity_id,
             stage: player.stage.clone(),
+            position: player.position,
+            facing_yaw: player.facing_yaw,
+            using_entity_id: player.using_entity_id,
         }
     }
 }
@@ -111,6 +124,9 @@ struct World {
     chunks: usize,
     entities: usize,
     players: usize,
+    /// The voxel a player drops in at, so a caller can name a voxel near it.
+    #[serde(rename = "spawnVoxel")]
+    spawn_voxel: [u32; 3],
 }
 
 async fn world(State(api): State<Api>, headers: HeaderMap) -> Response {
@@ -126,6 +142,7 @@ async fn world(State(api): State<Api>, headers: HeaderMap) -> Response {
         chunks: snapshot.world.chunks,
         entities: snapshot.world.entities,
         players: snapshot.players.len(),
+        spawn_voxel: snapshot.world.spawn_voxel,
     })
     .into_response()
 }

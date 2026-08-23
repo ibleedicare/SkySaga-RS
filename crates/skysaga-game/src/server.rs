@@ -726,6 +726,9 @@ impl GameServer {
                     stage: format!("{:?}", session.stage()),
                     inventory_slots: slots,
                     inventory_items: session.inventory().to_vec(),
+                    position: session.position(),
+                    facing_yaw: session.facing_yaw(),
+                    using_entity_id: session.using_entity(),
                 }
             })
             .collect();
@@ -736,6 +739,7 @@ impl GameServer {
                 biome: self.world.server_info.biome.clone(),
                 chunks: self.world.chunks.len(),
                 entities: self.world.entities.len(),
+                spawn_voxel: self.world.spawn_voxel,
             },
             players,
         });
