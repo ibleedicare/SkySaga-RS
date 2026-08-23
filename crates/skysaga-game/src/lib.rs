@@ -751,10 +751,24 @@ impl Session {
 
                 info!(stage = ?self.stage, "sending world info");
 
-                vec![
-                    encode(|w| world.server_info.encode(w)),
-                    encode(|w| world.map.encode(w)),
-                ]
+                // **The owner's name is this player's, not the world's placeholder.** The
+                // client formats the island banner as `%S's %S` from this field, so a world
+                // built once at startup would announce every island as belonging to whoever
+                // the config named. The C# builds ServerInfo per connection for the same
+                // reason.
+                let mut info = world.server_info.clone();
+
+                if let Some(owner) = self
+                    .character
+                    .name
+                    .clone()
+                    .or_else(|| self.account.clone())
+                    .filter(|name| !name.is_empty())
+                {
+                    info.owner_name = owner;
+                }
+
+                vec![encode(|w| info.encode(w)), encode(|w| world.map.encode(w))]
             }
 
             (ClientPacket::ClientReadyToSync, Stage::SentWorldInfo) => {

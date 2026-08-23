@@ -138,6 +138,38 @@ pub struct GeoData {
 
     /// `LootTables` and `LootLists`: what a creature leaves behind.
     loot: Loot,
+
+    /// Lower-cased adventure name to the biome that contains it.
+    biome_of_adventure: HashMap<String, String>,
+
+    /// Lower-cased adventure name to its `WorldType`.
+    world_type_of_adventure: HashMap<String, u32>,
+}
+
+/// One `Adventures` entry. Only its world type is read.
+#[derive(Debug, Deserialize)]
+struct RawAdventure {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "Adventure", default)]
+    adventure: RawAdventureBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawAdventureBody {
+    #[serde(rename = "WorldType", default)]
+    world_type: u32,
+}
+
+/// One `Biomes` entry. Only the adventures it holds are read.
+#[derive(Debug, Deserialize)]
+struct RawBiome {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "Adventures", default)]
+    adventures: Vec<String>,
 }
 
 impl GeoData {
@@ -278,10 +310,54 @@ impl GeoData {
             actions,
             physical,
             loot: Loot::from_file(file.loot_tables, file.loot_lists),
+            world_type_of_adventure: file
+                .adventures
+                .into_iter()
+                .map(|entry| (entry.name.to_ascii_lowercase(), entry.adventure.world_type))
+                .collect(),
+            biome_of_adventure: file
+                .biomes
+                .into_iter()
+                .flat_map(|biome| {
+                    let name = biome.name;
+
+                    biome
+                        .adventures
+                        .into_iter()
+                        .map(move |adventure| (adventure.to_ascii_lowercase(), name.clone()))
+                })
+                .collect(),
         })
     }
 
     /// The loot tables, for rolling a drop directly.
+    /// What kind of world an adventure is: 1 home, 2 quest, 3 pvp, 5 sandbox.
+    ///
+    /// Carried by the adventure itself, so `is_home_world` and `is_my_world` have to follow it.
+    /// Claiming a quest adventure is a home world makes the client draw the home-island badge
+    /// for a world that has no home title, which renders as a bare `%s`.
+    pub fn world_type_for_adventure(&self, adventure: &str) -> Option<u32> {
+        self.world_type_of_adventure
+            .get(&adventure.to_ascii_lowercase())
+            .copied()
+    }
+
+    /// The biome an adventure belongs to.
+    ///
+    /// **The client resolves an adventure inside a biome, not globally.** `MapDefinition`
+    /// carries the biome and `ServerInfo` the adventure; if the adventure is not one of that
+    /// biome's, the lookup fails and the client abandons the world rather than complaining.
+    /// The visible result was the island banner drawing in the wrong colour with an
+    /// unresolvable title.
+    ///
+    /// `Home_Island_Adventure` is listed under `Sky_Island` alone. `Desert` is a perfectly
+    /// real biome, which is what made this hard to see -- it simply contains no adventures.
+    pub fn biome_for_adventure(&self, adventure: &str) -> Option<&str> {
+        self.biome_of_adventure
+            .get(&adventure.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
     pub fn loot(&self) -> &Loot {
         &self.loot
     }
@@ -423,6 +499,12 @@ struct File {
 
     #[serde(rename = "Reaches", default)]
     reaches: Vec<RawReachEntry>,
+
+    #[serde(rename = "Biomes", default)]
+    biomes: Vec<RawBiome>,
+
+    #[serde(rename = "Adventures", default)]
+    adventures: Vec<RawAdventure>,
 
     #[serde(rename = "LootTables", default)]
     loot_tables: Vec<RawLootTable>,

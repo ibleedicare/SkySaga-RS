@@ -319,3 +319,103 @@ fn the_player_spawns_in_world_units_above_the_terrain() {
 
     assert!(sync.present[position_index], "the position is synced");
 }
+
+/// **`MapDefinition.biome` is not `ServerInfo.biome`.**
+///
+/// The first is the `BiomeType` hash the client resolves the world, its terrain and its
+/// ambience from; the second is a string with zero cross-references in the client. They are
+/// different values in the C# -- `Sky_Island` against `Desert` -- and this server derived both
+/// from one config field, so it sent `Desert` as the type and the client resolved a different
+/// world. Nothing caught it: the handshake tests compared packet *sizes*, and both hashes are
+/// four bytes.
+#[test]
+fn the_map_definition_matches_the_captured_one() {
+    let world = home_island();
+    let captured = world_from_capture::world_from_capture();
+
+    assert_eq!(
+        world.map.biome, captured.map.biome,
+        "the biome type the client resolves the world from",
+    );
+
+    assert_eq!(world.map.size_chunks, captured.map.size_chunks);
+    assert_eq!(world.map.game_mode, captured.map.game_mode);
+}
+
+/// And the two biome fields really are different values, which is the whole trap.
+#[test]
+fn the_two_biome_fields_disagree_on_purpose() {
+    let world = home_island();
+
+    assert_eq!(world.server_info.biome, "Desert");
+    assert_eq!(world.map.biome, Some(skysaga_core::name_hash("Sky_Island")));
+}
+
+/// **The rule, not the constant.**
+///
+/// `Sky_Island` is right because it is the biome holding `Home_Island_Adventure`, and the
+/// client resolves an adventure *inside* a biome. `Desert` is a real biome that simply holds
+/// no adventures, which is why naming it made the resolve fail silently rather than error.
+#[test]
+fn the_map_biome_is_the_one_holding_the_adventure() {
+    let world = home_island();
+
+    let geodata =
+        skysaga_world::geodata::GeoData::load(skysaga_world::geodata::default_geodata_path())
+            .expect("geodata.json");
+
+    let expected = geodata
+        .biome_for_adventure(&world.adventure)
+        .expect("the adventure belongs to a biome");
+
+    assert_eq!(expected, "Sky_Island");
+    assert_eq!(world.map.biome, Some(skysaga_core::name_hash(expected)));
+}
+
+/// The trap in one assertion: the biome we *name* holds nothing to resolve.
+#[test]
+fn the_configured_biome_holds_no_adventures_at_all() {
+    let geodata =
+        skysaga_world::geodata::GeoData::load(skysaga_world::geodata::default_geodata_path())
+            .expect("geodata.json");
+
+    assert_eq!(
+        geodata.biome_for_adventure("Home_Island_Adventure"),
+        Some("Sky_Island"),
+    );
+
+    // Nothing at all lives in Desert, so a world claiming to be one has no adventure to find.
+    assert!(
+        geodata.biome_for_adventure("Desert_Adventure").is_none(),
+        "Desert holds no adventures",
+    );
+}
+
+/// The world's kind comes from the adventure, not from a config field beside it.
+///
+/// `Home_Island_Adventure` is `WorldType` 1 and `Castle_Adventure` is 2. Announcing a quest
+/// adventure as a home world makes the client draw the home-island badge for a world with no
+/// home title, which renders as a bare `%s` with no banner at all.
+#[test]
+fn the_world_type_follows_the_adventure() {
+    let geodata =
+        skysaga_world::geodata::GeoData::load(skysaga_world::geodata::default_geodata_path())
+            .expect("geodata.json");
+
+    assert_eq!(
+        geodata.world_type_for_adventure("Home_Island_Adventure"),
+        Some(1),
+        "the home island is a home world",
+    );
+
+    assert_eq!(
+        geodata.world_type_for_adventure("Castle_Adventure"),
+        Some(2),
+        "a castle is a quest world",
+    );
+
+    let world = home_island();
+
+    assert!(world.server_info.is_home_world, "the home island says so");
+    assert!(world.server_info.is_my_world);
+}
