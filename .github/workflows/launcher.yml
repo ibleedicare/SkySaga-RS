@@ -12,6 +12,16 @@
 
 name: launcher
 
+# The same paths on both triggers. `pull_request` used to carry no filter at all, so every
+# pull request built the launcher on two operating systems whatever it touched -- a
+# documentation change spent four runner-minutes proving the launcher still compiles.
+#
+# The crates are listed because they are the launcher's dependency chain: a change to
+# `skysaga-proto` can break it without anything under `launcher/` being touched.
+#
+# The list is repeated rather than shared through a YAML anchor: GitHub Actions does not
+# support anchors in workflow files, and one that silently fails to expand would put the
+# filter back to matching everything.
 on:
   push:
     paths:
@@ -23,6 +33,14 @@ on:
       - "crates/skysaga-world/**"
       - ".github/workflows/launcher.yml"
   pull_request:
+    paths:
+      - "launcher/**"
+      - "crates/skysaga-store/**"
+      - "crates/skysaga-state/**"
+      - "crates/skysaga-proto/**"
+      - "crates/skysaga-core/**"
+      - "crates/skysaga-world/**"
+      - ".github/workflows/launcher.yml"
   workflow_dispatch:
 
 jobs:
