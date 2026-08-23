@@ -301,6 +301,16 @@ impl GeoData {
         self.loot.entities_with_loot()
     }
 
+    /// The table `entity` drops when hit but not killed, by name. Shearing; usually `None`.
+    pub fn hit_loot_table_name(&self, entity: &str) -> Option<&str> {
+        self.loot.hit_table_name_for(entity)
+    }
+
+    /// Roll what `entity` gives up for a non-fatal hit.
+    pub fn hit_loot_for(&self, entity: &str, roll: &mut impl Roll) -> Vec<(String, u32)> {
+        self.loot.roll_hit_for(entity, roll)
+    }
+
     /// The swing a CRC names, or `None` for a hash from a build this table does not describe.
     pub fn equipped_action(&self, hash: u32) -> Option<&EquippedAction> {
         self.actions.get(&hash)

@@ -144,6 +144,28 @@ impl Loot {
             .map(|table| table.name.as_str())
     }
 
+    /// The table `entity` drops when **hit but not killed**, by name.
+    ///
+    /// Shearing. `NPC_Sheep_Hit_LootTable` is the only one in build 10414 -- hitting a sheep
+    /// gives its wool, killing it gives the wool and the meat -- so this is a one-creature
+    /// mechanic that the data nevertheless expresses generally, under
+    /// `NPC_<entity>_Hit_LootTable`. Anything else returns `None` and drops nothing until it
+    /// dies.
+    pub fn hit_table_name_for(&self, entity: &str) -> Option<&str> {
+        let name = format!("npc_{}_hit_loottable", entity.to_ascii_lowercase());
+
+        self.tables.get(&name).map(|table| table.name.as_str())
+    }
+
+    /// Roll what `entity` gives up for a non-fatal hit. Usually nothing.
+    pub fn roll_hit_for(&self, entity: &str, roll: &mut impl Roll) -> Vec<(String, u32)> {
+        let Some(name) = self.hit_table_name_for(entity) else {
+            return Vec::new();
+        };
+
+        self.roll_table(name, roll)
+    }
+
     pub fn table(&self, name: &str) -> Option<&LootTable> {
         self.tables.get(&name.to_ascii_lowercase())
     }
