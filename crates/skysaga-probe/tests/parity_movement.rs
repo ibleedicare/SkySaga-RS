@@ -68,7 +68,9 @@ fn walk_about(probe: &mut Probe) -> usize {
             EntityMoved {
                 entity_id: me,
                 position: [64_000 + step * 32, 2_240, 20_128],
-                yaw: step * 2_000,
+                // Sweeps both halves of the signed range: the field runs -12800..12800, so a
+                // walk that only ever turns right exercises half the encoding.
+                yaw: step as i32 * 2_000 - 10_000,
             }
             .encode(w)
         });
@@ -76,10 +78,10 @@ fn walk_about(probe: &mut Probe) -> usize {
         probe.send_packet(|w| {
             SetLookAtDirection {
                 mode: LookAtMode::Position,
-                pitch: step * 1_000,
-                // The top of the 15-bit range, which is where a width that is one bit wrong
-                // shows up as a value that is wildly wrong rather than merely different.
-                yaw: 25_599,
+                pitch: step as i32 * 1_000 - 5_000,
+                // The top of the range, which is where a width that is one bit wrong shows up
+                // as a value that is wildly wrong rather than merely different.
+                yaw: 12_799,
             }
             .encode(w)
         });
