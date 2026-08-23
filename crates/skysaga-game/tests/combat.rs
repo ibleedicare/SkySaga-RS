@@ -618,6 +618,71 @@ fn collecting_a_matching_stack_merges_it() {
     );
 }
 
+/// **Shearing.** A sheep hit but not killed gives up its wool and walks away.
+///
+/// `Basic_Stab` does 2 and a sheep has 6, so this is the one action that can hit one without
+/// killing it.
+#[test]
+fn a_sheep_hit_but_not_killed_drops_wool() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sheep = creature_in_front(&mut session, &world, "Sheep");
+
+    swing_at(&mut session, &world, "Basic_Stab", sheep, in_front());
+
+    assert_eq!(session.creature_health(sheep), Some(4), "it survived");
+
+    let drops = session.floor_drops();
+
+    assert_eq!(drops.len(), 1, "one pile of wool");
+
+    collect(&mut session, &world, drops[0].0);
+
+    assert_eq!(carried(&session), vec![("Wool".to_owned(), 1)]);
+}
+
+/// Killing it rolls the other table, which is where the meat is.
+#[test]
+fn killing_the_sheep_rolls_the_kill_table_instead() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sheep = creature_in_front(&mut session, &world, "Sheep");
+
+    // Seven damage against six hit points: dead in one, so no hit-loot is rolled.
+    swing_at(&mut session, &world, "Basic_Diagonal", sheep, in_front());
+
+    assert_eq!(session.creature_health(sheep), Some(0));
+
+    for (pickup, _) in session.floor_drops() {
+        collect(&mut session, &world, pickup);
+    }
+
+    let mut carrying = carried(&session);
+    carrying.sort();
+
+    assert_eq!(
+        carrying,
+        vec![("Animal_Meat".to_owned(), 1), ("Wool".to_owned(), 1)],
+        "the kill table, meat included",
+    );
+}
+
+/// Everything else gives up nothing until it dies.
+#[test]
+fn hitting_a_creature_with_no_hit_table_drops_nothing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let knight = creature_in_front(&mut session, &world, "Knight");
+
+    swing_at(&mut session, &world, "Basic_Stab", knight, in_front());
+
+    assert_eq!(session.creature_health(knight), Some(33), "hurt, not dead");
+    assert!(session.floor_drops().is_empty(), "knights do not shear");
+}
+
 /// An id that is not a pickup does nothing, and does not panic.
 #[test]
 fn collecting_something_that_is_not_a_drop_is_ignored() {

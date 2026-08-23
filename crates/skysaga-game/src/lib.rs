@@ -2121,6 +2121,12 @@ impl Session {
         // ...and the heart bar itself, which is an ordinary parameter sync.
         out.extend(self.sync_health(target, world));
 
+        if after > 0 {
+            // Still alive, so it may still give something up: shearing. Only a sheep has a
+            // `_Hit_` table, and for everything else this rolls nothing.
+            out.extend(self.award_hit_loot(&creature, world));
+        }
+
         if after == 0 {
             out.push(encode(|w| {
                 KillOccurred {
@@ -2179,6 +2185,41 @@ impl Session {
             out.extend(self.drop_pickup(&item, count, at, world));
 
             info!(creature = %creature.name, %item, count, ?at, "loot");
+        }
+
+        out
+    }
+
+    /// Roll what `creature` gives up for a non-fatal hit, and drop it.
+    ///
+    /// # Shearing
+    ///
+    /// A sheep has two tables: `NPC_Sheep_LootTable` for killing it, and
+    /// `NPC_Sheep_Hit_LootTable` for hitting it -- the wool without the mutton. It is the only
+    /// `_Hit_` table in the data, so in practice this is "hit a sheep, get wool" and a no-op
+    /// for everything else.
+    ///
+    /// **This is farmable, and the data does not say whether it should be.** Nothing in the
+    /// table carries a cooldown or a sheared flag, so a player can stand and stab one sheep
+    /// forever. The literal reading of the table is implemented rather than a limit invented;
+    /// if evidence for one turns up, it belongs here.
+    fn award_hit_loot(&mut self, creature: &world::Creature, world: &World) -> Vec<Vec<u8>> {
+        let dropped = world
+            .geodata
+            .hit_loot_for(&creature.name, &mut self.loot_rolls);
+
+        let mut out = Vec::new();
+
+        for (item, count) in dropped {
+            let at = [
+                creature.position[0],
+                creature.position[1] + world::POSITION_SCALE / 2,
+                creature.position[2],
+            ];
+
+            out.extend(self.drop_pickup(&item, count, at, world));
+
+            info!(creature = %creature.name, %item, count, "sheared");
         }
 
         out

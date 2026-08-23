@@ -100,6 +100,59 @@ fn a_sheep_drops_meat_and_wool() {
     );
 }
 
+// --- shearing ----------------------------------------------------------------------------------
+
+/// **A sheep has two tables.** `NPC_Sheep_LootTable` for killing it, and
+/// `NPC_Sheep_Hit_LootTable` for merely hitting it -- which is shearing: the wool without the
+/// mutton.
+///
+/// It is the only `_Hit_` table in build 10414, so this is a one-creature mechanic rather than
+/// a general one, and the convention is `NPC_<entity>_Hit_LootTable`.
+#[test]
+fn a_sheep_sheared_gives_wool_and_lives() {
+    let Some(geodata) = geodata() else { return };
+
+    assert_eq!(
+        geodata.hit_loot_table_name("Sheep"),
+        Some("NPC_Sheep_Hit_LootTable"),
+    );
+
+    assert_eq!(
+        geodata.hit_loot_for("Sheep", &mut Lowest),
+        vec![("Wool".to_owned(), 1)],
+    );
+}
+
+/// Killing it is the other table, and that one includes the meat.
+#[test]
+fn the_kill_table_and_the_hit_table_are_different_tables() {
+    let Some(geodata) = geodata() else { return };
+
+    assert_ne!(
+        geodata.loot_for("Sheep", &mut Lowest),
+        geodata.hit_loot_for("Sheep", &mut Lowest),
+    );
+
+    assert!(geodata
+        .loot_for("Sheep", &mut Lowest)
+        .contains(&("Animal_Meat".to_owned(), 1)));
+
+    assert!(!geodata
+        .hit_loot_for("Sheep", &mut Lowest)
+        .contains(&("Animal_Meat".to_owned(), 1)));
+}
+
+/// Everything else drops nothing until it dies.
+#[test]
+fn nothing_else_has_a_hit_table() {
+    let Some(geodata) = geodata() else { return };
+
+    for entity in ["Chicken", "Knight", "Bear", "WolfC_Brown", "Player"] {
+        assert_eq!(geodata.hit_loot_table_name(entity), None, "{entity}");
+        assert!(geodata.hit_loot_for(entity, &mut Lowest).is_empty(), "{entity}");
+    }
+}
+
 // --- chance ------------------------------------------------------------------------------------
 
 /// `NPC_Knight_LootTable` is `CrudeSwordLoot@100 x1`, `LambMeatLoot@50 x1`, `LambMeatLoot@50 x2`.
