@@ -52,12 +52,32 @@ pub enum LoadError {
 
 /// Where `Entities.json` lives by default.
 ///
-/// It is currently the C# tree's copy — this data belongs to the server, not to either
-/// implementation, and should move into this repository once the Rust server is the one being
-/// run. Override with `SKYSAGA_DATA_DIR`.
+/// It is currently the C# tree's copy — this data belongs to the game, not to either
+/// implementation, so it is not in this repository. Override with `SKYSAGA_DATA_DIR`, or
+/// produce a directory to point at with `skysaga-extract-data`.
+///
+/// Both spellings are accepted. The game's own archive calls it `entities.json`, so that is
+/// what the extractor writes, while the C# tree and this code have always said
+/// `Entities.json`. On Windows the distinction never came up; on Linux picking one would
+/// silently fail to find a perfectly good file.
 pub fn default_entities_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("SKYSAGA_DATA_DIR") {
-        return PathBuf::from(dir).join("Entities.json");
+        let dir = PathBuf::from(dir);
+        let capitalised = dir.join("Entities.json");
+
+        return if capitalised.exists() {
+            capitalised
+        } else {
+            let lower = dir.join("entities.json");
+
+            // Fall back to the capitalised name when neither is there, so the error names
+            // the spelling the documentation uses.
+            if lower.exists() {
+                lower
+            } else {
+                capitalised
+            }
+        };
     }
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

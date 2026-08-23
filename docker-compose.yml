@@ -51,5 +51,30 @@ services:
     # The image is distroless -- no shell, no curl -- so there is nothing to run a healthcheck
     # with. `docker compose logs -f server` shows the "listening" line instead.
 
+  # Produce ./data from your own copy of the game. Not started by `up` -- it is a one-shot
+  # tool behind a profile:
+  #
+  #   SKYSAGA_CLIENT_DIR="/path/to/SkySaga Infinite Isles/Client" \
+  #     docker compose run --rm extract
+  #
+  # It reads the client's Data/data.pc and writes the JSON the server needs. The client is
+  # mounted read-only; nothing here modifies the game.
+  extract:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: skysaga-server:local
+    profiles: ["tools"]
+
+    # The output goes to a host directory, so this has to run as the host user rather than
+    # the image's `nonroot`, or the files land root-owned and unwritable.
+    user: "${SKYSAGA_UID:-1000}:${SKYSAGA_GID:-1000}"
+
+    entrypoint: ["/usr/local/bin/skysaga-extract-data", "/client", "/out"]
+
+    volumes:
+      - "${SKYSAGA_CLIENT_DIR:-./client}:/client:ro"
+      - "${SKYSAGA_DATA_DIR:-./data}:/out"
+
 volumes:
   state:

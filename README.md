@@ -13,19 +13,19 @@ a test oracle (see [Tests](#tests)).
 
 ## Before you clone
 
-This repository builds on its own **except for the game's own data**:
+This repository builds and runs on its own, given a copy of the game. Two things are not in
+it, and both are produced by a command rather than fetched from somewhere:
 
-| Needed | Why | Where it comes from |
+| Needed | Why | How to get it |
 |---|---|---|
-| `Entities.json`, `geodata.json` | every entity's components and sync indices, and the block and loot tables; the world cannot be built without them | the game's data, via the C# emulator's `Data/` and `Bundled/<build>/` directories; point `SKYSAGA_DATA_DIR` at a copy |
-| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from source by [`./scripts/build-raknet.sh`](scripts/build-raknet.sh) (or `nix build .#raknet`, or set `SKYSAGA_RAKNET_LIB`) |
+| `entities.json`, `geodata.json` | every entity's components and sync indices, and the block and loot tables; the world cannot be built without them | `cargo run -p skysaga-datapc -- <client-dir> data/` unpacks them from the client's own `Data/data.pc` |
+| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | `./scripts/build-raknet.sh` compiles it from SLikeNet at a pinned revision |
 
-The data files are not redistributable — they belong to the game, not to either emulator — so
-the server exits at startup if it cannot find them. The RakNet library is not shipped either,
-but it does not have to be: the script compiles it from SLikeNet at a pinned revision, and
-`cargo build` fails at the `raknet-sys` build script only if it has never been run.
+Neither is shipped here. The data files are the game's, and redistributing them is not this
+project's to do — see [data/README.md](data/README.md). The RakNet library is a native
+binary, and building it from source is cleaner than carrying one.
 
-Run it that way, or let [Docker](#docker) do all of it for you.
+Both steps are done for you by [Docker](#docker), which needs no Rust toolchain either.
 
 You also need the game client itself, which is not public. This is emulator source, not a way
 to obtain the game.
@@ -50,6 +50,7 @@ crates/
   skysaga-game/     the RakNet game server and session state machine
                                                              UDP  :42069
   skysaga-server/   one binary running all of them over one shared state
+  skysaga-datapc/   unpacking the client's Data/data.pc                       (pure)
   raknet/           safe wrapper over…
   raknet-sys/       …the SLikeNet C API
 ```
@@ -75,12 +76,18 @@ binary alone. `skysaga-server` builds its world from the defaults and ignores th
 ### Docker
 
 For playing rather than developing, the container needs no Rust, no compiler and no nix —
-only the game's data files, which are not ours to ship:
+only your own copy of the game:
 
 ```bash
-cp /path/to/Entities.json /path/to/geodata.json ./data/
+SKYSAGA_CLIENT_DIR="/path/to/SkySaga Infinite Isles/Client" \
+  docker compose run --rm extract      # once: writes ./data from the client's data.pc
 docker compose up --build
 ```
+
+The `extract` service is the same image, running `skysaga-extract-data` instead of the
+server; the client is mounted read-only. It runs as `${SKYSAGA_UID:-1000}:${SKYSAGA_GID:-1000}`
+so the files it writes belong to you — pass `SKYSAGA_UID=$(id -u) SKYSAGA_GID=$(id -g)` if
+your account is not 1000.
 
 The first build takes several minutes, most of it compiling SLikeNet; after that the
 `libRakNet.so` layer is cached and only changed Rust source is rebuilt. The result is a
