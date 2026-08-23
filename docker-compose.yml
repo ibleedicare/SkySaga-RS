@@ -1,0 +1,55 @@
+# Run the whole emulator with `docker compose up`.
+#
+# Everything the server needs is built from this repository -- including libRakNet.so, which
+# is compiled from SLikeNet source inside the image -- with one exception: the game's own
+# data files. `Entities.json` and `geodata.json` belong to the game, are not redistributable,
+# and cannot be shipped here, so they are mounted from the host. Put them in ./data, or point
+# SKYSAGA_DATA_DIR at the directory that already holds them:
+#
+#   cp /path/to/Entities.json /path/to/geodata.json ./data/
+#   docker compose up --build
+#
+# Then start the client against 127.0.0.1 as usual.
+
+name: skysaga
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: skysaga-server:local
+    restart: unless-stopped
+
+    ports:
+      # web: account, characters, matchmaking, the game conductor
+      - "${SKYSAGA_WEB_PORT:-5164}:5164/tcp"
+      # auth: Smilegate login
+      - "${SKYSAGA_AUTH_PORT:-10106}:10106/tcp"
+      # chat: the client's IRC dialect
+      - "${SKYSAGA_CHAT_PORT:-4444}:4444/tcp"
+      # game: RakNet
+      - "${SKYSAGA_GAME_PORT:-42069}:42069/udp"
+
+    environment:
+      # The address handed to the client. 127.0.0.1 is right when the client runs on this
+      # host; set it to the host's LAN address to play from another machine.
+      SKYSAGA_PUBLIC_IP: "${SKYSAGA_PUBLIC_IP:-127.0.0.1}"
+      # `user:pass,other:pass` to restrict logins. Unset accepts any non-empty name.
+      SKYSAGA_ACCOUNTS: "${SKYSAGA_ACCOUNTS:-}"
+      RUST_LOG: "${RUST_LOG:-info}"
+      # Ports inside the container stay at their defaults; the mapping above is what moves.
+      SKYSAGA_DATA_DIR: /data
+      SKYSAGA_DATABASE_URL: sqlite:///var/lib/skysaga/skysaga.db
+
+    volumes:
+      # Read-only: the server never writes to the game's data.
+      - "${SKYSAGA_DATA_DIR:-./data}:/data:ro"
+      # Accounts, characters and photos. Survives `docker compose down`; `down -v` erases it.
+      - state:/var/lib/skysaga
+
+    # The image is distroless -- no shell, no curl -- so there is nothing to run a healthcheck
+    # with. `docker compose logs -f server` shows the "listening" line instead.
+
+volumes:
+  state:

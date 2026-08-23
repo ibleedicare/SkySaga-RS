@@ -13,17 +13,22 @@ a test oracle (see [Tests](#tests)).
 
 ## Before you clone
 
-**This repository does not build on its own.** It is one directory inside a larger working
-tree, and it needs two things from outside itself:
+This repository builds on its own **except for the game's own data**:
 
 | Needed | Why | Where it comes from |
 |---|---|---|
-| `Entities.json` | every entity's components and sync indices; the world cannot be built without it | the C# emulator's `Data/` directory; point `SKYSAGA_DATA_DIR` at a copy |
-| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from SLikeNet source: `nix build .#raknet` in the parent tree, or set `SKYSAGA_RAKNET_LIB` |
+| `Entities.json`, `geodata.json` | every entity's components and sync indices, and the block and loot tables; the world cannot be built without them | the game's data, via the C# emulator's `Data/` and `Bundled/<build>/` directories; point `SKYSAGA_DATA_DIR` at a copy |
+| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from source by [`./scripts/build-raknet.sh`](scripts/build-raknet.sh) (or `nix build .#raknet`, or set `SKYSAGA_RAKNET_LIB`) |
 
-Neither is redistributable here. `Entities.json` is the game's own data, and the RakNet build
-is a native library, not source. `cargo build` fails at the `raknet-sys` build script if it
-cannot find the library, and the server exits at startup if it cannot find `Entities.json`.
+The data files are not redistributable — they belong to the game, not to either emulator — so
+the server exits at startup if it cannot find them. The RakNet library is not shipped either,
+but it does not have to be: the script compiles it from SLikeNet at a pinned revision, and
+`cargo build` fails at the `raknet-sys` build script only if it has never been run.
+
+Run it that way, or let [Docker](#docker) do all of it for you.
+
+You also need the game client itself, which is not public. This is emulator source, not a way
+to obtain the game.
 
 You also need the game client itself, which is not public. This is emulator source, not a way
 to obtain the game.
@@ -56,6 +61,7 @@ the reasoning behind them.
 ## Running it
 
 ```bash
+./scripts/build-raknet.sh          # once: compiles libRakNet.so into .raknet/lib
 cargo run --release -p skysaga-server
 ```
 
@@ -65,6 +71,38 @@ That one process serves everything the client needs. Then launch the client poin
 There is also a `skysaga-game` binary that runs *only* the game server, for working on the
 world without the web stack. Note that the world-shaping variables below are read by that
 binary alone. `skysaga-server` builds its world from the defaults and ignores them.
+
+### Docker
+
+For playing rather than developing, the container needs no Rust, no compiler and no nix —
+only the game's data files, which are not ours to ship:
+
+```bash
+cp /path/to/Entities.json /path/to/geodata.json ./data/
+docker compose up --build
+```
+
+The first build takes several minutes, most of it compiling SLikeNet; after that the
+`libRakNet.so` layer is cached and only changed Rust source is rebuilt. The result is a
+distroless image of about 50 MB holding the binary, the library and nothing else — no shell,
+no package manager, running as an unprivileged user.
+
+Ports are published as they are (`5164`, `10106`, `4444` TCP and `42069` UDP), so the client
+still connects to `127.0.0.1` with no extra arguments. Accounts, characters and photos live
+in a named volume and survive `docker compose down`; `docker compose down -v` erases them.
+
+Configuration is the same set of variables, read from a `.env` file beside the compose file
+if there is one:
+
+```bash
+SKYSAGA_PUBLIC_IP=192.168.1.20      # playing from another machine on the LAN
+SKYSAGA_ACCOUNTS=alice:secret       # restrict logins
+RUST_LOG=skysaga_web=debug
+SKYSAGA_DATA_DIR=../server/Data     # if the data lives somewhere other than ./data
+```
+
+`SKYSAGA_WEB_PORT` and friends move the *host* side of the mapping; inside the container the
+ports never change.
 
 ### Configuration
 

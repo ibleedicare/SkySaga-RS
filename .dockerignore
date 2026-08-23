@@ -1,0 +1,14 @@
+# The build context is only the workspace source and scripts/build-raknet.sh. Everything
+# below is either large, host-specific, or rebuilt inside the image.
+target/
+.raknet/
+.git/
+.github/
+logs/
+launcher/
+tools/
+skysaga.db
+skysaga.db-shm
+skysaga.db-wal
+*.md
+.env
