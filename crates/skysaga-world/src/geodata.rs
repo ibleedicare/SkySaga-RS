@@ -373,6 +373,11 @@ impl GeoData {
         self.voxels.get(*self.by_index.get(&index)?)
     }
 
+    /// Every block the data describes, in file order.
+    pub fn voxels(&self) -> &[Voxel] {
+        &self.voxels
+    }
+
     /// Where a voxel sits in the file, which is what breaks a tie between two entries that
     /// share a resource name. See the note in [`Self::parse`].
     pub fn voxel_position(&self, index: u8) -> Option<usize> {

@@ -1486,14 +1486,14 @@ impl Session {
         let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
 
         let Some((item, material)) = placing else {
-            return self.dig(packet.chunk, packet.voxel);
+            return self.dig(packet.chunk, packet.voxel, packet.hit, world);
         };
 
         // Taking from the stack also confirms there was one to take.
         if !self.take_one(item) {
             debug!(item, "the hotbar names a block the player does not have");
 
-            return self.dig(packet.chunk, packet.voxel);
+            return self.dig(packet.chunk, packet.voxel, packet.hit, world);
         }
 
         // The new block goes into the empty voxel next to the face that was clicked, not into
@@ -1654,13 +1654,47 @@ impl Session {
         )
     }
 
-    /// One dig tick on a voxel. The block gives way once enough of them land.
+    /// What block stands at a voxel now: what the player has done to it, or the world as built.
+    ///
+    /// The session's own edits come first, so a block placed and then dug drops the thing that
+    /// was placed rather than the terrain that used to be underneath it.
+    fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> u8 {
+        self.voxel_edits
+            .get(&(chunk, voxel))
+            .copied()
+            .unwrap_or_else(|| world.material_at(chunk, voxel))
+    }
+
+    /// One dig tick on a voxel. The block gives way once enough of them land, and leaves
+    /// behind whatever it was made of.
     ///
     /// **The three crack stages the player sees are client-side.** It streams one packet per
     /// tick, every one identical, and the server counts them and decides. Breaking on the
     /// first would make every block give way three times too fast, which is the sort of
     /// difference that is invisible in a unit test and obvious in the game.
-    fn dig(&mut self, chunk: [u32; 3], voxel: [u32; 3]) -> Vec<Vec<u8>> {
+    ///
+    /// `at` is the packet's `hit`, which is already in position units of 1/64 of a voxel. It is
+    /// passed through untouched: it is the one number in the packet that is in the same units
+    /// as an entity transform, so a drop lands on the block that broke without anyone choosing
+    /// a scale.
+    fn dig(
+        &mut self,
+        chunk: [u32; 3],
+        voxel: [u32; 3],
+        at: [u32; 3],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let material = self.material_at(chunk, voxel, world);
+
+        // Air, bedrock and water. The client raycasts to a solid block before it sends
+        // anything, so refusing here costs an honest dig nothing, and it is what stops a swing
+        // at the sky reporting a hole.
+        if !world.geodata.is_diggable(material) {
+            debug!(?chunk, ?voxel, material, "not diggable");
+
+            return Vec::new();
+        }
+
         let ticks = self.dig_damage.entry((chunk, voxel)).or_insert(0);
 
         *ticks += 1;
@@ -1676,9 +1710,28 @@ impl Session {
         self.voxel_edits
             .insert((chunk, voxel), PartialChunkEditsSync::AIR);
 
-        debug!(?chunk, ?voxel, "dug through");
+        // The hole first, then what fell out of it. The other order puts the item inside a
+        // block the client still believes is solid.
+        let mut out = vec![Self::chunk_edit(chunk, voxel, PartialChunkEditsSync::AIR)];
 
-        vec![Self::chunk_edit(chunk, voxel, PartialChunkEditsSync::AIR)]
+        match world.geodata.item_for_voxel(material) {
+            Some(item) => {
+                debug!(?chunk, ?voxel, material, %item, "dug through");
+
+                out.extend(self.drop_pickup(&item, 1, at, world));
+            }
+
+            // A block with no item form. `Tree` is the one in this data: it breaks and yields
+            // nothing, which is the data's answer rather than a lookup failure.
+            None => debug!(
+                ?chunk,
+                ?voxel,
+                material,
+                "dug through, and it yields nothing"
+            ),
+        }
+
+        out
     }
 
     /// The item hash the player is holding, and the block it places, if it places one.
@@ -1897,6 +1950,14 @@ impl Session {
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
     pub fn floor_drops(&self) -> Vec<(u32, u32)> {
         self.pickups.iter().map(|drop| (drop.id, drop.item)).collect()
+    }
+
+    /// Where a floor drop is lying, in position units of 1/64 of a voxel.
+    pub fn floor_drop_position(&self, pickup: u32) -> Option<[u32; 3]> {
+        self.pickups
+            .iter()
+            .find(|drop| drop.id == pickup)
+            .map(|drop| drop.position)
     }
 
     /// Packets addressed to the other connections, if any. Drains.
@@ -2280,6 +2341,7 @@ impl Session {
             id,
             item: stack,
             definition,
+            position: at,
         });
 
         out
@@ -2572,4 +2634,7 @@ struct FloorDrop {
     /// Kept so the pickup can be re-encoded without looking it up again.
     #[allow(dead_code)]
     definition: skysaga_world::EntityDefinition,
+
+    /// Where it is lying, in position units of 1/64 of a voxel.
+    position: [u32; 3],
 }

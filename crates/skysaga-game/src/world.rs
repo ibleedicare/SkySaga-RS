@@ -5,6 +5,7 @@
 //! from a capture (as the tests do), or assembled by hand.
 
 use skysaga_proto::packets::chat::Channel;
+use skysaga_proto::packets::voxel::PartialChunkEditsSync;
 use skysaga_proto::packets::{ChunkSync, EntityAdd, MapDefinition, ServerInfo};
 use skysaga_world::geodata::{default_geodata_path, GeoData};
 use skysaga_world::terrain::CHUNK_SIZE;
@@ -815,6 +816,41 @@ fn load_geodata() -> GeoData {
 }
 
 impl World {
+    /// What block stands at a voxel, as the world was generated.
+    ///
+    /// Read out of the chunk that was sent to the client rather than regenerated from the
+    /// terrain function: the generator lives on the config and the world does not keep it, and
+    /// reading the sent bytes means the server cannot disagree with what the player is looking
+    /// at. Anything the session has since edited is **not** here; see `Session::material_at`.
+    ///
+    /// Air for a voxel outside the world, or in one of the all-air chunks that are never sent.
+    /// That is the same answer the client would give and it makes an out-of-range dig a
+    /// no-op rather than an error to handle.
+    pub fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3]) -> u8 {
+        let Some(sync) = self.chunks.iter().find(|sync| sync.coords == chunk) else {
+            return PartialChunkEditsSync::AIR;
+        };
+
+        let Some(data) = sync.data1.as_ref() else {
+            return PartialChunkEditsSync::AIR;
+        };
+
+        if voxel.iter().any(|axis| *axis as usize >= CHUNK_SIZE) {
+            return PartialChunkEditsSync::AIR;
+        }
+
+        // `data[0]` is the format byte, so the voxels start at 1. The axis order is the one
+        // the generator writes: y is the slowest, then z, then x.
+        let index = 1
+            + voxel[1] as usize * CHUNK_SIZE * CHUNK_SIZE
+            + voxel[2] as usize * CHUNK_SIZE
+            + voxel[0] as usize;
+
+        data.get(index)
+            .copied()
+            .unwrap_or(PartialChunkEditsSync::AIR)
+    }
+
     /// Where a player drops in, in the client's position units.
     ///
     /// Used when something has to be placed before the client has said where it is.

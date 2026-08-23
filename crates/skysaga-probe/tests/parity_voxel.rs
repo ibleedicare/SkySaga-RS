@@ -75,9 +75,11 @@ fn dig(probe: &mut Probe) -> bool {
         probe.send_packet(|w| {
             PerformVoxelActions {
                 location: ActionLocation::RightHand,
-                // Near the middle of the island, at a height the terrain generator fills.
+                // Near the middle of the island, on the surface. This said "at a height the
+                // terrain generator fills" and named y=18, which is three voxels of open air
+                // above it; nothing noticed while the handler dug whatever it was told to.
                 chunk: [2, 0, 2],
-                voxel: [8, 18, 8],
+                voxel: [8, 15, 8],
                 side: BlockSide::Top,
                 power: 32,
                 hit: [0, 0, 0],
