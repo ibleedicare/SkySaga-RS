@@ -15,6 +15,19 @@ const CAPTURE: &str = concat!(
 );
 
 /// Every captured `EntityAdd`, decoded.
+/// Skip when the game's own data file is absent.
+///
+/// `Entities.json` belongs to the game and is not in this repository, so a checkout without it
+/// -- CI, most obviously -- must not go red over tests it cannot run. Every test below that
+/// reads a definition starts with this.
+macro_rules! needs_data {
+    () => {
+        if EntityDefinitions::load(default_entities_path()).is_err() {
+            return;
+        }
+    };
+}
+
 fn captured_entities() -> Vec<EntityAdd> {
     let text = std::fs::read_to_string(CAPTURE).expect("capture");
 
@@ -61,6 +74,8 @@ fn sync_data_for(name: &str) -> SyncData {
 /// Every one of its six parameters is synced, so the payload is the whole component.
 #[test]
 fn the_captured_time_of_day_syncs_every_parameter() {
+    needs_data!();
+
     let definitions = definitions();
     let definition = definitions.get("TimeOfDay").unwrap();
     let sync = sync_data_for("TimeOfDay");
@@ -73,6 +88,8 @@ fn the_captured_time_of_day_syncs_every_parameter() {
 /// compensating width errors would still produce the right total only by coincidence.
 #[test]
 fn the_time_of_day_widths_account_for_the_payload_exactly() {
+    needs_data!();
+
     let sync = sync_data_for("TimeOfDay");
 
     assert_eq!(TimeOfDayComponent::SYNCED_BITS, 123);
@@ -86,6 +103,8 @@ fn the_time_of_day_widths_account_for_the_payload_exactly() {
 /// The real check: decode the captured payload and re-encode it byte for byte.
 #[test]
 fn the_captured_time_of_day_round_trips() {
+    needs_data!();
+
     let sync = sync_data_for("TimeOfDay");
 
     let mut reader = BitReader::new(sync.parameters.bytes(), sync.parameters.len());
@@ -108,6 +127,8 @@ fn the_captured_time_of_day_round_trips() {
 /// The decoded values have to be plausible, not merely round-trippable.
 #[test]
 fn the_captured_time_of_day_decodes_to_plausible_values() {
+    needs_data!();
+
     let sync = sync_data_for("TimeOfDay");
     let mut reader = BitReader::new(sync.parameters.bytes(), sync.parameters.len());
 
@@ -144,6 +165,8 @@ fn sync_dispatches_by_name_and_declines_unknowns() {
 /// its component.
 #[test]
 fn the_component_name_matches_the_data_file() {
+    needs_data!();
+
     use skysaga_world::Component;
 
     let component = Component::TimeOfDay(TimeOfDayComponent::default());
@@ -174,6 +197,8 @@ fn hex(bytes: &[u8]) -> String {
 /// unset — the C# never assigns them.
 #[test]
 fn the_airship_reproduces_its_captured_sync_data() {
+    needs_data!();
+
     use skysaga_world::{
         Component, Entity, InteractionComponent, OwnerComponent, PickupComponent,
         TransformComponent, VoxelLinkComponent,
@@ -222,6 +247,8 @@ fn the_airship_reproduces_its_captured_sync_data() {
 /// strings being empty. Stated separately so a width change is diagnosed as a width change.
 #[test]
 fn the_airship_payload_is_one_hundred_and_thirty_four_bits() {
+    needs_data!();
+
     assert_eq!(sync_data_for("Airship").parameters.len(), 134);
 }
 
@@ -232,6 +259,8 @@ fn the_airship_payload_is_one_hundred_and_thirty_four_bits() {
 /// not expecting.
 #[test]
 fn declined_parameters_are_not_flagged() {
+    needs_data!();
+
     use skysaga_world::{Component, Entity, TransformComponent, VoxelLinkComponent};
 
     let definitions = definitions();
@@ -262,6 +291,8 @@ fn declined_parameters_are_not_flagged() {
 /// panicking or writing zeros.
 #[test]
 fn parameters_without_a_component_are_absent() {
+    needs_data!();
+
     use skysaga_world::{Component, Entity, TransformComponent};
 
     let definitions = definitions();
@@ -288,6 +319,8 @@ fn parameters_without_a_component_are_absent() {
 /// unrelated calculations meeting on 171 is what says the item spec encoding is right.
 #[test]
 fn the_sheep_reproduces_its_captured_sync_data() {
+    needs_data!();
+
     use skysaga_world::{
         Component, Entity, HealthComponent, InventoryComponent, PhysicsComponent,
         PlayerNameComponent, TransformComponent,
@@ -332,6 +365,8 @@ fn the_sheep_reproduces_its_captured_sync_data() {
 /// as "the Sheep broke".
 #[test]
 fn the_sheep_payload_splits_into_135_plus_a_default_item_spec() {
+    needs_data!();
+
     use skysaga_proto::types::ItemSpec;
 
     let sheep = sync_data_for("Sheep");
@@ -415,6 +450,8 @@ fn player_components() -> Vec<skysaga_world::Component> {
 /// uuid, the inventory contents), so it isolates naming and dispatch from state.
 #[test]
 fn the_player_flags_the_same_parameters_as_the_csharp() {
+    needs_data!();
+
     use skysaga_world::Entity;
 
     let definitions = definitions();
@@ -449,6 +486,8 @@ fn the_player_flags_the_same_parameters_as_the_csharp() {
 /// as "declined" would drop the flag and shift every parameter after it.
 #[test]
 fn a_parameter_that_writes_no_bits_is_still_flagged() {
+    needs_data!();
+
     use skysaga_proto::bitstream::BitWriter;
     use skysaga_world::{Component, CraftingDropSlotsComponent, Entity};
 
@@ -492,6 +531,8 @@ fn the_feature_unlock_list_is_always_thirty_one_zero_bits() {
 /// parameter would silently vanish from the packet.
 #[test]
 fn every_component_the_player_needs_is_implemented() {
+    needs_data!();
+
     use std::collections::BTreeSet;
 
     let definitions = definitions();
@@ -671,7 +712,10 @@ mod inventory_item {
     /// The whole entity is 368 bits, which is what the C# server put on the wire.
     #[test]
     fn the_whole_entity_matches_the_captured_payload_size() {
-        let definitions = EntityDefinitions::load(default_entities_path()).expect("Entities.json");
+        let Ok(definitions) = EntityDefinitions::load(default_entities_path()) else {
+            return;
+        };
+
         let definition = definitions
             .get("BasicInventoryItem")
             .expect("BasicInventoryItem is defined");
