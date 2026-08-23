@@ -212,6 +212,25 @@ impl Peer {
             return 0;
         }
 
+        // One place every outbound packet passes through, which makes it the only honest
+        // spot to count them. `SKYSAGA_SEND_TRACE` turns it on; the C# logs the same thing
+        // unconditionally, and comparing the two histograms is how a missing packet is found.
+        if std::env::var("SKYSAGA_SEND_TRACE").is_ok() {
+            // The wire id is the first byte, or two when it escapes via 0xFF.
+            let wire_id = match data.first().copied() {
+                Some(0xFF) => data.get(1).map(|second| 255 + u16::from(*second)),
+                Some(first) => Some(u16::from(first)),
+                None => None,
+            };
+
+            eprintln!(
+                "[send] wire_id={} bytes={} broadcast={}",
+                wire_id.unwrap_or(0),
+                data.len(),
+                broadcast,
+            );
+        }
+
         // SAFETY: the address is built and destroyed around the call; `data` is only read
         // for `data.len()` bytes, and RakNet copies it before returning.
         //
