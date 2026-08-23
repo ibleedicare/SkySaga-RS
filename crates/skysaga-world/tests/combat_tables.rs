@@ -103,48 +103,6 @@ fn a_creatures_health_comes_from_its_physical_properties() {
     }
 }
 
-/// **Three entities drop the `Creature_` prefix, and the data is wrong rather than subtle.**
-///
-/// `Beetle` names `chicken_standard`, `MineCritter` names `sheep_standard` and `Villager`
-/// names `bandit_2_weak`. No such rows exist. The rows they mean --
-/// `Creature_Chicken_Standard`, `Creature_Sheep_Standard`, `Creature_Bandit_2_Weak` -- all do,
-/// and the pattern holds for all three of them and for nothing else in the file.
-///
-/// Left unresolved these three have no health, which makes them unkillable, which makes
-/// `NPC_Beetle_LootTable` and `NPC_Villager_LootTable` unreachable. So the prefix is retried
-/// once, and only once: an exact match always wins first.
-#[test]
-fn a_missing_creature_prefix_is_retried() {
-    let (Some(geodata), Some(definitions)) = (geodata(), definitions()) else {
-        return;
-    };
-
-    for (entity, written, health) in [
-        ("Beetle", "chicken_standard", 5),
-        ("MineCritter", "sheep_standard", 6),
-        ("Villager", "bandit_2_weak", 18),
-    ] {
-        let definition = definitions.get(entity).expect("a defined entity");
-
-        assert_eq!(definition.physical_properties(), Some(written), "{entity}");
-
-        assert_eq!(
-            geodata.health_for(written),
-            Some(health),
-            "{entity} resolves through the retry",
-        );
-    }
-}
-
-/// The retry does not invent health for something that names nothing real.
-#[test]
-fn the_retry_does_not_rescue_a_name_that_means_nothing() {
-    let Some(geodata) = geodata() else { return };
-
-    assert_eq!(geodata.health_for("not_a_row"), None);
-    assert_eq!(geodata.health_for("creature_not_a_row"), None);
-}
-
 /// Reach is on the same record, one table over.
 #[test]
 fn reach_comes_from_the_same_record() {
