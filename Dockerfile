@@ -54,8 +54,9 @@ COPY crates ./crates
 # RUN because a cache mount is not part of the layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release --locked -p skysaga-server \
- && install -Dm755 target/release/skysaga-server /out/skysaga-server
+    cargo build --release --locked -p skysaga-server -p skysaga-datapc \
+ && install -Dm755 target/release/skysaga-server /out/skysaga-server \
+ && install -Dm755 target/release/skysaga-extract-data /out/skysaga-extract-data
 
 # Where the database lives, created here so the named volume inherits an ownership the
 # unprivileged runtime user can write to. Docker seeds an empty volume from the image.
@@ -76,6 +77,10 @@ COPY --from=raknet /opt/raknet/lib/libRakNet.so /opt/raknet/lib/libRakNet.so
 # libstdc++ nothing here uses.
 COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
 COPY --from=build /out/skysaga-server /usr/local/bin/skysaga-server
+
+# Shipped alongside the server so a player with Docker and no Rust toolchain can still
+# produce the data files from their own copy of the game: `docker compose run --rm extract`.
+COPY --from=build /out/skysaga-extract-data /usr/local/bin/skysaga-extract-data
 COPY --from=build --chown=65532:65532 /out/state /var/lib/skysaga
 
 # The game's data, bind-mounted by compose. Declared here so a missing mount fails with the
