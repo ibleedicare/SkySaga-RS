@@ -210,8 +210,11 @@ fn a_spawned_chest_stands_near_the_player() {
 
     let distance = |a: u32, b: u32| a.abs_diff(b);
 
+    // Four voxels, which is one more than the three the placement reaches out.
+    let near = 4 * skysaga_game::world::POSITION_SCALE;
+
     assert!(
-        distance(position[0], 4000) <= 4 * 32 && distance(position[2], 5000) <= 4 * 32,
+        distance(position[0], 4000) <= near && distance(position[2], 5000) <= near,
         "spawned at {position:?}, nowhere near the player",
     );
 
@@ -338,13 +341,10 @@ fn a_chest_lands_on_the_side_the_player_faces() {
             here[2].saturating_add_signed(offset[2]),
         ];
 
-        for axis in 0..3 {
-            let got = spawned.position[axis] as i64;
-
+        for (axis, (got, wanted)) in spawned.position.iter().zip(want).enumerate() {
             assert!(
-                (got - want[axis] as i64).abs() <= 1,
-                "facing {degrees} degrees: axis {axis} is {got}, wanted {}",
-                want[axis],
+                (*got as i64 - wanted as i64).abs() <= 1,
+                "facing {degrees} degrees: axis {axis} is {got}, wanted {wanted}",
             );
         }
     }

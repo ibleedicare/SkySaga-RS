@@ -181,10 +181,7 @@ fn a_move_is_fourteen_bytes_of_known_content() {
 
     assert_eq!(bytes.len(), 14);
     assert_eq!(
-        bytes
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<String>(),
+        bytes.iter().map(|b| format!("{b:02X}")).collect::<String>(),
         "EC0000000C001900050012C00C80",
     );
 }

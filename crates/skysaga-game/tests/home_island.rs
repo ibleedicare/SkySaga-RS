@@ -265,7 +265,7 @@ fn begin_sync_counts_the_chunks_actually_sent() {
 
 /// The player spawns above the island, in world units rather than voxels.
 ///
-/// Position units are 1/32 of a voxel. Sending raw voxel coordinates puts the player at 1/32
+/// Position units are 1/64 of a voxel. Sending raw voxel coordinates puts the player at 1/64
 /// of the intended spot — the corner of the island, inside the ground — which renders as an
 /// unlit black character with nothing behind it. That is exactly the symptom this fixes.
 #[test]
@@ -274,7 +274,10 @@ fn the_player_spawns_in_world_units_above_the_terrain() {
     use skysaga_proto::bitstream::BitReader;
     use skysaga_world::TerrainGenerator;
 
-    assert_eq!(POSITION_SCALE, 32);
+    // The client's own constant: `FUN_0074a860` multiplies a world float by `DAT_00c61f28`,
+    // which is 64.0, on its way into `EntityMoved`. See the constant's own documentation for
+    // the other three confirmations.
+    assert_eq!(POSITION_SCALE, 64);
 
     let world = home_island();
     let definitions = definitions();
