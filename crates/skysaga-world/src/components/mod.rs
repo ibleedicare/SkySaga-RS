@@ -35,6 +35,7 @@ pub mod owner;
 pub mod misc;
 pub mod physics;
 pub mod pickup;
+pub mod resource_pickup;
 pub mod player_aspects;
 pub mod player_name;
 pub mod time_of_day;
@@ -53,6 +54,7 @@ pub use misc::{
 };
 pub use physics::PhysicsComponent;
 pub use pickup::PickupComponent;
+pub use resource_pickup::ResourcePickupComponent;
 pub use player_aspects::PlayerAspectsComponent;
 pub use player_name::PlayerNameComponent;
 pub use time_of_day::TimeOfDayComponent;
@@ -85,6 +87,8 @@ pub enum Component {
     MailBox(MailBoxComponent),
     Owner(OwnerComponent),
     Pickup(PickupComponent),
+    /// `clientresourcepickupcomponent` -- an item lying on the floor.
+    ResourcePickup(ResourcePickupComponent),
     PlayerAspects(PlayerAspectsComponent),
     PlayerName(PlayerNameComponent),
     /// Same parameters as [`Transform`](Self::Transform); the entity binds a different name.
@@ -111,6 +115,7 @@ impl Component {
             Self::MailBox(_) => "clientmailboxcomponent",
             Self::Owner(_) => "clientownercomponent",
             Self::Pickup(_) => "clientpickupcomponent",
+            Self::ResourcePickup(_) => "clientresourcepickupcomponent",
             Self::PlayerAspects(_) => "clientplayeraspectscomponent",
             Self::PlayerName(_) => "clientplayernamecomponent",
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
@@ -139,6 +144,7 @@ impl Component {
             Self::MailBox(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),
             Self::Pickup(component) => component.sync(parameter, writer),
+            Self::ResourcePickup(component) => component.sync(parameter, writer),
             Self::PlayerAspects(component) => component.sync(parameter, writer),
             Self::PlayerName(component) => component.sync(parameter, writer),
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
