@@ -1486,14 +1486,14 @@ impl Session {
         let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
 
         let Some((item, material)) = placing else {
-            return self.dig(packet.chunk, packet.voxel, packet.hit, world);
+            return self.dig(packet.chunk, packet.voxel, world);
         };
 
         // Taking from the stack also confirms there was one to take.
         if !self.take_one(item) {
             debug!(item, "the hotbar names a block the player does not have");
 
-            return self.dig(packet.chunk, packet.voxel, packet.hit, world);
+            return self.dig(packet.chunk, packet.voxel, world);
         }
 
         // The new block goes into the empty voxel next to the face that was clicked, not into
@@ -1673,17 +1673,15 @@ impl Session {
     /// first would make every block give way three times too fast, which is the sort of
     /// difference that is invisible in a unit test and obvious in the game.
     ///
-    /// `at` is the packet's `hit`, which is already in position units of 1/64 of a voxel. It is
-    /// passed through untouched: it is the one number in the packet that is in the same units
-    /// as an entity transform, so a drop lands on the block that broke without anyone choosing
-    /// a scale.
-    fn dig(
-        &mut self,
-        chunk: [u32; 3],
-        voxel: [u32; 3],
-        at: [u32; 3],
-        world: &World,
-    ) -> Vec<Vec<u8>> {
+    /// What it drops lands in the **middle of the hole**, not at the packet's `hit`.
+    ///
+    /// `hit` is tempting: it is already in position units, so it needs no scale chosen. But it
+    /// is where the tool *touched*, which is a point on the face of the block, so a drop placed
+    /// there hangs against the side of the hole or on top of it. In front of a client that
+    /// reads as an item floating at head height. The voxel's own centre is the position the
+    /// block occupied, and the half-voxel lift is the one creature loot already uses to keep a
+    /// pickup out of the ground.
+    fn dig(&mut self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> Vec<Vec<u8>> {
         let material = self.material_at(chunk, voxel, world);
 
         // Air, bedrock and water. The client raycasts to a solid block before it sends
@@ -1718,7 +1716,7 @@ impl Session {
             Some(item) => {
                 debug!(?chunk, ?voxel, material, %item, "dug through");
 
-                out.extend(self.drop_pickup(&item, 1, at, world));
+                out.extend(self.drop_pickup(&item, 1, World::voxel_centre(chunk, voxel), world));
             }
 
             // A block with no item form. `Tree` is the one in this data: it breaks and yields

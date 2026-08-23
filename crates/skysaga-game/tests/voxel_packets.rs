@@ -388,24 +388,49 @@ fn only_one_item_falls_out_however_many_ticks_it_took() {
     assert_eq!(session.floor_drops().len(), 1, "the hole kept giving");
 }
 
-/// The drop lands where the tool struck, which needs no scale conversion.
+/// The drop lands in the middle of the hole.
 ///
-/// `hit` is already in entity position units of 1/64 of a voxel, which is the form every
-/// transform uses. Computing a position from `chunk` and `voxel` instead would mean picking a
-/// scale, and picking the wrong one is invisible until something is standing in the wrong
-/// place.
+/// **Not at the packet's `hit`.** That field is already in position units, so it is tempting:
+/// no scale has to be chosen. But it is where the tool *touched*, a point on the face of the
+/// block, so a drop placed there hangs against the side of the hole or sits on top of it. In
+/// front of a client that reads as an item floating at head height, which is exactly how this
+/// was first found.
 #[test]
-fn the_drop_lands_where_the_tool_struck() {
+fn the_drop_lands_in_the_middle_of_the_hole() {
     let world = world();
     let mut session = playing(&world);
 
-    let hit = [36 * 64, 17 * 64, 36 * 64];
+    // Chunk [1, 0, 1] voxel [4, 17, 4] is world voxel [36, 17, 36], and a voxel is 64 units.
+    let centre = [36 * 64 + 32, 17 * 64 + 32, 36 * 64 + 32];
 
-    dig_through_hitting(&mut session, &world, SAND, hit);
+    dig_through_hitting(&mut session, &world, SAND, [0, 0, 0]);
 
     let (pickup, _) = session.floor_drops()[0];
 
-    assert_eq!(session.floor_drop_position(pickup), Some(hit));
+    assert_eq!(session.floor_drop_position(pickup), Some(centre));
+}
+
+/// And it ignores `hit` entirely, whatever the client puts there.
+///
+/// The C# reads `hit` as if it agreed with `chunk * 32 + voxel` and it does not; taking the
+/// voxel's own centre means that disagreement cannot reach a drop position.
+#[test]
+fn where_the_tool_struck_does_not_move_the_drop() {
+    let world = world();
+
+    let mut first = playing(&world);
+    let mut second = playing(&world);
+
+    dig_through_hitting(&mut first, &world, SAND, [0, 0, 0]);
+    dig_through_hitting(&mut second, &world, SAND, [999, 999, 999]);
+
+    let at = |session: &Session| {
+        let (pickup, _) = session.floor_drops()[0];
+
+        session.floor_drop_position(pickup)
+    };
+
+    assert_eq!(at(&first), at(&second));
 }
 
 /// A block that breaks into nothing is a real case, not an error.

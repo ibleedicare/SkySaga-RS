@@ -851,6 +851,23 @@ impl World {
             .unwrap_or(PartialChunkEditsSync::AIR)
     }
 
+    /// The middle of a voxel, in the client's position units.
+    ///
+    /// Where something belongs when it belongs *in* a block rather than at a corner: a drop
+    /// from a dug block, most obviously. An entity transform sits at the entity's feet, so the
+    /// half-voxel lift is the same one creature loot uses to keep a pickup out of the ground.
+    pub fn voxel_centre(chunk: [u32; 3], voxel: [u32; 3]) -> [u32; 3] {
+        let mut centre = [0; 3];
+
+        for (axis, out) in centre.iter_mut().enumerate() {
+            let world_voxel = chunk[axis] * CHUNK_SIZE as u32 + voxel[axis];
+
+            *out = world_voxel * POSITION_SCALE + POSITION_SCALE / 2;
+        }
+
+        centre
+    }
+
     /// Where a player drops in, in the client's position units.
     ///
     /// Used when something has to be placed before the client has said where it is.
