@@ -13,6 +13,7 @@ use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
 use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
 use skysaga_proto::packets::voxel::{ActionLocation, BlockSide, PerformVoxelActions};
+use skysaga_proto::packets::{EntityRemoved, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
 fn world() -> World {
@@ -185,6 +186,44 @@ fn dig_and_collect(session: &mut Session, world: &World, voxel: [u32; 3]) -> Vec
     }
 
     carried(session)
+}
+
+fn ids_of(burst: &[Vec<u8>], id: u16) -> Vec<Vec<u8>> {
+    burst
+        .iter()
+        .filter(|bytes| BitReader::from_bytes(bytes).read_packet_id().ok() == Some(id))
+        .cloned()
+        .collect()
+}
+
+/// Which entities the burst syncs.
+fn synced(burst: &[Vec<u8>]) -> Vec<u32> {
+    ids_of(burst, EntitySync::ID)
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            reader.read_packet_id().ok()?;
+
+            EntitySync::decode(&mut reader).ok().map(|sync| sync.id)
+        })
+        .collect()
+}
+
+/// Which entities the burst takes away.
+fn removed(burst: &[Vec<u8>]) -> Vec<u32> {
+    ids_of(burst, EntityRemoved::ID)
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            reader.read_packet_id().ok()?;
+
+            EntityRemoved::decode(&mut reader)
+                .ok()
+                .map(|gone| gone.entity_id)
+        })
+        .collect()
 }
 
 /// Decode the chunk edits in a burst.
@@ -526,6 +565,71 @@ fn placing_a_block_takes_one_from_the_stack() {
     swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
 
     assert_eq!(session.inventories().count(item), Some(9));
+}
+
+/// **And says so**, or the player has infinite blocks.
+///
+/// The server has always taken the block off the stack; it never told the client. The count a
+/// player sees is the one the client was last sent, so an unannounced decrement leaves the
+/// square reading 10 forever while the server counts down behind it. That is worse than it
+/// sounds: when the server reaches zero it stops placing and starts *digging* instead, with
+/// the client still showing a stack.
+#[test]
+fn placing_a_block_tells_the_client_the_stack_shrank() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let item = session.give("Dirt", 10).unwrap();
+    hold(&mut session, &world, "Dirt");
+
+    let burst = swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
+
+    assert!(
+        synced(&burst).contains(&item),
+        "the stack was not synced: {:?}",
+        synced(&burst),
+    );
+}
+
+/// The last one takes the stack away rather than leaving an empty square behind.
+#[test]
+fn placing_the_last_block_removes_the_stack_and_clears_the_square() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let item = session.give("Dirt", 1).unwrap();
+    hold(&mut session, &world, "Dirt");
+
+    let burst = swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
+
+    assert!(
+        removed(&burst).contains(&item),
+        "the stack was not taken away"
+    );
+
+    assert!(
+        synced(&burst).contains(&session.player_entity_id()),
+        "the rucksack's slot list was not re-sent, so the square keeps the item",
+    );
+
+    assert!(
+        session.inventory().iter().all(|slot| *slot != item),
+        "the slot still holds it"
+    );
+}
+
+/// The block still gets placed. The sync is additional, not instead.
+#[test]
+fn the_block_is_still_placed_when_the_stack_is_announced() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Dirt", 10).unwrap();
+    hold(&mut session, &world, "Dirt");
+
+    let burst = swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
+
+    assert_eq!(edits(&burst), vec![(0, [4, 21, 4])]);
 }
 
 #[test]

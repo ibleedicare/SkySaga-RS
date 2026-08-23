@@ -1490,7 +1490,9 @@ impl Session {
         };
 
         // Taking from the stack also confirms there was one to take.
-        if !self.take_one(item) {
+        let taken = self.take_one(item);
+
+        if taken.is_empty() {
             debug!(item, "the hotbar names a block the player does not have");
 
             return self.dig(packet.chunk, packet.voxel, world);
@@ -1504,7 +1506,14 @@ impl Session {
 
         debug!(?packet.chunk, ?voxel, material, "place");
 
-        vec![Self::chunk_edit(packet.chunk, voxel, material)]
+        // The block, then the stack it came out of. Both are needed: the client draws the
+        // count it was last sent, so a placement that only reports the block leaves the
+        // player holding an inexhaustible stack.
+        let mut out = vec![Self::chunk_edit(packet.chunk, voxel, material)];
+
+        out.extend(self.apply(taken, world));
+
+        out
     }
 
     // --- the mailbox --------------------------------------------------------------------
@@ -1743,8 +1752,16 @@ impl Session {
         Some((held, material))
     }
 
-    /// Take one item of `hash` out of the rucksack. False when there is none.
-    fn take_one(&mut self, hash: u32) -> bool {
+    /// Take one item of `hash` out of the rucksack, and say what the client must be told.
+    ///
+    /// **Empty means nothing was taken**, which is how a caller tells "the hotbar names an item
+    /// the player has run out of" from a successful take.
+    ///
+    /// The effects have to be returned rather than dropped. This used to answer `bool` and
+    /// throw them away, so the server counted a stack down while the client went on drawing
+    /// the number it was last sent: blocks looked infinite, and once the server reached zero a
+    /// placement quietly turned into a dig.
+    fn take_one(&mut self, hash: u32) -> Vec<Effect> {
         let Some(slot) = (0..self.inventory().len() as u32).find(|slot| {
             self.inventories
                 .slot(self.player_entity_id, *slot)
@@ -1752,10 +1769,10 @@ impl Session {
                 .and_then(|item| self.inventories.name(item))
                 == Some(hash)
         }) else {
-            return false;
+            return Vec::new();
         };
 
-        !self.inventories.destroy(self.player_entity_id, slot, 1).is_empty()
+        self.inventories.destroy(self.player_entity_id, slot, 1)
     }
 
     /// One `PartialChunkEditsSync` changing a single voxel.
