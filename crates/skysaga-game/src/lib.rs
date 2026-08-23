@@ -60,8 +60,11 @@ use skysaga_proto::packets::{
     TransferToServer,
 };
 use skysaga_world::geodata::EquippedAction;
+use skysaga_world::loot::Seeded;
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
-use skysaga_world::{Component, Entity, HealthComponent};
+use skysaga_world::{
+    Component, Entity, HealthComponent, ResourcePickupComponent, TransformComponent,
+};
 use tracing::{debug, info, warn};
 
 /// What a hard landing costs, in hit points.
@@ -72,6 +75,9 @@ use tracing::{debug, info, warn};
 /// what makes the death-and-respawn loop reachable at all while nothing else can hurt a
 /// player.
 const FALL_DAMAGE: u32 = 4;
+
+/// The entity a floor drop is, from `Entities.json`.
+const PICKUP: &str = "Pickup";
 
 /// A player's full health: `PhysicalProperties > player > Durability > Player > Health`.
 const PLAYER_HEALTH: u32 = 40;
@@ -532,6 +538,16 @@ pub struct Session {
     /// swinging is dropped rather than credited to whatever was used last.
     armed: std::collections::HashMap<u32, EquippedAction>,
 
+    /// Items lying on the floor, waiting to be walked over.
+    pickups: Vec<FloorDrop>,
+
+    /// Where loot rolls come from.
+    ///
+    /// Seeded from the player's entity id rather than a clock, so this crate keeps its
+    /// no-I/O rule and a session's drops are reproducible. Two players rolling the same
+    /// table get different results because their bodies have different ids.
+    loot_rolls: Seeded,
+
     /// Packets for the *other* connections, drained by the server layer.
     ///
     /// The swing echo is the first thing a session produces that is not addressed to the
@@ -576,6 +592,8 @@ impl Session {
             damage: std::collections::HashMap::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
+            pickups: Vec::new(),
+            loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
             notifications: Vec::new(),
@@ -1037,12 +1055,18 @@ impl Session {
                     "entity action",
                 );
 
-                // Only Interact opens anything. Opening on any action at all would have a
-                // pickaxe swing open the loot window.
-                if packet.action == Some(Action::Interact) {
-                    self.open_container(packet.target_entity, world)
-                } else {
-                    Vec::new()
+                match packet.action {
+                    // Only Interact opens anything. Opening on any action at all would have a
+                    // pickaxe swing open the loot window.
+                    Some(Action::Interact) => self.open_container(packet.target_entity, world),
+
+                    // Walking over a floor drop. Fired repeatedly while the player stands on
+                    // it, so this has to be safe to answer many times.
+                    Some(Action::ResourcePickup) => {
+                        self.collect_pickup(packet.target_entity, world)
+                    }
+
+                    _ => Vec::new(),
                 }
             }
 
@@ -1870,6 +1894,11 @@ impl Session {
         PLAYER_HEALTH
     }
 
+    /// Items lying on the floor, as `(pickup entity, stack entity)`.
+    pub fn floor_drops(&self) -> Vec<(u32, u32)> {
+        self.pickups.iter().map(|drop| (drop.id, drop.item)).collect()
+    }
+
     /// Packets addressed to the other connections, if any. Drains.
     pub fn take_broadcasts(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.broadcasts)
@@ -2092,6 +2121,12 @@ impl Session {
         // ...and the heart bar itself, which is an ordinary parameter sync.
         out.extend(self.sync_health(target, world));
 
+        if after > 0 {
+            // Still alive, so it may still give something up: shearing. Only a sheep has a
+            // `_Hit_` table, and for everything else this rolls nothing.
+            out.extend(self.award_hit_loot(&creature, world));
+        }
+
         if after == 0 {
             out.push(encode(|w| {
                 KillOccurred {
@@ -2102,9 +2137,189 @@ impl Session {
                 .encode(w)
             }));
 
+            // Rolled on the killing blow and only then, so a corpse cannot be farmed.
+            out.extend(self.award_loot(&creature, world));
+
             // Only after the kill: the client resolves the victim before it draws anything.
             out.push(encode(|w| EntityRemoved { entity_id: target }.encode(w)));
         }
+
+        out
+    }
+
+    /// Roll what `creature` was carrying and drop it on the floor where it died.
+    ///
+    /// # On the floor, not into the rucksack
+    ///
+    /// Loot lands as `Pickup` entities the player walks over, which is what the real game does
+    /// and what the C# does for ore seams. Putting it straight into the rucksack was the first
+    /// version of this and it is wrong twice over: the kill has no visible result, and the
+    /// player is handed items they never touched.
+    ///
+    /// # Nothing to drop is an ordinary outcome
+    ///
+    /// Most of the bestiary has a table; the dinosaurs and the test entities have none, and a
+    /// table whose entries all fail their chance rolls yields nothing either.
+    fn award_loot(&mut self, creature: &world::Creature, world: &World) -> Vec<Vec<u8>> {
+        let dropped = world
+            .geodata
+            .loot_for(&creature.name, &mut self.loot_rolls);
+
+        if dropped.is_empty() {
+            debug!(creature = %creature.name, "dropped nothing");
+
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+
+        for (index, (item, count)) in dropped.into_iter().enumerate() {
+            // Spread the drops so two stacks are not inside one another, and lift them clear
+            // of the ground: a pickup at the corpse's own feet is inside the terrain.
+            let at = [
+                creature.position[0] + (index as u32 * world::POSITION_SCALE) / 2,
+                creature.position[1] + world::POSITION_SCALE / 2,
+                creature.position[2],
+            ];
+
+            out.extend(self.drop_pickup(&item, count, at, world));
+
+            info!(creature = %creature.name, %item, count, ?at, "loot");
+        }
+
+        out
+    }
+
+    /// Roll what `creature` gives up for a non-fatal hit, and drop it.
+    ///
+    /// # Shearing
+    ///
+    /// A sheep has two tables: `NPC_Sheep_LootTable` for killing it, and
+    /// `NPC_Sheep_Hit_LootTable` for hitting it -- the wool without the mutton. It is the only
+    /// `_Hit_` table in the data, so in practice this is "hit a sheep, get wool" and a no-op
+    /// for everything else.
+    ///
+    /// **This is farmable, and the data does not say whether it should be.** Nothing in the
+    /// table carries a cooldown or a sheared flag, so a player can stand and stab one sheep
+    /// forever. The literal reading of the table is implemented rather than a limit invented;
+    /// if evidence for one turns up, it belongs here.
+    fn award_hit_loot(&mut self, creature: &world::Creature, world: &World) -> Vec<Vec<u8>> {
+        let dropped = world
+            .geodata
+            .hit_loot_for(&creature.name, &mut self.loot_rolls);
+
+        let mut out = Vec::new();
+
+        for (item, count) in dropped {
+            let at = [
+                creature.position[0],
+                creature.position[1] + world::POSITION_SCALE / 2,
+                creature.position[2],
+            ];
+
+            out.extend(self.drop_pickup(&item, count, at, world));
+
+            info!(creature = %creature.name, %item, count, "sheared");
+        }
+
+        out
+    }
+
+    /// Put `count` of `item` on the floor at `at`, and say what to send.
+    ///
+    /// **Two entities, stack first.** The `Pickup` names the stack by id, so a client told
+    /// about the pickup before the stack it points at has a pickup referencing nothing.
+    fn drop_pickup(
+        &mut self,
+        item: &str,
+        count: u32,
+        at: [u32; 3],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let stack = self
+            .inventories
+            .create_loose(skysaga_core::name_hash(item), count);
+
+        self.inventories.reserve_ids_from(self.inventories.next_entity_id());
+
+        let mut out = self.apply(vec![Effect::ItemCreated { entity: stack }], world);
+
+        if out.is_empty() {
+            // No `BasicInventoryItem` definition, so the stack cannot be serialised and a
+            // pickup naming it would be pointing at nothing.
+            warn!(%item, "cannot announce a floor drop");
+
+            return Vec::new();
+        }
+
+        let id = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(id + 1);
+
+        let Some(definition) = world.definitions.get(PICKUP).cloned() else {
+            warn!("Entities.json defines no Pickup; loot cannot be dropped");
+
+            return Vec::new();
+        };
+
+        let built = Entity::new(
+            id,
+            vec![
+                Component::ResourcePickup(ResourcePickupComponent::at(stack, at)),
+                // `size` is the only thing the transform contributes here, and an unset one is
+                // [0,0,0] -- present, collectable, and invisible.
+                Component::Transform(TransformComponent {
+                    size: [1, 1, 1],
+                    ..Default::default()
+                }),
+            ],
+        );
+
+        out.push(encode(|w| built.to_entity_add(&definition).encode(w)));
+
+        self.pickups.push(FloorDrop {
+            id,
+            item: stack,
+            definition,
+        });
+
+        out
+    }
+
+    /// Collect a floor drop into the rucksack.
+    ///
+    /// The client fires `ResourcePickupAction` at the pickup while the player stands on it --
+    /// **repeatedly**, a dozen times for one item. So the pickup is removed on the first one,
+    /// and every later arrival finds nothing and does nothing.
+    ///
+    /// The stack entity is already known to the client, so this sends a slot list and not an
+    /// `EntityAdd`. That is the whole difference between collecting a drop and being given an
+    /// item.
+    fn collect_pickup(&mut self, pickup: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(position) = self.pickups.iter().position(|drop| drop.id == pickup) else {
+            // Not a pickup, or already taken.
+            return Vec::new();
+        };
+
+        let stack = self.pickups[position].item;
+
+        let effects = self.inventories.collect(self.player_entity_id, stack);
+
+        if effects.is_empty() {
+            warn!(pickup, "cannot collect: the rucksack is full");
+
+            // Left on the floor deliberately: destroying it would lose the item.
+            return Vec::new();
+        }
+
+        self.pickups.remove(position);
+
+        info!(pickup, stack, "collected");
+
+        let mut out = self.apply(effects, world);
+
+        // ...and the pickup itself goes away, or the client keeps drawing it and keeps asking
+        // to collect it.
+        out.push(encode(|w| EntityRemoved { entity_id: pickup }.encode(w)));
 
         out
     }
@@ -2339,4 +2554,22 @@ pub struct Spawned {
     /// What to send so the client knows it is there, **in order**: the loot first, then the
     /// chest whose slot list names it.
     pub packets: Vec<Vec<u8>>,
+}
+
+/// An item lying on the floor: the `Pickup` entity, and the stack it names.
+///
+/// Held per session for the same reason as spawned containers and creatures -- the world is
+/// built once, so anything created while the server runs lives here, and a drop one player
+/// makes is not in another player's world.
+#[derive(Debug, Clone)]
+struct FloorDrop {
+    /// The `Pickup` entity the client fires `ResourcePickupAction` at.
+    id: u32,
+
+    /// The `BasicInventoryItem` it points at, which is what ends up in a slot.
+    item: u32,
+
+    /// Kept so the pickup can be re-encoded without looking it up again.
+    #[allow(dead_code)]
+    definition: skysaga_world::EntityDefinition,
 }

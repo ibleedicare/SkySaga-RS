@@ -116,7 +116,7 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 647 tests, no network, nothing to prepare
+cargo test --workspace          # 676 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
@@ -221,6 +221,21 @@ So `Basic_Diagonal` does 7 points, `Heavy_Chop` does 14, a sheep has 6 and a kni
 one swing for the sheep, three for the knight. The mapping was checked against ten real
 `EquippedItemUsed` captures whose CRCs all resolve to real action names
 (`skysaga-proto/tests/combat.rs`).
+
+**Killing something drops its loot.** A chicken leaves three feathers, a sheep meat and wool,
+the flame wolf ten pelts and a keystone component. Those come from `LootTables` and `LootLists`
+in the same data file: each entry rolls its `SpawnPercentage`, then picks one resource weighted
+by `Frequency`. 31 of the 40 killable entities have a table; the dinosaurs, `Monkey` and the
+test rigs have none, and that is the data's answer rather than a gap.
+
+Nothing in `entities.json` points a creature at its table — the link is the naming convention
+`NPC_<entity>_LootTable`, with a short alias list for the ones that share (every wolf drops
+`NPC_Wolf_LootTable`). Do not go looking at `inventoryloadout`: every creature declares one and
+**not one of those names exists in this build's data**.
+
+```bash
+cargo run -p skysaga-world --example loot-coverage   # what each creature drops
+```
 
 Two things are worth knowing before reading the code:
 

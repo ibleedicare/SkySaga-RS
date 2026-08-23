@@ -23,6 +23,7 @@ use skysaga_proto::packets::combat::{
     EntityUsedEquippedItem, EquippedItemUsed, EventEffect, KillOccurred, PerformEntityActions,
     PlayerSpawned, StopUsingEquippedItem,
 };
+use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
 use skysaga_proto::packets::movement::EntityMoved;
 use skysaga_proto::packets::{EntityAdd, EntityRemoved, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
@@ -110,6 +111,23 @@ fn land(session: &mut Session, world: &World, target: u32, position: [u32; 3]) -
     )
 }
 
+/// Walk over a floor drop, which is what the client's ResourcePickupAction means.
+fn collect(session: &mut Session, world: &World, pickup: u32) -> Vec<Vec<u8>> {
+    let me = session.player_entity_id();
+
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            ExecuteEntityAction {
+                source_entity: me,
+                target_entity: pickup,
+                action: Some(Action::ResourcePickup),
+            }
+            .encode(w)
+        })),
+        world,
+    )
+}
+
 /// One connecting swing, which on the wire is both packets in order.
 fn swing_at(
     session: &mut Session,
@@ -170,6 +188,40 @@ fn added(burst: &[Vec<u8>]) -> Vec<u32> {
             reader.read_packet_id().ok()?;
 
             EntityAdd::decode(&mut reader).ok().map(|add| add.id)
+        })
+        .collect()
+}
+
+/// What the player is carrying, as `(resource, count)`, in slot order.
+///
+/// The rucksack holds entity ids; each names a stack whose component carries the item's name
+/// hash. The hash is matched back to a name by hashing the candidates, since the wire never
+/// carries the string.
+fn carried(session: &Session) -> Vec<(String, u32)> {
+    const KNOWN: &[&str] = &[
+        "Feather",
+        "Animal_Meat",
+        "Wool",
+        "Mushroom",
+        "Metal_Crude_Sword",
+        "Arrow",
+        "Dirt",
+        "Stone",
+    ];
+
+    session
+        .inventory()
+        .iter()
+        .filter(|entity| **entity != 0)
+        .filter_map(|entity| session.inventories().item(*entity))
+        .map(|stack| {
+            let name = KNOWN
+                .iter()
+                .find(|candidate| Some(skysaga_core::name_hash(candidate)) == stack.slot_data.name)
+                .map(|found| (*found).to_owned())
+                .unwrap_or_else(|| format!("{:#010x}", stack.slot_data.name.unwrap_or(0)));
+
+            (name, stack.slot_data.count)
         })
         .collect()
 }
@@ -442,6 +494,239 @@ fn a_swing_naming_an_unknown_action_is_dropped() {
 // --- killing ---------------------------------------------------------------------------------
 
 /// A sheep has six points and a basic swing does seven.
+#[test]
+fn killing_a_chicken_drops_three_feathers_on_the_floor() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // Five hit points, and a basic swing does seven.
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    assert_eq!(session.creature_health(chicken), Some(0), "it died");
+
+    // **On the floor, not in the rucksack.** The player has to walk over it.
+    assert!(carried(&session).is_empty(), "nothing was handed over");
+
+    assert_eq!(session.floor_drops().len(), 1, "one pickup lying there");
+
+    // Two entities announced: the stack, then the pickup that names it.
+    assert_eq!(added(&replies).len(), 2, "a stack and a pickup");
+}
+
+/// The stack is announced before the pickup that names it.
+///
+/// A pickup referencing an entity the client has never been told about points at nothing --
+/// the same ordering rule a slot list follows.
+#[test]
+fn the_stack_is_announced_before_the_pickup_that_names_it() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let announced = added(&replies);
+    let drop = session.floor_drops()[0];
+
+    let stack_at = announced.iter().position(|id| *id == drop.1).expect("the stack");
+    let pickup_at = announced.iter().position(|id| *id == drop.0).expect("the pickup");
+
+    assert!(stack_at < pickup_at, "stack at {stack_at}, pickup at {pickup_at}");
+}
+
+/// Walking over it puts the feathers in the rucksack and takes the pickup away.
+#[test]
+fn walking_over_a_drop_collects_it() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let (pickup, _) = session.floor_drops()[0];
+
+    let replies = collect(&mut session, &world, pickup);
+
+    assert_eq!(
+        carried(&session),
+        vec![("Feather".to_owned(), 3)],
+        "three feathers, once collected",
+    );
+
+    assert!(session.floor_drops().is_empty(), "the pickup is gone");
+
+    // The stack was announced when it hit the floor, so this is a slot list and a removal --
+    // not a second EntityAdd.
+    assert!(added(&replies).is_empty(), "no second announcement");
+    assert!(synced(&replies).contains(&session.player_entity_id()));
+    assert_eq!(ids_of(&replies, EntityRemoved::ID).len(), 1);
+}
+
+/// The client fires the action repeatedly while the player stands on the drop.
+///
+/// A dozen for one item, in the C#'s logs. Every one after the first must find nothing, or the
+/// same feathers are collected a dozen times.
+#[test]
+fn a_drop_can_only_be_collected_once() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let (pickup, _) = session.floor_drops()[0];
+
+    collect(&mut session, &world, pickup);
+
+    for _ in 0..11 {
+        assert!(
+            collect(&mut session, &world, pickup).is_empty(),
+            "a collected drop answers nothing",
+        );
+    }
+
+    assert_eq!(carried(&session), vec![("Feather".to_owned(), 3)]);
+}
+
+/// Collecting a second pile of the same thing grows the first rather than taking a new square.
+#[test]
+fn collecting_a_matching_stack_merges_it() {
+    let world = world();
+    let mut session = playing(&world);
+
+    for _ in 0..2 {
+        let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+        swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+    }
+
+    assert_eq!(session.floor_drops().len(), 2, "two piles");
+
+    for (pickup, _) in session.floor_drops() {
+        collect(&mut session, &world, pickup);
+    }
+
+    assert_eq!(
+        carried(&session),
+        vec![("Feather".to_owned(), 6)],
+        "one square of six, not two of three",
+    );
+}
+
+/// **Shearing.** A sheep hit but not killed gives up its wool and walks away.
+///
+/// `Basic_Stab` does 2 and a sheep has 6, so this is the one action that can hit one without
+/// killing it.
+#[test]
+fn a_sheep_hit_but_not_killed_drops_wool() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sheep = creature_in_front(&mut session, &world, "Sheep");
+
+    swing_at(&mut session, &world, "Basic_Stab", sheep, in_front());
+
+    assert_eq!(session.creature_health(sheep), Some(4), "it survived");
+
+    let drops = session.floor_drops();
+
+    assert_eq!(drops.len(), 1, "one pile of wool");
+
+    collect(&mut session, &world, drops[0].0);
+
+    assert_eq!(carried(&session), vec![("Wool".to_owned(), 1)]);
+}
+
+/// Killing it rolls the other table, which is where the meat is.
+#[test]
+fn killing_the_sheep_rolls_the_kill_table_instead() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sheep = creature_in_front(&mut session, &world, "Sheep");
+
+    // Seven damage against six hit points: dead in one, so no hit-loot is rolled.
+    swing_at(&mut session, &world, "Basic_Diagonal", sheep, in_front());
+
+    assert_eq!(session.creature_health(sheep), Some(0));
+
+    for (pickup, _) in session.floor_drops() {
+        collect(&mut session, &world, pickup);
+    }
+
+    let mut carrying = carried(&session);
+    carrying.sort();
+
+    assert_eq!(
+        carrying,
+        vec![("Animal_Meat".to_owned(), 1), ("Wool".to_owned(), 1)],
+        "the kill table, meat included",
+    );
+}
+
+/// Everything else gives up nothing until it dies.
+#[test]
+fn hitting_a_creature_with_no_hit_table_drops_nothing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let knight = creature_in_front(&mut session, &world, "Knight");
+
+    swing_at(&mut session, &world, "Basic_Stab", knight, in_front());
+
+    assert_eq!(session.creature_health(knight), Some(33), "hurt, not dead");
+    assert!(session.floor_drops().is_empty(), "knights do not shear");
+}
+
+/// An id that is not a pickup does nothing, and does not panic.
+#[test]
+fn collecting_something_that_is_not_a_drop_is_ignored() {
+    let world = world();
+    let mut session = playing(&world);
+
+    assert!(collect(&mut session, &world, 999_999).is_empty());
+}
+
+/// A creature the data gives no table drops nothing, and that is not an error.
+#[test]
+fn killing_something_with_no_loot_table_drops_nothing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // `SmallDinosaur` is killable and no loot table names it.
+    let dino = creature_in_front(&mut session, &world, "SmallDinosaur");
+
+    for _ in 0..3 {
+        swing_at(&mut session, &world, "Heavy_Chop", dino, in_front());
+    }
+
+    assert_eq!(session.creature_health(dino), Some(0), "it died");
+    assert!(session.floor_drops().is_empty(), "nothing dropped");
+}
+
+/// Loot is rolled once, on the blow that kills. Hitting the corpse again yields nothing.
+#[test]
+fn a_corpse_cannot_be_farmed() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let chicken = creature_in_front(&mut session, &world, "Chicken");
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    let after_the_kill = session.floor_drops().len();
+
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+    swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
+
+    assert_eq!(session.floor_drops().len(), after_the_kill, "no second helping");
+}
+
 #[test]
 fn one_swing_kills_a_sheep() {
     let world = world();
