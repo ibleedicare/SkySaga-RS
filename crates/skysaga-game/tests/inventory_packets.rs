@@ -277,11 +277,19 @@ fn binding_to_the_hotbar_sends_nothing_back() {
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Dirt")));
 }
 
+/// **The two packets number the squares differently.** Measured against the retail client:
+/// pressing "1" reports an active slot of 0 and "5" reports 4, so `SetActiveSlot` counts from
+/// zero; dragging into the fifth square reports a bind of 5, so `SlotChange` counts from one.
+///
+/// This test used to select slot 1 after binding slot 1 and expect the same square, which is
+/// what the handler assumed too. In game the client sends both for one action and the two
+/// disagreed, so the hand came up empty and every placement fell through to a dig.
 #[test]
 fn selecting_a_hotbar_square_changes_what_is_held() {
     let world = world();
     let mut session = playing(&world);
 
+    // Binds are one-based, so these are the first and second squares.
     for (slot, item) in [(1u32, "Dirt"), (2, "Stone")] {
         session.handle(
             ClientPacket::parse(&encode(|w| {
@@ -301,15 +309,26 @@ fn selecting_a_hotbar_square_changes_what_is_held() {
     // with a SetActiveSlot.
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Stone")));
 
+    // Selects are zero-based, so square 0 is the one "Dirt" was bound into by slot 1.
     let burst = session.handle(
         ClientPacket::parse(&encode(|w| {
-            RequestUiSettingsSetActiveSlot { slot: 1 }.encode(w)
+            RequestUiSettingsSetActiveSlot { slot: 0 }.encode(w)
         })),
         &world,
     );
 
     assert!(burst.is_empty(), "{burst:?}");
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Dirt")));
+
+    // And back to the second square, which the client would call slot 1.
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSetActiveSlot { slot: 1 }.encode(w)
+        })),
+        &world,
+    );
+
+    assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Stone")));
 }
 
 #[test]

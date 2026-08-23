@@ -1003,13 +1003,29 @@ impl Session {
             }
 
             (ClientPacket::RequestUiSettingsSlotChange(packet), _) => {
-                debug!(slot = packet.slot, resource = packet.resource, "hotbar bound");
+                // **This packet numbers the squares from one and `SetActiveSlot` numbers them
+                // from zero.** Measured against the retail client: the "1" key reports an
+                // active slot of 0 and the "5" key reports 4, while dragging an item into the
+                // fifth square reports a bind of 5. The client sends both for one action, a
+                // tenth of a millisecond apart, so keying the hotbar by the raw numbers files
+                // the item under 5 and then looks it up under 4.
+                //
+                // Everything downstream is kept in the zero-based numbering, because that is
+                // the one the player's `activeslot` parameter uses.
+                let square = packet.slot.saturating_sub(1);
 
-                self.hotbar.insert(packet.slot, packet.resource);
+                debug!(
+                    slot = packet.slot,
+                    square,
+                    resource = packet.resource,
+                    "hotbar bound",
+                );
+
+                self.hotbar.insert(square, packet.resource);
 
                 // A fresh bind is also what the player just selected: the client does not
                 // always follow one with a SetActiveSlot.
-                self.active_slot = packet.slot;
+                self.active_slot = square;
 
                 // Deliberately nothing back. `hotbarslotresources` (sync index 34) is kept by
                 // the client itself, and its encoding is not confirmed -- echoing a wrong one
@@ -1486,14 +1502,16 @@ impl Session {
         let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
 
         let Some((item, material)) = placing else {
-            return self.dig(packet.chunk, packet.voxel);
+            return self.dig(packet.chunk, packet.voxel, world);
         };
 
         // Taking from the stack also confirms there was one to take.
-        if !self.take_one(item) {
+        let taken = self.take_one(item);
+
+        if taken.is_empty() {
             debug!(item, "the hotbar names a block the player does not have");
 
-            return self.dig(packet.chunk, packet.voxel);
+            return self.dig(packet.chunk, packet.voxel, world);
         }
 
         // The new block goes into the empty voxel next to the face that was clicked, not into
@@ -1504,7 +1522,14 @@ impl Session {
 
         debug!(?packet.chunk, ?voxel, material, "place");
 
-        vec![Self::chunk_edit(packet.chunk, voxel, material)]
+        // The block, then the stack it came out of. Both are needed: the client draws the
+        // count it was last sent, so a placement that only reports the block leaves the
+        // player holding an inexhaustible stack.
+        let mut out = vec![Self::chunk_edit(packet.chunk, voxel, material)];
+
+        out.extend(self.apply(taken, world));
+
+        out
     }
 
     // --- the mailbox --------------------------------------------------------------------
@@ -1654,13 +1679,45 @@ impl Session {
         )
     }
 
-    /// One dig tick on a voxel. The block gives way once enough of them land.
+    /// What block stands at a voxel now: what the player has done to it, or the world as built.
+    ///
+    /// The session's own edits come first, so a block placed and then dug drops the thing that
+    /// was placed rather than the terrain that used to be underneath it.
+    fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> u8 {
+        self.voxel_edits
+            .get(&(chunk, voxel))
+            .copied()
+            .unwrap_or_else(|| world.material_at(chunk, voxel))
+    }
+
+    /// One dig tick on a voxel. The block gives way once enough of them land, and leaves
+    /// behind whatever it was made of.
     ///
     /// **The three crack stages the player sees are client-side.** It streams one packet per
     /// tick, every one identical, and the server counts them and decides. Breaking on the
     /// first would make every block give way three times too fast, which is the sort of
     /// difference that is invisible in a unit test and obvious in the game.
-    fn dig(&mut self, chunk: [u32; 3], voxel: [u32; 3]) -> Vec<Vec<u8>> {
+    ///
+    /// What it drops lands in the **middle of the hole**, not at the packet's `hit`.
+    ///
+    /// `hit` is tempting: it is already in position units, so it needs no scale chosen. But it
+    /// is where the tool *touched*, which is a point on the face of the block, so a drop placed
+    /// there hangs against the side of the hole or on top of it. In front of a client that
+    /// reads as an item floating at head height. The voxel's own centre is the position the
+    /// block occupied, and the half-voxel lift is the one creature loot already uses to keep a
+    /// pickup out of the ground.
+    fn dig(&mut self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> Vec<Vec<u8>> {
+        let material = self.material_at(chunk, voxel, world);
+
+        // Air, bedrock and water. The client raycasts to a solid block before it sends
+        // anything, so refusing here costs an honest dig nothing, and it is what stops a swing
+        // at the sky reporting a hole.
+        if !world.geodata.is_diggable(material) {
+            debug!(?chunk, ?voxel, material, "not diggable");
+
+            return Vec::new();
+        }
+
         let ticks = self.dig_damage.entry((chunk, voxel)).or_insert(0);
 
         *ticks += 1;
@@ -1676,9 +1733,28 @@ impl Session {
         self.voxel_edits
             .insert((chunk, voxel), PartialChunkEditsSync::AIR);
 
-        debug!(?chunk, ?voxel, "dug through");
+        // The hole first, then what fell out of it. The other order puts the item inside a
+        // block the client still believes is solid.
+        let mut out = vec![Self::chunk_edit(chunk, voxel, PartialChunkEditsSync::AIR)];
 
-        vec![Self::chunk_edit(chunk, voxel, PartialChunkEditsSync::AIR)]
+        match world.geodata.item_for_voxel(material) {
+            Some(item) => {
+                debug!(?chunk, ?voxel, material, %item, "dug through");
+
+                out.extend(self.drop_pickup(&item, 1, World::voxel_centre(chunk, voxel), world));
+            }
+
+            // A block with no item form. `Tree` is the one in this data: it breaks and yields
+            // nothing, which is the data's answer rather than a lookup failure.
+            None => debug!(
+                ?chunk,
+                ?voxel,
+                material,
+                "dug through, and it yields nothing"
+            ),
+        }
+
+        out
     }
 
     /// The item hash the player is holding, and the block it places, if it places one.
@@ -1692,8 +1768,16 @@ impl Session {
         Some((held, material))
     }
 
-    /// Take one item of `hash` out of the rucksack. False when there is none.
-    fn take_one(&mut self, hash: u32) -> bool {
+    /// Take one item of `hash` out of the rucksack, and say what the client must be told.
+    ///
+    /// **Empty means nothing was taken**, which is how a caller tells "the hotbar names an item
+    /// the player has run out of" from a successful take.
+    ///
+    /// The effects have to be returned rather than dropped. This used to answer `bool` and
+    /// throw them away, so the server counted a stack down while the client went on drawing
+    /// the number it was last sent: blocks looked infinite, and once the server reached zero a
+    /// placement quietly turned into a dig.
+    fn take_one(&mut self, hash: u32) -> Vec<Effect> {
         let Some(slot) = (0..self.inventory().len() as u32).find(|slot| {
             self.inventories
                 .slot(self.player_entity_id, *slot)
@@ -1701,10 +1785,10 @@ impl Session {
                 .and_then(|item| self.inventories.name(item))
                 == Some(hash)
         }) else {
-            return false;
+            return Vec::new();
         };
 
-        !self.inventories.destroy(self.player_entity_id, slot, 1).is_empty()
+        self.inventories.destroy(self.player_entity_id, slot, 1)
     }
 
     /// One `PartialChunkEditsSync` changing a single voxel.
@@ -1897,6 +1981,14 @@ impl Session {
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
     pub fn floor_drops(&self) -> Vec<(u32, u32)> {
         self.pickups.iter().map(|drop| (drop.id, drop.item)).collect()
+    }
+
+    /// Where a floor drop is lying, in position units of 1/64 of a voxel.
+    pub fn floor_drop_position(&self, pickup: u32) -> Option<[u32; 3]> {
+        self.pickups
+            .iter()
+            .find(|drop| drop.id == pickup)
+            .map(|drop| drop.position)
     }
 
     /// Packets addressed to the other connections, if any. Drains.
@@ -2280,6 +2372,7 @@ impl Session {
             id,
             item: stack,
             definition,
+            position: at,
         });
 
         out
@@ -2572,4 +2665,7 @@ struct FloorDrop {
     /// Kept so the pickup can be re-encoded without looking it up again.
     #[allow(dead_code)]
     definition: skysaga_world::EntityDefinition,
+
+    /// Where it is lying, in position units of 1/64 of a voxel.
+    position: [u32; 3],
 }
