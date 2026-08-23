@@ -6,8 +6,9 @@
 //!
 //! Search order:
 //!   1. `SKYSAGA_RAKNET_LIB`  — an explicit directory
-//!   2. `../.raknet/lib`      — the symlink the repo keeps to the nix store path
-//!   3. `../result/lib`       — a plain `nix build` result
+//!   2. `.raknet/lib`         — where `./scripts/build-raknet.sh` puts its output
+//!   3. `../.raknet/lib`      — the symlink the repo keeps to the nix store path
+//!   4. `../result/lib`       — a plain `nix build` result
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +25,11 @@ fn main() {
 
             let repo = workspace.parent().expect("repository root").to_path_buf();
 
-            vec![repo.join(".raknet/lib"), repo.join("result/lib")]
+            vec![
+                workspace.join(".raknet/lib"),
+                repo.join(".raknet/lib"),
+                repo.join("result/lib"),
+            ]
         });
 
     let found = candidates
