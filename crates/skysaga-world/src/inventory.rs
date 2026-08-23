@@ -185,6 +185,90 @@ impl Inventories {
     }
 
     /// The first free rucksack square, skipping what the player is wearing or holding.
+    /// Mint a stack that belongs to no inventory: an item lying on the floor.
+    ///
+    /// A floor drop is a real item entity from the moment it is created, which is what lets
+    /// [`Self::collect`] hand the client a slot pointing at an entity it already knows rather
+    /// than announcing a second one.
+    pub fn create_loose(&mut self, name: u32, count: u32) -> u32 {
+        self.create_stack(name, count)
+    }
+
+    /// Take a loose stack into `owner`'s rucksack.
+    ///
+    /// Merges into a matching stack that still has room before taking a fresh square, so
+    /// walking over three feathers reads as one pile growing rather than three squares
+    /// filling. That is what the client does with its own drops.
+    ///
+    /// Empty when there is nowhere to put it -- a full rucksack -- and the caller should leave
+    /// the pickup on the floor rather than destroying it.
+    pub fn collect(&mut self, owner: u32, entity: u32) -> Vec<Effect> {
+        let Some(stack) = self.items.get(&entity) else {
+            return Vec::new();
+        };
+
+        let (name, count) = (stack.slot_data.name, stack.slot_data.count);
+
+        let Some(name) = name else {
+            return Vec::new();
+        };
+
+        let limit = self.limits.get(name);
+
+        // A matching stack with room. Slots are scanned in order so the outcome does not
+        // depend on map iteration.
+        let mergeable = self.slots(owner).iter().copied().enumerate().find(|(_, held)| {
+            *held != 0
+                && self
+                    .items
+                    .get(held)
+                    .is_some_and(|other| other.slot_data.name == Some(name) && other.slot_data.count < limit)
+        });
+
+        if let Some((_, into)) = mergeable {
+            let room = limit - self.items[&into].slot_data.count;
+            let moved = count.min(room);
+
+            if let Some(target) = self.items.get_mut(&into) {
+                target.slot_data.count += moved;
+            }
+
+            let leftover = count - moved;
+
+            if leftover == 0 {
+                // The floor stack is gone entirely.
+                self.items.remove(&entity);
+
+                return vec![
+                    Effect::ItemChanged { entity: into },
+                    Effect::ItemRemoved { entity },
+                ];
+            }
+
+            if let Some(remaining) = self.items.get_mut(&entity) {
+                remaining.slot_data.count = leftover;
+            }
+
+            // Part of it moved; the rest stays on the floor for another trip.
+            return vec![
+                Effect::ItemChanged { entity: into },
+                Effect::ItemChanged { entity },
+            ];
+        }
+
+        let Some(slot) = self.first_free_rucksack_slot(owner) else {
+            return Vec::new();
+        };
+
+        let Some(slots) = self.slots.get_mut(&owner) else {
+            return Vec::new();
+        };
+
+        slots[slot as usize] = entity;
+
+        vec![Effect::SlotsChanged { owner }]
+    }
+
     pub fn first_free_rucksack_slot(&self, owner: u32) -> Option<u32> {
         self.slots
             .get(&owner)?
