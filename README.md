@@ -116,7 +116,7 @@ The account stays signed in; only the character is discarded, in memory and on d
 ## Tests
 
 ```bash
-cargo test --workspace          # 678 tests, no network, nothing to prepare
+cargo test --workspace          # 676 tests, no network, nothing to prepare
 ```
 
 The tests are the point of the rewrite, so a word on what they actually check.
@@ -225,7 +225,7 @@ one swing for the sheep, three for the knight. The mapping was checked against t
 **Killing something drops its loot.** A chicken leaves three feathers, a sheep meat and wool,
 the flame wolf ten pelts and a keystone component. Those come from `LootTables` and `LootLists`
 in the same data file: each entry rolls its `SpawnPercentage`, then picks one resource weighted
-by `Frequency`. 33 of the 43 killable entities have a table; the dinosaurs, `Monkey` and the
+by `Frequency`. 31 of the 40 killable entities have a table; the dinosaurs, `Monkey` and the
 test rigs have none, and that is the data's answer rather than a gap.
 
 Nothing in `entities.json` points a creature at its table — the link is the naming convention

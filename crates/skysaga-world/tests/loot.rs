@@ -10,7 +10,7 @@
 //! # The entity is not named in the table
 //!
 //! Nothing in `entities.json` points a creature at a loot table. The link is a naming
-//! convention, `NPC_<entity>_LootTable`, which covers 21 of the 43 killable entities; the rest
+//! convention, `NPC_<entity>_LootTable`, which covers 21 of the 40 killable entities; the rest
 //! either share a table under a different name (every wolf drops `NPC_Wolf_LootTable`) or have
 //! none at all, and having none is a real answer rather than a gap to paper over.
 //!
@@ -299,20 +299,18 @@ fn things_that_should_not_drop_loot_have_no_table() {
 
 /// Coverage across the bestiary, pinned so a regression is visible.
 ///
-/// 33 of the 43 killable entities drop something. The ten that do not are listed here rather
+/// 31 of the 40 killable entities drop something. The nine that do not are listed here rather
 /// than counted, because each is a decision:
 ///
 /// * four are players or test rigs, and should never drop loot;
 /// * `Spring_Trap` is a device;
-/// * the three dinosaurs, `Monkey` and `MineCritter` have no table in the data and no leftover
-///   table that obviously belongs to them. `Monkey` reuses the lizardman's *AI*, which is not
-///   a reason to hand it the lizardman's drops.
+/// * the three dinosaurs and `Monkey` have no table in the data and no leftover table that
+///   obviously belongs to them. `Monkey` reuses the lizardman's *AI*, which is not a reason to
+///   hand it the lizardman's drops.
 ///
-/// The counts moved from 31-of-40 when the missing `Creature_` prefix was retried, which made
-/// `Beetle` and `Villager` killable and reached their two tables. If a later build names
-/// tables for the rest, this test is where that shows up.
+/// If a later build names tables for those, this test is where that shows up.
 #[test]
-fn thirty_three_of_the_forty_three_killable_entities_drop_something() {
+fn thirty_one_of_the_forty_killable_entities_drop_something() {
     let (Some(geodata), Some(definitions)) = (
         geodata(),
         skysaga_world::EntityDefinitions::load(
@@ -343,7 +341,7 @@ fn thirty_three_of_the_forty_three_killable_entities_drop_something() {
 
     without.sort();
 
-    assert_eq!(with, 33);
+    assert_eq!(with, 31);
     assert_eq!(
         without,
         [
@@ -351,7 +349,6 @@ fn thirty_three_of_the_forty_three_killable_entities_drop_something() {
             "ArtTestPlayer",
             "LargeBipedalDinosaur",
             "LargeQuadrupedDinosaur",
-            "MineCritter",
             "Monkey",
             "Player",
             "SmallDinosaur",

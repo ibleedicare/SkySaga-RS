@@ -321,34 +321,16 @@ impl GeoData {
     /// The name comes from the entity's own `physicalproperties` parameter default -- see
     /// [`crate::EntityDefinition::physical_properties`].
     pub fn health_for(&self, physical_properties: &str) -> Option<u32> {
-        self.physical_record(physical_properties).map(|(health, _)| health)
+        self.physical
+            .get(&physical_properties.to_ascii_lowercase())
+            .map(|(health, _)| *health)
     }
 
     /// How far it can reach, in voxels.
     pub fn reach_for(&self, physical_properties: &str) -> Option<f32> {
-        self.physical_record(physical_properties).map(|(_, reach)| reach)
-    }
-
-    /// Look up a `PhysicalProperties` row, retrying once with the `Creature_` prefix.
-    ///
-    /// **Three entities in build 10414 drop that prefix and name a row that does not exist:**
-    /// `Beetle` says `chicken_standard`, `MineCritter` says `sheep_standard`, `Villager` says
-    /// `bandit_2_weak`. `Creature_Chicken_Standard`, `Creature_Sheep_Standard` and
-    /// `Creature_Bandit_2_Weak` are all real, the pattern holds for all three, and it holds for
-    /// nothing else in the file -- so this is a data-entry slip in the game's own files rather
-    /// than a second naming scheme.
-    ///
-    /// Without the retry those three have no health, which makes them unkillable, which makes
-    /// `NPC_Beetle_LootTable` and `NPC_Villager_LootTable` unreachable content.
-    ///
-    /// An exact match always wins first, so this can only ever add a row, never redirect one.
-    fn physical_record(&self, name: &str) -> Option<(u32, f32)> {
-        let name = name.to_ascii_lowercase();
-
         self.physical
-            .get(&name)
-            .or_else(|| self.physical.get(&format!("creature_{name}")))
-            .copied()
+            .get(&physical_properties.to_ascii_lowercase())
+            .map(|(_, reach)| *reach)
     }
 
     pub fn voxel_count(&self) -> usize {
