@@ -10,12 +10,27 @@
 
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
+/// Skip when the game's own data file is absent.
+///
+/// `Entities.json` belongs to the game and is not in this repository, so a checkout without it
+/// -- CI, most obviously -- must not go red over tests it cannot run. Every test below that
+/// reads a definition starts with this.
+macro_rules! needs_data {
+    () => {
+        if EntityDefinitions::load(default_entities_path()).is_err() {
+            return;
+        }
+    };
+}
+
 fn definitions() -> EntityDefinitions {
     EntityDefinitions::load(default_entities_path()).expect("Entities.json")
 }
 
 #[test]
 fn a_chest_occupies_one_cell() {
+    needs_data!();
+
     let definitions = definitions();
 
     let chest = definitions.get("Chest").expect("Chest is defined");
@@ -29,6 +44,8 @@ fn a_chest_occupies_one_cell() {
 
 #[test]
 fn an_entity_with_no_default_has_an_empty_list() {
+    needs_data!();
+
     // Most entities declare no voxel link at all. An empty list declines the parameter, which
     // is what the client expects for something that is not in the grid.
     let definitions = definitions();
@@ -40,6 +57,8 @@ fn an_entity_with_no_default_has_an_empty_list() {
 
 #[test]
 fn a_taller_entity_carries_every_cell_it_occupies() {
+    needs_data!();
+
     // Read from the data rather than hardcoded per entity, so anything with a stack works.
     let definitions = definitions();
 
