@@ -109,19 +109,6 @@ pub fn distance(from: [u32; 3], target: [u32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skysaga_world::geodata::EquippedAction;
-
-    /// A player's own reach, and the sword's basic swing.
-    fn basic() -> EquippedAction {
-        EquippedAction {
-            name: "Basic_Diagonal".to_owned(),
-            attack_strength: 7,
-            knockback: 7.0,
-            area_of_effect: "DiagonalSlash".to_owned(),
-            arc_degrees: 110.0,
-            range_factor: 1.0,
-        }
-    }
 
     fn player_at(position: [u32; 3]) -> Attacker {
         Attacker {

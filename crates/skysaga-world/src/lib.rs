@@ -8,13 +8,15 @@ pub mod definitions;
 pub mod entity;
 pub mod geodata;
 pub mod inventory;
+pub mod loot;
 pub mod terrain;
 
 pub use components::{
     CharacterCustomisationComponent, Component, CraftingDropSlotsComponent, Currency,
     FeatureUnlockComponent, HealthComponent, InventoryItemComponent,
     MailBoxComponent, MailItem, PlayerAspectsComponent, UseEntityComponent, WalletComponent, InteractionComponent, InventoryComponent, OwnerComponent,
-    PhysicsComponent, PickupComponent, PlayerNameComponent, TimeOfDayComponent,
+    PhysicsComponent, PickupComponent, PlayerNameComponent, ResourcePickupComponent,
+    TimeOfDayComponent,
     TransformComponent, VoxelLink, VoxelLinkComponent,
 };
 pub use entity::Entity;
