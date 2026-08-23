@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let definitions = EntityDefinitions::load(default_entities_path())
         .with_context(|| "loading entity definitions")?;
 
-    let world = World::home_island(&definitions, &WorldConfig::default());
+    let world = World::home_island(&definitions, &WorldConfig::from_env());
 
     info!(
         chunks = world.chunks.len(),

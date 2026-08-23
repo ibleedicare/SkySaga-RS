@@ -56,6 +56,58 @@ pub fn router(state: Arc<AppState>, config: WebConfig) -> Router {
         .merge(endpoints::trading::router())
         .fallback(endpoints::not_implemented)
         .with_state(api)
+        .layer(axum::middleware::from_fn(trace_bodies))
+}
+
+/// Log every request and response **body**, when `SKYSAGA_HTTP_TRACE` is set.
+///
+/// The client logs its HTTP headers but never the bodies, and a header says nothing about
+/// which field is wrong. Off unless asked for: this buffers whole bodies, which is fine for a
+/// capture and wrong for a server.
+async fn trace_bodies(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::body::{to_bytes, Body};
+
+    if std::env::var("SKYSAGA_HTTP_TRACE").is_err() {
+        return next.run(request).await;
+    }
+
+    // 1 MiB: enough for any JSON the client sends, and it keeps a photo upload from being
+    // buffered into the log.
+    const LIMIT: usize = 1024 * 1024;
+
+    let (parts, body) = request.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri.clone();
+
+    let bytes = to_bytes(body, LIMIT).await.unwrap_or_default();
+
+    tracing::info!(
+        %method, %uri, body = %String::from_utf8_lossy(&bytes), "http request",
+    );
+
+    let response = next
+        .run(axum::extract::Request::from_parts(parts, Body::from(bytes)))
+        .await;
+
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, LIMIT).await.unwrap_or_default();
+
+    let shown = if parts
+        .headers
+        .get("content-type")
+        .is_some_and(|value| value.as_bytes().starts_with(b"image/"))
+    {
+        format!("<{} bytes of image>", bytes.len())
+    } else {
+        String::from_utf8_lossy(&bytes).to_string()
+    };
+
+    tracing::info!(%uri, status = %parts.status, body = %shown, "http response");
+
+    axum::response::Response::from_parts(parts, Body::from(bytes))
 }
 
 /// The header the client identifies itself with.

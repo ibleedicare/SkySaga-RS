@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use skysaga_game::{GameServer, GameServerConfig, World, WorldConfig};
-use skysaga_world::{default_entities_path, EntityDefinitions, TerrainGenerator};
+use skysaga_world::{default_entities_path, EntityDefinitions};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -43,24 +43,7 @@ fn main() -> anyhow::Result<()> {
 
     info!(entities = definitions.len(), path = %path.display(), "loaded definitions");
 
-    let world_config = WorldConfig {
-        owner_name: std::env::var("SKYSAGA_PLAYER_NAME").unwrap_or_else(|_| "Adventurer".to_owned()),
-        spawn_clearance: env_parse("SKYSAGA_SPAWN_CLEARANCE", 25),
-        adventure: std::env::var("SKYSAGA_ADVENTURE")
-            .unwrap_or_else(|_| "Home_Island_Adventure".to_owned()),
-        world_type: env_parse("SKYSAGA_WORLD_TYPE", 1),
-        biome: std::env::var("SKYSAGA_BIOME").unwrap_or_else(|_| "Desert".to_owned()),
-        time_of_day: env_parse("SKYSAGA_TIME_OF_DAY", 65536 / 2),
-        fixed_time_of_day: std::env::var("SKYSAGA_TIME_OF_DAY").as_deref() != Ok("cycle"),
-        terrain: TerrainGenerator {
-            seed: env_parse("SKYSAGA_WORLD_SEED", TerrainGenerator::default().seed),
-            size_chunks: env_parse(
-                "SKYSAGA_WORLD_CHUNKS",
-                TerrainGenerator::default().size_chunks,
-            ),
-        },
-        ..Default::default()
-    };
+    let world_config = WorldConfig::from_env();
 
     let world = World::home_island(&definitions, &world_config);
 
@@ -85,9 +68,3 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn env_parse<T: std::str::FromStr>(name: &str, fallback: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
-}

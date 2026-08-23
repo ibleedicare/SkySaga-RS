@@ -266,7 +266,19 @@ impl World {
 pub struct WorldConfig {
     pub owner_guid: String,
     pub owner_name: String,
+
+    /// The biome **name** `ServerInfo` carries.
+    ///
+    /// Cosmetic: the client has no cross-reference to this string at all. It is sent because
+    /// the C# sends it and the capture has it, not because anything reads it.
     pub biome: String,
+
+    /// The biome **type** `MapDefinition` carries, which is the one that matters.
+    ///
+    /// The client resolves the world, its terrain and its ambience from this hash. The C#
+    /// hardcodes `Sky_Island` here whatever `SKYSAGA_BIOME` says, and the captured packet
+    /// agrees, so it is kept separate from [`Self::biome`] rather than derived from it.
+    pub map_biome: String,
     pub chat_host: String,
     pub chat_port: u16,
 
@@ -315,6 +327,40 @@ pub struct WorldConfig {
     pub game_port: u16,
 }
 
+impl WorldConfig {
+    /// Read the world's settings from the environment.
+    ///
+    /// **Both binaries must use this.** `skysaga-server` built its world from
+    /// `WorldConfig::default()` and so ignored every one of these variables, while the
+    /// standalone `skysaga-game` read them: setting `SKYSAGA_BIOME` or `SKYSAGA_FLAT_WORLD`
+    /// against the server anyone actually runs did nothing at all, silently.
+    pub fn from_env() -> Self {
+        fn parse<T: std::str::FromStr>(name: &str, fallback: T) -> T {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(fallback)
+        }
+
+        let defaults = Self::default();
+
+        Self {
+            owner_name: std::env::var("SKYSAGA_PLAYER_NAME").unwrap_or(defaults.owner_name),
+            adventure: std::env::var("SKYSAGA_ADVENTURE").unwrap_or(defaults.adventure),
+            biome: std::env::var("SKYSAGA_BIOME").unwrap_or(defaults.biome),
+            spawn_clearance: parse("SKYSAGA_SPAWN_CLEARANCE", defaults.spawn_clearance),
+            world_type: parse("SKYSAGA_WORLD_TYPE", defaults.world_type),
+            time_of_day: parse("SKYSAGA_TIME_OF_DAY", defaults.time_of_day),
+            fixed_time_of_day: std::env::var("SKYSAGA_TIME_OF_DAY").as_deref() != Ok("cycle"),
+            terrain: TerrainGenerator {
+                seed: parse("SKYSAGA_WORLD_SEED", defaults.terrain.seed),
+                size_chunks: parse("SKYSAGA_WORLD_CHUNKS", defaults.terrain.size_chunks),
+            },
+            ..defaults
+        }
+    }
+}
+
 impl Default for WorldConfig {
     fn default() -> Self {
         Self {
@@ -322,6 +368,7 @@ impl Default for WorldConfig {
             // The C#'s defaults, so a comparison against its capture is like for like.
             owner_name: "Adventurer".to_owned(),
             biome: "Desert".to_owned(),
+            map_biome: "Sky_Island".to_owned(),
             chat_host: "127.0.0.1".to_owned(),
             chat_port: 4444,
             chat_channels: "0:global".to_owned(),
@@ -518,6 +565,21 @@ impl World {
         let player_index = entities.len() - 1;
         let player_template = Entity::new(player_entity_id, player_components(config));
 
+        // The biome the client resolves the world from has to be the one holding this
+        // adventure; falling back to the configured name only matters for data that has no
+        // such biome, which the real tables always do.
+        let map_biome = geodata
+            .biome_for_adventure(&config.adventure)
+            .unwrap_or(&config.map_biome)
+            .to_owned();
+
+        // The adventure carries its own kind, and the flags have to follow it: telling the
+        // client a quest adventure is a home world makes it draw the home-island badge for a
+        // world with no home title, which renders as a bare `%s` and no banner at all.
+        let world_type = geodata
+            .world_type_for_adventure(&config.adventure)
+            .unwrap_or(config.world_type);
+
         Self {
             server_info: ServerInfo {
                 owner_guid: config.owner_guid.clone(),
@@ -527,15 +589,28 @@ impl World {
                 map_header_seed: 0,
                 // Only a home world may be edited. Items with IsLockedToHomeIsland refuse to
                 // be placed anywhere else.
-                is_home_world: config.world_type == 1,
-                is_my_world: config.world_type == 1,
+                is_home_world: world_type == 1,
+                is_my_world: world_type == 1,
                 chat_host: config.chat_host.clone(),
                 chat_port: config.chat_port,
             },
 
             map: MapDefinition {
                 size_chunks: [config.terrain.size_chunks as u32; 3],
-                biome: Some(skysaga_core::name_hash(&config.biome)),
+                // **Not `config.biome`, and not a constant either.** This is the
+                // `BiomeType` the client resolves the world from, and it must be *the biome
+                // that contains the adventure* named in `ServerInfo`: the client looks an
+                // adventure up inside a biome, not globally.
+                //
+                // `Home_Island_Adventure` belongs to `Sky_Island`. Naming `Desert` here is
+                // not an invalid biome -- it is a real one -- but it contains no adventures at
+                // all, so the lookup failed and the client abandoned the whole resolve. The
+                // island banner then drew in the wrong colour with an unresolvable title.
+                //
+                // The C# hardcodes `Sky_Island`, which is correct only because it always
+                // serves that one adventure. Deriving it keeps the two fields consistent for
+                // any adventure.
+                biome: Some(skysaga_core::name_hash(&map_biome)),
                 game_mode: 1,
             },
 
