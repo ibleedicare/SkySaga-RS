@@ -1003,13 +1003,29 @@ impl Session {
             }
 
             (ClientPacket::RequestUiSettingsSlotChange(packet), _) => {
-                debug!(slot = packet.slot, resource = packet.resource, "hotbar bound");
+                // **This packet numbers the squares from one and `SetActiveSlot` numbers them
+                // from zero.** Measured against the retail client: the "1" key reports an
+                // active slot of 0 and the "5" key reports 4, while dragging an item into the
+                // fifth square reports a bind of 5. The client sends both for one action, a
+                // tenth of a millisecond apart, so keying the hotbar by the raw numbers files
+                // the item under 5 and then looks it up under 4.
+                //
+                // Everything downstream is kept in the zero-based numbering, because that is
+                // the one the player's `activeslot` parameter uses.
+                let square = packet.slot.saturating_sub(1);
 
-                self.hotbar.insert(packet.slot, packet.resource);
+                debug!(
+                    slot = packet.slot,
+                    square,
+                    resource = packet.resource,
+                    "hotbar bound",
+                );
+
+                self.hotbar.insert(square, packet.resource);
 
                 // A fresh bind is also what the player just selected: the client does not
                 // always follow one with a SetActiveSlot.
-                self.active_slot = packet.slot;
+                self.active_slot = square;
 
                 // Deliberately nothing back. `hotbarslotresources` (sync index 34) is kept by
                 // the client itself, and its encoding is not confirmed -- echoing a wrong one

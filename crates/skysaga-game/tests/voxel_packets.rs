@@ -11,7 +11,9 @@
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
-use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
+use skysaga_proto::packets::inventory::{
+    RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
+};
 use skysaga_proto::packets::voxel::{ActionLocation, BlockSide, PerformVoxelActions};
 use skysaga_proto::packets::{EntityRemoved, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
@@ -48,6 +50,32 @@ fn hold(session: &mut Session, world: &World, item: &str) {
         ClientPacket::parse(&encode(|w| {
             RequestUiSettingsSlotChange {
                 slot: 1,
+                resource: skysaga_core::name_hash(item),
+                unknown: 0,
+                item_uuid: String::new(),
+            }
+            .encode(w)
+        })),
+        world,
+    );
+}
+
+/// Select a hotbar square the way the "1" to "8" keys do: **numbered from zero**.
+fn select(session: &mut Session, world: &World, square: u32) {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSetActiveSlot { slot: square }.encode(w)
+        })),
+        world,
+    );
+}
+
+/// Bind an item into a hotbar square the way a drag does: **numbered from one**.
+fn bind(session: &mut Session, world: &World, square: u32, item: &str) {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSlotChange {
+                slot: square,
                 resource: skysaga_core::name_hash(item),
                 unknown: 0,
                 item_uuid: String::new(),
@@ -616,6 +644,55 @@ fn placing_the_last_block_removes_the_stack_and_clears_the_square() {
         session.inventory().iter().all(|slot| *slot != item),
         "the slot still holds it"
     );
+}
+
+/// **The two hotbar packets number the squares differently, and the server must not mix them.**
+///
+/// Measured against the retail client: pressing the "1" key reports `SetActiveSlot` slot 0 and
+/// the "5" key reports slot 4, so that packet counts from zero. Dragging an item into the fifth
+/// square reports `SlotChange` slot 5, so that one counts from one. The client sends both, a
+/// tenth of a millisecond apart, for a single action.
+///
+/// Keyed by the raw numbers, the bind lands under 5 and the select immediately points the hand
+/// at 4, which is empty. Nothing is held, so the placement falls through to the dig branch: in
+/// game the block is never placed, the stack is never spent, and the player swings a pickaxe at
+/// the ground instead of building on it.
+#[test]
+fn a_bind_and_the_select_that_follows_it_mean_the_same_square() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let item = session.give("Dirt", 10).unwrap();
+
+    // Exactly what the client sent, in the order it sent it.
+    bind(&mut session, &world, 5, "Dirt");
+    select(&mut session, &world, 4);
+
+    let burst = swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
+
+    assert_eq!(
+        edits(&burst),
+        vec![(0, [4, 21, 4])],
+        "it dug instead of placing, so the hand was empty",
+    );
+
+    assert_eq!(session.inventories().count(item), Some(9), "the stack was not spent");
+}
+
+/// And selecting a square nothing is bound to digs, which is the same packet's other job.
+#[test]
+fn selecting_an_empty_square_digs() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Dirt", 10).unwrap();
+
+    bind(&mut session, &world, 5, "Dirt");
+    select(&mut session, &world, 0);
+
+    let burst = dig_through(&mut session, &world, SAND);
+
+    assert_eq!(edits(&burst), vec![(255, SAND)], "an empty hand should dig");
 }
 
 /// The block still gets placed. The sync is additional, not instead.
