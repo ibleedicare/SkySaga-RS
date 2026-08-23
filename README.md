@@ -1,29 +1,31 @@
 # SkySaga server emulator (Rust)
 
-A server emulator for **SkySaga: Infinite Isles**, a voxel MMO that was cancelled in 2017 and
+A server emulator for SkySaga: Infinite Isles, a voxel MMO that was cancelled in 2017 and
 never released. The game's servers are gone; this is a reimplementation of them, reverse
 engineered from the client, so the game can be played again.
 
-**Status: a real client logs in, creates a character, and plays.** Verified end to end against
-retail build 10414 on 2026-08-21: account login, character creation with appearance and name,
+**A real client logs in, creates a character, and plays.** Verified end to end against retail
+build 10414 on 2026-08-21: account login, character creation with appearance and name,
 terrain, entities, and world entry, all served by this code with no C# server running.
 
-It is a rewrite of an earlier C# emulator, which is kept as a reference implementation and as
-a test oracle (see [Tests](#tests)).
+It is a rewrite of an earlier C# emulator, which remains the reference implementation and the
+test oracle (see [Tests](#tests)).
 
 ## Before you clone
 
-**This repository does not build on its own.** It is one directory inside a larger working
-tree, and it needs two things from outside itself:
+This repository builds and runs on its own, given a copy of the game. Two things are not in
+it, and a command produces each of them rather than a download:
 
-| Needed | Why | Where it comes from |
+| Needed | Why | How to get it |
 |---|---|---|
-| `Entities.json` | every entity's components and sync indices; the world cannot be built without it | the C# emulator's `Data/` directory; point `SKYSAGA_DATA_DIR` at a copy |
-| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | built from SLikeNet source: `nix build .#raknet` in the parent tree, or set `SKYSAGA_RAKNET_LIB` |
+| `entities.json`, `geodata.json` | every entity's components and sync indices, and the block and loot tables; the world cannot be built without them | `cargo run -p skysaga-datapc -- <client-dir> data/` unpacks them from the client's own `Data/data.pc` |
+| `libRakNet.so` | the game protocol is RakNet/SLikeNet; the client speaks nothing else | `./scripts/build-raknet.sh` compiles it from SLikeNet at a pinned revision |
 
-Neither is redistributable here. `Entities.json` is the game's own data, and the RakNet build
-is a native library, not source. `cargo build` fails at the `raknet-sys` build script if it
-cannot find the library, and the server exits at startup if it cannot find `Entities.json`.
+This repository ships neither. The data files belong to the game, and passing them on is not
+this project's to do. See [data/README.md](data/README.md). The RakNet library is a native
+binary, and building it from source beats carrying one.
+
+[Docker](#docker) does both steps for you, and needs no Rust toolchain either.
 
 You also need the game client itself, which is not public. This is emulator source, not a way
 to obtain the game.
@@ -37,6 +39,7 @@ crates/
   skysaga-store/    persistence: the Store trait, and SQLite
   skysaga-proto/    packet wire formats and the RakNet BitStream codec    (pure)
   skysaga-world/    entity definitions, components, terrain generation    (pure)
+  skysaga-datapc/   unpacking the client's Data/data.pc                   (pure)
   skysaga-auth/     Smilegate login                          TCP  :10106
   skysaga-web/      account / characters / conductor / social / photos
                                                              HTTP :5164
@@ -49,22 +52,61 @@ crates/
   raknet-sys/       …the SLikeNet C API
 ```
 
-The four `(pure)` crates do no I/O at all, which is why most of the test suite needs neither a
+The five `(pure)` crates do no I/O at all, which is why most of the test suite needs neither a
 socket nor a running server. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules and
 the reasoning behind them.
 
 ## Running it
 
 ```bash
+./scripts/build-raknet.sh          # once: compiles libRakNet.so into .raknet/lib
 cargo run --release -p skysaga-server
 ```
 
 That one process serves everything the client needs. Then launch the client pointed at
-`127.0.0.1`; any non-empty account name is accepted by default.
+`127.0.0.1`; the server accepts any non-empty account name by default.
 
 There is also a `skysaga-game` binary that runs *only* the game server, for working on the
-world without the web stack. Note that the world-shaping variables below are read by that
-binary alone. `skysaga-server` builds its world from the defaults and ignores them.
+world without the web stack. Only that binary reads the world-shaping variables below.
+`skysaga-server` builds its world from the defaults and ignores them.
+
+### Docker
+
+For playing rather than developing, the container wants no Rust, no compiler and no nix, only
+your own copy of the game:
+
+```bash
+SKYSAGA_CLIENT_DIR="/path/to/SkySaga Infinite Isles/Client" \
+  docker compose run --rm extract      # once: writes ./data from the client's data.pc
+docker compose up --build
+```
+
+The `extract` service is the same image running `skysaga-extract-data` instead of the server,
+and it mounts the client read-only. It runs as `${SKYSAGA_UID:-1000}:${SKYSAGA_GID:-1000}` so
+the files it writes belong to you. Pass `SKYSAGA_UID=$(id -u) SKYSAGA_GID=$(id -g)` if your
+account is not 1000.
+
+The first build takes several minutes, most of it compiling SLikeNet. After that Docker caches
+the `libRakNet.so` layer and rebuilds only changed Rust source. The result is a distroless
+image of about 50 MB holding the binary, the library and nothing else. No shell, no package
+manager, and it runs as an unprivileged user.
+
+Compose publishes the ports unchanged (`5164`, `10106`, `4444` TCP and `42069` UDP), so the
+client still connects to `127.0.0.1` with no extra arguments. Accounts, characters and photos
+live in a named volume and survive `docker compose down`; `docker compose down -v` erases them.
+
+Configuration is the same set of variables, read from a `.env` file beside the compose file
+if there is one:
+
+```bash
+SKYSAGA_PUBLIC_IP=192.168.1.20      # playing from another machine on the LAN
+SKYSAGA_ACCOUNTS=alice:secret       # restrict logins
+RUST_LOG=skysaga_web=debug
+SKYSAGA_DATA_DIR=../server/Data     # if the data lives somewhere other than ./data
+```
+
+`SKYSAGA_WEB_PORT` and friends move the *host* side of the mapping; inside the container the
+ports never change.
 
 ### Configuration
 
@@ -78,9 +120,9 @@ Read by `skysaga-server`:
 | `SKYSAGA_AUTH_PORT` | `10106` | |
 | `SKYSAGA_GAME_PORT` | `42069` | |
 | `SKYSAGA_CHAT_PORT` | `4444` | the IRC server every chat message goes over |
-| `SKYSAGA_DATA_DIR` | *(a checkout of the upstream C# tree)* | directory holding `Entities.json` |
+| `SKYSAGA_DATA_DIR` | *(a checkout of the upstream C# tree)* | directory holding `entities.json` and `geodata.json` |
 | `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
-| `SKYSAGA_RAKNET_LIB` | *(`../.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
+| `SKYSAGA_RAKNET_LIB` | *(`.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
 
 Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORLD_TYPE`,
@@ -89,17 +131,17 @@ Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORL
 
 ### Persistence
 
-Accounts, characters and photos are stored in SQLite and survive a restart. The database is
-created on first run; there is nothing to set up.
+SQLite holds accounts, characters and photos, and they survive a restart. The server creates
+the database on first run; there is nothing to set up.
 
-State is held in memory while the server runs and written down as it changes, so nothing is
-on a request path. That means a write is durable a moment after the change rather than at the
-instant of it, and a crash can lose the last few seconds. Ordering is preserved, so a delete
-never loses a race with the create before it.
+The server keeps state in memory while it runs and writes it down as it changes, so nothing
+sits on a request path. A write is durable a moment after the change rather than at the
+instant of it, and a crash can lose the last few seconds. Ordering holds, so a delete never
+loses a race with the create before it.
 
-`skysaga-store` is built around a `Store` trait, with SQLite implemented today. PostgreSQL is
-adding one file: implement the trait, and the existing tests are the specification, because
-they are written against the trait rather than against SQLite.
+`skysaga-store` is built around a `Store` trait, with SQLite implemented today. Adding
+PostgreSQL means writing one more file. The existing tests are the specification, because they
+run against the trait rather than against SQLite.
 
 ### Starting character creation again
 
@@ -111,7 +153,7 @@ which looks exactly like a broken creator when nothing is wrong. To go through i
 curl -X POST 'http://127.0.0.1:5164/debug/reset-character'
 ```
 
-The account stays signed in; only the character is discarded, in memory and on disk.
+The account stays signed in; the reset discards only the character, in memory and on disk.
 
 ## Tests
 
@@ -125,8 +167,8 @@ The tests are the point of the rewrite, so a word on what they actually check.
 protocol without rendering anything, so "does the server actually answer that packet" is a
 test that runs in a second rather than a Wine client and a human looking at a screen. The
 `parity_*` files use it: they start this server in-process, play a scenario, and assert what
-came back. That is the layer where the inventory packets were failing — they decoded fine and
-were then dropped, which from a player's side is a UI that freezes rather than an error.
+came back. That is the layer where the inventory packets were failing. They decoded fine and
+then went nowhere, which from a player's side is a UI that freezes rather than an error.
 
 **Those same scenarios can be replayed against the running C# server.** Start it beside this
 one and point the tests at it:
@@ -140,21 +182,20 @@ SKYSAGA_ORACLE_GAME=127.0.0.1:43069 \
 ```
 
 Without those variables the oracle tests **skip** rather than fail, so `cargo test --workspace`
-stays runnable with nothing prepared. Two behavioural differences were found this way rather
-than by reading the C#, and both are now asserted on each side: it echoes a mover its own
-position, and its idea of which way a player faces is always approximately zero.
+stays runnable with nothing prepared. This turned up two behavioural differences that reading
+the C# had not, and tests now assert both on each side: it echoes a mover its own position,
+and its idea of which way a player faces is always approximately zero.
 
 **The C# server is the oracle, not this code's own opinion.** The fixtures under
-`crates/*/tests/` were captured by running the real C# servers and recording what they put on
-the wire, including a full RakNet handshake replayed byte for byte. A test passes when this
-server's output matches *the C#'s*, not when it matches what the author believed the format
-to be.
+`crates/*/tests/` come from running the real C# servers and recording what they put on the
+wire, including a full RakNet handshake replayed byte for byte. A test passes when this
+server's output matches *the C#'s*, not when it matches what the author believed the format to
+be.
 
-That distinction has caught real bugs, including one that would otherwise have been invisible:
-a golden-vector generator asked the C# for the wrong operation, so the C# obligingly
-reproduced the mistake and every test passed. It was caught by decoding a capture from the
-live client, where big-endian ids resolved to real entity names and little-endian ones
-resolved to nothing.
+That distinction has caught real bugs, including one that would otherwise have been invisible.
+A golden-vector generator asked the C# for the wrong operation, so the C# obligingly reproduced
+the mistake and every test passed. Decoding a capture from the live client caught it, where
+big-endian ids resolved to real entity names and little-endian ones resolved to nothing.
 
 **Where this server deliberately differs from the C#, a test asserts the C#'s behaviour too**,
 so the divergence stays deliberate. Two examples: the C# places a tree at the origin because
@@ -181,8 +222,8 @@ Defects found while reading the original, fixed here rather than reproduced:
   report it as unfinished, looping it back into the creator.
 - **One packet per 30 ms tick**, which capped the whole server at ~33 packets a second and was
   the documented cause of its interaction lag. This drains the queue.
-- **Character appearance never replicated.** `Player` sync index 19 was silently absent, so
-  every character rendered with the client's built-in defaults no matter what was chosen in
+- **Character appearance never replicated.** `Player` sync index 19 was absent, so every
+  character rendered with the client's built-in defaults no matter what the player chose in
   the creator.
 
 ## Combat
@@ -197,12 +238,12 @@ Swinging at a creature hurts it, killing it removes it, and dying raises the dea
 
 Equip the sword into a hand from the rucksack, walk up to what you spawned, and swing.
 
-**A hit is two packets.** `EquippedItemUsed` says *what* is being swung, naming a GeoData
+**A hit is two packets.** `EquippedItemUsed` says *what* the player swung, naming a GeoData
 action by CRC; the client's own hit detection then sends `PerformEntityActions` naming *what it
 struck*. They share only the equip-slot id, so the server holds the action per slot to join
 them. It then decides what the blow is worth, and whether the named target is close enough to
-believe: distance only, since the client knows which way it swung and the yaw field's units are
-unproven.
+believe. It goes on distance alone, since the client knows which way it swung and the yaw
+field's units are unproven.
 
 That correction cost a working afternoon. `combat-and-health.md` said the client sends no hit
 packet at all, generalising from captures where nothing was ever struck; the first version of
@@ -217,21 +258,21 @@ The numbers are the game's own, not invented:
 | the attacker's reach | `Player.physicalproperties` → `PhysicalProperties` → `Reaches[]` |
 | a creature's health | its own `physicalproperties` → `Durabilities[].Health` |
 
-So `Basic_Diagonal` does 7 points, `Heavy_Chop` does 14, a sheep has 6 and a knight has 35:
-one swing for the sheep, three for the knight. The mapping was checked against ten real
-`EquippedItemUsed` captures whose CRCs all resolve to real action names
+So `Basic_Diagonal` does 7 points, `Heavy_Chop` does 14, a sheep has 6 and a knight has 35.
+That is one swing for the sheep, three for the knight. Ten real `EquippedItemUsed` captures
+check the mapping, and their CRCs all resolve to real action names
 (`skysaga-proto/tests/combat.rs`).
 
 **Killing something drops its loot.** A chicken leaves three feathers, a sheep meat and wool,
 the flame wolf ten pelts and a keystone component. Those come from `LootTables` and `LootLists`
-in the same data file: each entry rolls its `SpawnPercentage`, then picks one resource weighted
+in the same data file. Each entry rolls its `SpawnPercentage`, then picks one resource weighted
 by `Frequency`. 31 of the 40 killable entities have a table; the dinosaurs, `Monkey` and the
 test rigs have none, and that is the data's answer rather than a gap.
 
-Nothing in `entities.json` points a creature at its table — the link is the naming convention
+Nothing in `entities.json` points a creature at its table. The link is the naming convention
 `NPC_<entity>_LootTable`, with a short alias list for the ones that share (every wolf drops
-`NPC_Wolf_LootTable`). Do not go looking at `inventoryloadout`: every creature declares one and
-**not one of those names exists in this build's data**.
+`NPC_Wolf_LootTable`). Do not go looking at `inventoryloadout`. Every creature declares one,
+and **not one of those names exists in this build's data**.
 
 ```bash
 cargo run -p skysaga-world --example loot-coverage   # what each creature drops
@@ -247,10 +288,10 @@ Two things are worth knowing before reading the code:
   permanently. This one answers it.
 
 Not modelled: enemy AI (nothing moves or fights back), stamina, blocking, parrying, dodge
-immunity, knockback, and the weapon's own contribution to damage: the formula combining a
-weapon's `AttackStrength` with its action's was never recovered from the client, so the
-action's is used alone rather than guessed at. All of those are changes to
-`skysaga-game/src/combat.rs` and to nothing on the wire.
+immunity, knockback, and the weapon's own contribution to damage. The client never gave up the
+formula combining a weapon's `AttackStrength` with its action's, so the code uses the action's
+alone rather than guessing. All of those are changes to `skysaga-game/src/combat.rs` and to
+nothing on the wire.
 
 Reversing notes for all of this live in the parent working tree rather than here, as
 `documentations/combat-and-health.md` and `documentations/enemies-and-ai.md`.
@@ -258,21 +299,21 @@ Reversing notes for all of this live in the parent working tree rather than here
 ## Known gaps
 
 - **The friends graph is not interactive.** Character search finds a character and the
-  response *shapes* are all implemented, being the part that is easy to get wrong, but adding,
-  accepting and blocking are acknowledged rather than recorded.
+  response *shapes* are all implemented, being the part that is easy to get wrong, but the
+  server acknowledges adding, accepting and blocking rather than recording them.
 - **No HTTPS.** The 2017 builds (Alpha V10 b36731) need it; retail 10414, which this was
   verified against, is plain HTTP.
 - **Buying from the trading post is not implemented.** Browsing works: the catalogue and the
   search both answer. A purchase is a *teleport* to the seller's home island rather than an
   item transfer, so it belongs to the world-transfer work rather than to the trading routes.
-- **Only a chest is open-able, and each connection has its own view of it.** The crafting
-  stations need their own handlers; and two players looking into one chest see two different
-  sets of contents, because the container store is per session rather than shared. Voxel edits
-  are per session for the same reason: a block one player places is not in another's world.
+- **Only a chest opens, and each connection has its own view of it.** The crafting stations
+  need their own handlers; and two players looking into one chest see two different sets of
+  contents, because the container store is per session rather than shared. Voxel edits are per
+  session for the same reason: a block one player places is not in another's world.
 - **Nothing fights back.** Creatures have health and can be killed, but there is no AI: they
   stand where they were spawned. The trait tables the game ships (`AIAwarenessTraits`,
-  `AIPersistenceTraits`, the relationship tables) are documented and unread; the client runs
-  no AI either, so all of it is server work that has not been done.
+  `AIPersistenceTraits`, the relationship tables) are documented and nothing reads them; the
+  client runs no AI either, so all of it is server work that has not been done.
 - **Whispers are client-side only.** The chat server drops anything not addressed to a `#`
   channel, so `/tell` renders locally and reaches nobody.
 
@@ -280,25 +321,24 @@ Reversing notes for all of this live in the parent working tree rather than here
 
 MIT, see [LICENSE](LICENSE).
 
-This crate tree is original code, but it is a **rewrite of the C# emulator by EDITz**,
+This crate tree is original code, but it is a rewrite of the C# emulator by EDITz,
 [EDITzDev/SkySaga](https://github.com/EDITzDev/SkySaga), which is both its reference
-implementation and the oracle half the test suite is written against. It is therefore treated
-as a derivative work of that project and carries its MIT copyright notice, as the licence
-requires.
+implementation and the oracle half the test suite runs against. It therefore counts as a
+derivative work of that project and carries its MIT copyright notice, as the licence requires.
 
 The licence covers this source and nothing else: not the game client, and not the data files
 this server reads. [LICENSE](LICENSE) states that in full.
 
 ## Contributing
 
-The layout is chosen so that adding something is adding a file:
+Adding something should mean adding one file:
 
 - **An HTTP endpoint** → one `async fn` plus one `.route()` line in that module's `router()`.
 - **A packet** → one struct with an `ID` and an `encode`/`decode` in
   `skysaga-proto/src/packets/`, one variant on `ClientPacket`, one arm in the dispatch match.
 - **A component** → one struct, one `Component` variant, one arm each in `sync` and `name`.
   Both matches are exhaustive, so a missing arm is a compile error rather than a parameter
-  that quietly stops replicating. That is exactly how the C# lost the appearance component.
+  that quietly stops replicating. That is how the C# lost the appearance component.
 
 Write the test first. Where behaviour has to match the client, capture what the client or the
 C# actually does rather than asserting what you think it does; two of the longest debugging
