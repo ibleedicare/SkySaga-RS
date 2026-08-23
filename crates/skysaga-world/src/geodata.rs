@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::inventory::StackLimits;
+use crate::loot::{Loot, RawLootList, RawLootTable};
+pub use crate::loot::Roll;
 
 /// Where `geodata.json` lives by default.
 ///
@@ -133,6 +135,9 @@ pub struct GeoData {
     /// Lower-cased `PhysicalProperties` name to `(health, reach)`, both already resolved
     /// through `Durabilities` and `Reaches`.
     physical: HashMap<String, (u32, f32)>,
+
+    /// `LootTables` and `LootLists`: what a creature leaves behind.
+    loot: Loot,
 }
 
 impl GeoData {
@@ -272,7 +277,28 @@ impl GeoData {
             stack_overrides,
             actions,
             physical,
+            loot: Loot::from_file(file.loot_tables, file.loot_lists),
         })
+    }
+
+    /// The loot tables, for rolling a drop directly.
+    pub fn loot(&self) -> &Loot {
+        &self.loot
+    }
+
+    /// The table `entity` drops, by name, or `None` if it drops nothing.
+    pub fn loot_table_name(&self, entity: &str) -> Option<&str> {
+        self.loot.table_name_for(entity)
+    }
+
+    /// Roll `entity`'s loot into `(resource, count)` drops.
+    pub fn loot_for(&self, entity: &str, roll: &mut impl Roll) -> Vec<(String, u32)> {
+        self.loot.roll_for(entity, roll)
+    }
+
+    /// Every entity name that has a loot table.
+    pub fn entities_with_loot(&self) -> Vec<String> {
+        self.loot.entities_with_loot()
     }
 
     /// The swing a CRC names, or `None` for a hash from a build this table does not describe.
@@ -382,6 +408,12 @@ struct File {
 
     #[serde(rename = "Reaches", default)]
     reaches: Vec<RawReachEntry>,
+
+    #[serde(rename = "LootTables", default)]
+    loot_tables: Vec<RawLootTable>,
+
+    #[serde(rename = "LootLists", default)]
+    loot_lists: Vec<RawLootList>,
 }
 
 /// Every combat table has the same shape: a `Name` beside a single nested object.
