@@ -673,14 +673,32 @@ pub fn health_of(definition: &EntityDefinition, geodata: &GeoData) -> Option<u32
     geodata.health_for(definition.physical_properties()?)
 }
 
-/// Position units are 1/32 of a voxel: a chunk origin is `chunkCoord * 32` voxels, and a
-/// voxel is 32 units across. Voxel coordinates must be scaled by this before they go on the
-/// wire.
+/// Position units are 1/64 of a voxel. Voxel coordinates must be scaled by this before they go
+/// on the wire.
 ///
-/// Sending raw voxel coordinates puts an entity at 1/32 of its intended position -- for a
-/// spawn at the middle of the island, that is voxel 2, in the corner and *inside* the ground.
+/// Sending raw voxel coordinates puts an entity at 1/64 of its intended position -- for a
+/// spawn at the middle of the island, that is voxel 1, in the corner and *inside* the ground.
 /// An entity buried in terrain renders unlit, which is what a black character means.
-pub const POSITION_SCALE: u32 = 32;
+///
+/// # Why 64 and not 32
+///
+/// It was 32, chosen because it is the chunk size and because it is visibly better than
+/// sending raw voxels. Nothing confirmed it, and `combat-and-health.md` read the same fields
+/// as 1/64 throughout. The client settles it four times over:
+///
+/// * `FUN_0074a860` multiplies each world float by `DAT_00c61f28` on its way into
+///   `EntityMoved`'s position, and that constant is `64.0`;
+/// * `FUN_0073d7e0`, which logs the same field in the same RPC, multiplies it back by
+///   `DAT_00cd3e80`, which is `1/64`. The angle logger beside it uses `1/32` on the yaw, so the
+///   two scales are distinguished within one function;
+/// * the component parameter getter/setter pairs agree -- `FUN_008f8270` and `FUN_008dc8d0`
+///   write with `64.0`, `FUN_008f83b0` and `FUN_008dc950` read with `1/64`;
+/// * and it is the reading under which the melee distances a real fight produced are a melee
+///   range. See `combat::tests::the_separations_a_real_fight_produced_are_all_believed`.
+///
+/// At 32 every entity the server placed sat at half its intended voxel, and every distance the
+/// server computed from a client position was twice what the client meant.
+pub const POSITION_SCALE: u32 = 64;
 
 /// Everything the player entity replicates.
 fn player_components(config: &WorldConfig) -> Vec<Component> {

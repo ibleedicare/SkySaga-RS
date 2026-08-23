@@ -60,12 +60,16 @@ pub const BODY_RADIUS: f32 = 1.0;
 /// * the attacker's position is whatever `EntityMoved` last reported, which lags a moving
 ///   player by as far as they walk between updates;
 /// * the target's is where the server put it, while the client has a physics body that falls
-///   and settles after it is spawned;
-/// * and the position scale itself is unconfirmed. `combat-and-health.md` reads these fields
-///   as 1/64 of a voxel where [`POSITION_SCALE`] is 32, and every refused distance above is
-///   an ordinary melee range under the other reading.
+///   and settles after it is spawned.
 ///
-/// There is a fourth reason, and it is the one that made the refusals *grow* over a fight:
+/// A third reason used to sit here: that the position scale itself was unconfirmed, and that
+/// every refused distance was an ordinary melee range under the other reading. That is now
+/// settled -- [`POSITION_SCALE`] is 64, the refused distances *were* 2.4 to 8.5 voxels, and the
+/// bound of 4.5 was throwing away honest hits at 5.2 and 6.5. Tightening this bound back to
+/// something derived from `Reach` is now defensible in a way it was not; it is left alone
+/// until a live session says so, because the two reasons above have not gone anywhere.
+///
+/// There is a further reason, and it is the one that made the refusals *grow* over a fight:
 /// **the server's idea of where a creature stands is frozen at its spawn.** A creature has a
 /// physics body, so the client's copy falls, settles and slides down terrain, and nothing
 /// reports that back. Measured distances climbed steadily from 4.8 to 17.1 across one fight
@@ -123,24 +127,59 @@ mod tests {
         [ORIGIN[0], ORIGIN[1], ORIGIN[2] + count * POSITION_SCALE]
     }
 
-    /// **Every distance a real fight produced is believed.**
+    /// A distance is in the client's own voxels, and a voxel is 64 units.
+    ///
+    /// `FUN_0074a860` multiplies each world float by `DAT_00c61f28` -- `64.0` -- on its way
+    /// into `EntityMoved`, and `FUN_0073d7e0` multiplies the field back by `DAT_00cd3e80` --
+    /// `1/64` -- to log it. Three voxels apart is 192 units apart, not 96, and reading it as 96
+    /// makes every distance in a fight twice what it is.
+    #[test]
+    fn a_distance_is_in_the_clients_own_voxels() {
+        let three_voxels = ORIGIN[2] + 3 * 64;
+
+        let measured = distance(ORIGIN, [ORIGIN[0], ORIGIN[1], three_voxels]);
+
+        assert!((measured - 3.0).abs() < 1e-3, "192 units is 3 voxels, got {measured}");
+    }
+
+    /// **Every separation a real fight produced is believed.**
     ///
     /// These are the measured refusals from the session that exposed the bug: a stationary
     /// knight, a player hitting it, and a bound of 4.5 that threw away five of thirteen hits.
     /// They are asserted individually because a regression here is invisible in game except as
     /// "the sword works sometimes".
+    ///
+    /// The numbers are the *wire* separations, which is what was actually observed. The
+    /// voxel readings beside them are what those separations mean now that the scale is
+    /// settled at 64: an ordinary melee range of 2.4 to 8.5 voxels, where the old scale of 32
+    /// read the same fight as 4.8 to 17.1 and refused most of it. That the corrected reading
+    /// is a plausible sword range and the old one is not is the fourth piece of evidence for
+    /// 64, after the two constants and the component getter/setter pair.
     #[test]
-    fn the_distances_a_real_fight_produced_are_all_believed() {
+    fn the_separations_a_real_fight_produced_are_all_believed() {
         let attacker = player_at(ORIGIN);
 
-        for measured in [4.84, 7.10, 7.84, 8.92, 10.40, 13.08, 14.45, 17.09] {
-            let target = [
-                ORIGIN[0],
-                ORIGIN[1],
-                ORIGIN[2] + (measured * POSITION_SCALE as f32) as u32,
-            ];
+        // (units apart, voxels apart)
+        let observed = [
+            (155u32, 2.4219),
+            (227, 3.5469),
+            (251, 3.9219),
+            (285, 4.4531),
+            (333, 5.2031),
+            (419, 6.5469),
+            (462, 7.2188),
+            (547, 8.5469),
+        ];
 
-            assert!(in_range(&attacker, target), "{measured} voxels was a real hit");
+        for (units, voxels) in observed {
+            let target = [ORIGIN[0], ORIGIN[1], ORIGIN[2] + units];
+
+            assert!(
+                (distance(ORIGIN, target) - voxels).abs() < 0.01,
+                "{units} units is {voxels} voxels",
+            );
+
+            assert!(in_range(&attacker, target), "{voxels} voxels was a real hit");
         }
     }
 

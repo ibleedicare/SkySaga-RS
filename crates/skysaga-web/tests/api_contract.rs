@@ -908,6 +908,7 @@ mod admin {
                 biome: "Sky_Island".into(),
                 chunks: 16,
                 entities: 10,
+                spawn_voxel: [64, 18, 64],
             },
             players: vec![PlayerSummary {
                 account: Some("Alice".into()),
@@ -916,6 +917,11 @@ mod admin {
                 stage: "Playing".into(),
                 inventory_slots: 36,
                 inventory_items: vec![101, 102],
+                // Wire units: 1/64 of a voxel, and 1/32 of a degree biased so a left turn is
+                // negative. A player who has walked, so the fields are reported rather than null.
+                position: Some([4096, 1023, 4096]),
+                facing_yaw: Some(-1337),
+                using_entity_id: 0,
             }],
         });
 

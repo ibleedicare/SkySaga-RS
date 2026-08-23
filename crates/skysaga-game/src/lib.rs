@@ -47,7 +47,7 @@ use skysaga_proto::packets::mail::{
     DeleteMail, MailCheck, MailGiftSelected, MailRead, NewMailReceived, RemoteMailSynced,
     TakeMailAttachment,
 };
-use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection};
+use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection, ANGLE_UNITS_PER_DEGREE};
 use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -466,7 +466,7 @@ pub struct Session {
     position: Option<[u32; 3]>,
 
     /// Which way the player is facing, from the same packet.
-    facing_yaw: Option<u32>,
+    facing_yaw: Option<i32>,
 
     /// The entity whose container this player has open, or 0 for none.
     ///
@@ -631,7 +631,7 @@ impl Session {
     }
 
     /// Which way the player is facing, or `None` if the client has not said yet.
-    pub fn facing_yaw(&self) -> Option<u32> {
+    pub fn facing_yaw(&self) -> Option<i32> {
         self.facing_yaw
     }
 
@@ -1334,16 +1334,16 @@ impl Session {
 
     /// Three voxels in front of the player, or the world's spawn point if it has not moved.
     ///
-    /// The facing is the raw value from `EntityMoved`, whose units are **not confirmed**: the
+    /// The facing comes from `EntityMoved` in units of 1/32 of a degree: `FUN_007a46f0` builds
+    /// it as `(int)(facingYaw * 32.0)` and `FUN_007a6010` writes it over `-12800..12800`. The
     /// C# reads that field as a float and gets a denormal, so its own chests always land due
-    /// north whatever the player is doing. A full circle is assumed to be the field's declared
-    /// maximum. If that is wrong the chest appears on a different side of the player, three
-    /// voxels away either way, which is close enough to press E on while it stays unproven.
+    /// north whatever the player is doing.
+    ///
+    /// This used to take the field's declared maximum, 25600, as a full turn. That is the
+    /// *width* rather than a circle, and it stretched every heading by a factor of
+    /// `25600 / 11520`, putting a chest 40 degrees off at a heading of 90.
     fn spawn_position(&self, world: &World) -> [u32; 3] {
         const DISTANCE: f32 = 3.0 * world::POSITION_SCALE as f32;
-
-        /// The declared maximum of the yaw field, taken as a full turn.
-        const FULL_TURN: f32 = 25_600.0;
 
         let Some(position) = self.position else {
             // The client has not said where it is yet. The world's spawn point is at least on
@@ -1353,8 +1353,8 @@ impl Session {
             return [spawn[0], spawn[1], spawn[2] + world::POSITION_SCALE * 3];
         };
 
-        let turns = self.facing_yaw.unwrap_or(0) as f32 / FULL_TURN;
-        let radians = turns * std::f32::consts::TAU;
+        let degrees = self.facing_yaw.unwrap_or(0) as f32 / ANGLE_UNITS_PER_DEGREE;
+        let radians = degrees.to_radians();
 
         [
             position[0].saturating_add_signed((radians.sin() * DISTANCE).round() as i32),

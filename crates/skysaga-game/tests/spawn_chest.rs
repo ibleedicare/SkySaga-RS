@@ -11,7 +11,7 @@
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
-use skysaga_proto::packets::movement::EntityMoved;
+use skysaga_proto::packets::movement::{EntityMoved, ANGLE_UNITS_PER_DEGREE};
 use skysaga_proto::packets::{EntityAdd, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
@@ -210,8 +210,11 @@ fn a_spawned_chest_stands_near_the_player() {
 
     let distance = |a: u32, b: u32| a.abs_diff(b);
 
+    // Four voxels, which is one more than the three the placement reaches out.
+    let near = 4 * skysaga_game::world::POSITION_SCALE;
+
     assert!(
-        distance(position[0], 4000) <= 4 * 32 && distance(position[2], 5000) <= 4 * 32,
+        distance(position[0], 4000) <= near && distance(position[2], 5000) <= near,
         "spawned at {position:?}, nowhere near the player",
     );
 
@@ -280,4 +283,69 @@ fn the_seeded_chest_still_works_alongside_a_spawned_one() {
 
     assert!(session.container(seeded, &world).is_some(), "the seeded one");
     assert!(session.container(spawned.entity, &world).is_some(), "the new one");
+}
+
+// --- where it lands -------------------------------------------------------------------------
+
+/// Stand at `position` facing `degrees`, the way the client reports both.
+fn stand_facing(session: &mut Session, world: &World, position: [u32; 3], degrees: f32) {
+    let me = session.player_entity_id();
+
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            EntityMoved {
+                entity_id: me,
+                position,
+                yaw: (degrees * ANGLE_UNITS_PER_DEGREE) as i32,
+            }
+            .encode(w)
+        })),
+        world,
+    );
+}
+
+/// A chest lands in front of the player, on whichever side they are actually facing.
+///
+/// The yaw the client sends is **degrees times 32**, signed -- `FUN_007a46f0` multiplies the
+/// facing by `_DAT_00ce1718` (`32.0`) and `FUN_007a6010` writes it over `-12800..12800`. A full
+/// turn is 11520 units, not the 25600 the field's width allows, so treating the declared
+/// maximum as a full circle stretches every heading by 25600/11520 and puts a chest at a
+/// heading of 90 degrees roughly 40 degrees off.
+#[test]
+fn a_chest_lands_on_the_side_the_player_faces() {
+    let world = world();
+
+    // Three voxels at 1/64 of a voxel each.
+    let reach = 3 * skysaga_game::world::POSITION_SCALE;
+    let here = [30_000u32, 4_000, 30_000];
+
+    // Degrees, and the offset from `here` the chest should take. Zero is +Z and the turn is
+    // towards +X, which is what the existing placement already assumes for zero.
+    let cases: &[(f32, [i32; 3])] = &[
+        (0.0, [0, 0, reach as i32]),
+        (90.0, [reach as i32, 0, 0]),
+        (180.0, [0, 0, -(reach as i32)]),
+        (-90.0, [-(reach as i32), 0, 0]),
+    ];
+
+    for &(degrees, offset) in cases {
+        let mut session = playing(&world);
+
+        stand_facing(&mut session, &world, here, degrees);
+
+        let spawned = session.spawn_chest(&world, "Chest", &[]).expect("it spawns");
+
+        let want = [
+            here[0].saturating_add_signed(offset[0]),
+            here[1].saturating_add_signed(offset[1]),
+            here[2].saturating_add_signed(offset[2]),
+        ];
+
+        for (axis, (got, wanted)) in spawned.position.iter().zip(want).enumerate() {
+            assert!(
+                (*got as i64 - wanted as i64).abs() <= 1,
+                "facing {degrees} degrees: axis {axis} is {got}, wanted {wanted}",
+            );
+        }
+    }
 }
