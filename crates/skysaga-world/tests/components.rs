@@ -508,6 +508,53 @@ fn a_parameter_that_writes_no_bits_is_still_flagged() {
     assert!(sync.present[index], "flagged despite writing no bits");
 }
 
+/// A list sitting exactly on its default writes a **clear** escape bit and no count.
+///
+/// The player is seeded with two drop slots, which is the default, so this is the boundary
+/// case the entity actually hits. Writing the bit set and a 32-bit count instead costs 33 bits
+/// where the client reads 1, and every parameter after sync index 17 then reads from the wrong
+/// offset — which is what made the client insist every recipe was tutorial-locked.
+///
+/// The client's own writers take the `Write0` branch on `count == max`: `FUN_008ae810`
+/// (`JobList`, 0x40), `FUN_008adb40` (`CompletedJobChallengeList`, 0x4000) and `FUN_008b9160`
+/// (`FeatureIsLockedStatusList`, 0x1e).
+#[test]
+fn a_drop_slot_list_at_its_default_is_one_clear_bit_and_two_words() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingDropSlotsComponent};
+
+    let mut writer = BitWriter::new();
+    let component = Component::CraftingDropSlots(CraftingDropSlotsComponent {
+        slots: vec![0, 0],
+    });
+
+    assert!(component.sync("craftingdropslots", &mut writer));
+
+    // One escape bit, then the two slots. No count field: the list's min and max are both 2.
+    assert_eq!(writer.bits_used(), 1 + 32 + 32);
+    assert_eq!(
+        writer.as_bytes()[0] & 0x80,
+        0,
+        "the escape bit is clear at the default"
+    );
+}
+
+/// Longer than the default, and only then, does the escape bit set and a real count follow.
+#[test]
+fn a_drop_slot_list_over_its_default_carries_a_full_count() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingDropSlotsComponent};
+
+    let mut writer = BitWriter::new();
+    let component = Component::CraftingDropSlots(CraftingDropSlotsComponent {
+        slots: vec![0, 0, 0],
+    });
+
+    assert!(component.sync("craftingdropslots", &mut writer));
+
+    assert_eq!(writer.bits_used(), 1 + 32 + 3 * 32, "escape, count, elements");
+}
+
 /// `featureislockedstatuslist` is a fixed 31 zero bits regardless of its contents — the C#
 /// ignores its own list. Reproduced rather than corrected: the width is what the client
 /// parses, and changing it would shift everything after it.
@@ -736,4 +783,307 @@ mod inventory_item {
             "368 payload bits, as captured from the C# server",
         );
     }
+}
+
+// --- the recipe book ---------------------------------------------------------------------
+
+/// `recipelist` is a `[0, 1000]` count-optimised list of **optional** uint32 recipe ids.
+///
+/// Ten bits of count, then one flag bit and thirty-two value bits per entry. The entries are
+/// hashes of the *recipe's* name, not of the item it makes: the client compares them against
+/// the recipe record's own id, and the output hash is a different number used by a different
+/// packet.
+#[test]
+fn the_recipe_list_is_a_ten_bit_count_and_optional_ids() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, RecipeBookComponent};
+
+    let component = Component::RecipeBook(RecipeBookComponent {
+        recipes: vec![7, 9],
+        scrolls_used: 0,
+    });
+
+    let mut writer = BitWriter::new();
+
+    assert!(component.sync("recipelist", &mut writer));
+
+    assert_eq!(
+        writer.bits_used(),
+        10 + 2 * (1 + 32),
+        "ten bits of count, then a flag and a value each",
+    );
+}
+
+/// An empty book still writes its count, unlike `craftingdropslots`, whose default is its
+/// own length. The two are easy to confuse and encode differently.
+#[test]
+fn an_empty_recipe_list_is_ten_zero_bits() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, RecipeBookComponent};
+
+    let mut writer = BitWriter::new();
+
+    assert!(Component::RecipeBook(RecipeBookComponent::default()).sync("recipelist", &mut writer));
+
+    assert_eq!(writer.bits_used(), 10);
+}
+
+/// `numberofrecipescrollsused` is a uint32 clamped to 1000 and written in ten bits.
+#[test]
+fn the_scroll_count_is_ten_bits_and_clamped() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, RecipeBookComponent};
+
+    for used in [0, 3, 1000, 5000] {
+        let mut writer = BitWriter::new();
+
+        let component = Component::RecipeBook(RecipeBookComponent {
+            recipes: Vec::new(),
+            scrolls_used: used,
+        });
+
+        assert!(component.sync("numberofrecipescrollsused", &mut writer));
+        assert_eq!(writer.bits_used(), 10, "used={used}");
+    }
+}
+
+/// **There is no `Client` prefix on this one.** The component chain in the client is
+/// `RecipeBookComponent -> Component`, so a name with the prefix matches no parameter and the
+/// craft tabs never render.
+#[test]
+fn the_recipe_book_is_not_a_client_prefixed_component() {
+    use skysaga_world::{Component, RecipeBookComponent};
+
+    assert_eq!(
+        Component::RecipeBook(RecipeBookComponent::default()).name(),
+        "recipebookcomponent",
+    );
+}
+
+/// The player carries it, and `Entities.json` agrees on both parameters.
+#[test]
+fn the_player_declares_both_recipe_book_parameters() {
+    needs_data!();
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").unwrap();
+
+    for parameter in ["recipelist", "numberofrecipescrollsused"] {
+        assert!(
+            definition
+                .sync_index("recipebookcomponent", parameter)
+                .is_some(),
+            "Player has no {parameter}",
+        );
+    }
+}
+
+// --- the crafting queue ------------------------------------------------------------------
+
+/// `maxcraftingslots` is a **byte** clamped to twelve: `8 - CLZ8(12)` is four bits.
+///
+/// The 32-bit rule would give five and shift every parameter after it. The two rules disagree
+/// on this number, which is exactly why the reversing notes call it out.
+#[test]
+fn the_crafting_slot_maximum_is_four_bits() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingComponent};
+
+    for max in [0, 1, 3, 12, 200] {
+        let mut writer = BitWriter::new();
+
+        let component = Component::Crafting(CraftingComponent {
+            slots: Vec::new(),
+            max_slots: max,
+        });
+
+        assert!(component.sync("maxcraftingslots", &mut writer));
+        assert_eq!(writer.bits_used(), 4, "max={max}");
+    }
+}
+
+/// An empty queue is six bits of count and nothing else.
+#[test]
+fn an_empty_crafting_queue_is_six_bits() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingComponent};
+
+    let mut writer = BitWriter::new();
+
+    assert!(Component::Crafting(CraftingComponent::default()).sync("craftingslots", &mut writer));
+
+    assert_eq!(writer.bits_used(), 6, "the [0, 45] count width");
+}
+
+/// One queued craft: the count, then the record.
+///
+/// The record is an optional resource, a raw 64-bit timer, three empty strings, two bools and
+/// an empty material list. Asserted as a total width because the fields in the middle have an
+/// exact layout and unknown meanings -- the thing that must not drift is how many bits they
+/// take, since everything after them depends on it.
+#[test]
+fn a_queued_craft_writes_its_record() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, CraftingComponent, CraftingSlot};
+
+    let mut writer = BitWriter::new();
+
+    let component = Component::Crafting(CraftingComponent {
+        slots: vec![CraftingSlot {
+            output: Some(42),
+            // Server-side only: the record on the wire has no recipe field, which is what the
+            // bit count below asserts.
+            recipe: 7,
+            timer: 0,
+            materials: Vec::new(),
+        }],
+        max_slots: 1,
+    });
+
+    assert!(component.sync("craftingslots", &mut writer));
+
+    let count = 6;
+    let output = 1 + 32;
+    let timer = 64;
+    // Three empty strings, one "has data" bit each.
+    let strings = 3;
+    let bools = 2;
+    let materials = 3;
+
+    assert_eq!(
+        writer.bits_used(),
+        count + output + timer + strings + bools + materials,
+    );
+}
+
+/// The player carries a crafting component of its own, which is what hand crafting is.
+#[test]
+fn the_player_declares_both_crafting_parameters() {
+    needs_data!();
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").unwrap();
+
+    for parameter in ["craftingslots", "maxcraftingslots"] {
+        assert!(
+            definition
+                .sync_index("clientcraftingcomponent", parameter)
+                .is_some(),
+            "Player has no {parameter}",
+        );
+    }
+}
+
+// --- jobs --------------------------------------------------------------------------------
+
+/// `joblist` gates the whole recipe book.
+///
+/// Every recipe carries a `RequiredJob` and `RequiredJobRank`, and the client checks them
+/// against this list before it will let the Craft button do anything. With no job list, a
+/// player who *knows* a recipe is still told to "advance in the tutorial to unlock this item",
+/// which reads as the recipe book being wrong rather than as a different component missing.
+#[test]
+fn a_job_is_a_hash_a_rank_and_two_experience_values() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, JobRank, JobRankComponent};
+
+    let mut writer = BitWriter::new();
+
+    let component = Component::JobRank(JobRankComponent {
+        jobs: vec![JobRank {
+            name: 7,
+            rank: 25,
+            experience: 0,
+            experience_to_next: 0,
+        }],
+    });
+
+    assert!(component.sync("joblist", &mut writer));
+
+    let count = 7;
+    let name = 1 + 32;
+    let rank = 8;
+    let experience = 14 + 14;
+
+    assert_eq!(writer.bits_used(), count + name + rank + experience);
+}
+
+#[test]
+fn an_empty_job_list_is_seven_bits() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, JobRankComponent};
+
+    let mut writer = BitWriter::new();
+
+    assert!(Component::JobRank(JobRankComponent::default()).sync("joblist", &mut writer));
+
+    assert_eq!(writer.bits_used(), 7, "the [0, 64] count width");
+}
+
+/// The shared count helper's boundary, exercised through a list whose default is reachable.
+///
+/// Sixty-four jobs is the `joblist` cap. At the cap the client writes the clamped count and a
+/// single clear bit; it does not repeat the length as a 32-bit word. `geodata.json` ships
+/// twenty jobs so this cannot happen in practice, but the helper is shared with every other
+/// list in the entity and one of those — `craftingdropslots` — does sit on its default.
+#[test]
+fn a_job_list_at_the_cap_adds_one_clear_bit_rather_than_a_count() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, JobRank, JobRankComponent};
+
+    let entry = 1 + 32 + 8 + 14 + 14;
+
+    for (count, expected_header) in [(63, 7), (64, 7 + 1), (65, 7 + 1 + 32)] {
+        let mut writer = BitWriter::new();
+
+        let component = Component::JobRank(JobRankComponent {
+            jobs: vec![JobRank::default(); count],
+        });
+
+        assert!(component.sync("joblist", &mut writer));
+
+        assert_eq!(
+            writer.bits_used(),
+            expected_header + count * entry,
+            "{count} jobs"
+        );
+    }
+}
+
+/// The other six parameters of this component are not implemented, and must stay unflagged.
+///
+/// Declining is not the same as writing nothing: a parameter that returns `true` gets its flag
+/// set, and a flag set over an empty payload shifts every parameter after it.
+#[test]
+fn the_unimplemented_job_parameters_are_declined() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, JobRankComponent};
+
+    let component = Component::JobRank(JobRankComponent::default());
+
+    for parameter in [
+        "activejobchallengelist",
+        "completedjobchallengelist",
+        "jobchallengecrccollectionlist",
+        "numberofjobchallengescrollsused",
+        "timedchallengedatalist",
+        "jobchallengestagescompletedlist",
+    ] {
+        let mut writer = BitWriter::new();
+
+        assert!(!component.sync(parameter, &mut writer), "{parameter} was written");
+        assert_eq!(writer.bits_used(), 0);
+    }
+}
+
+#[test]
+fn the_player_declares_the_job_list() {
+    needs_data!();
+
+    let definitions = definitions();
+    let definition = definitions.get("Player").unwrap();
+
+    assert!(definition
+        .sync_index("clientjobrankcomponent", "joblist")
+        .is_some());
 }

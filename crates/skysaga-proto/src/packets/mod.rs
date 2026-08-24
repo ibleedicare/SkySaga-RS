@@ -10,9 +10,10 @@
 //! Every layout here is checked against bytes captured from the C# server or the live client,
 //! never against a reading of the C# source alone.
 
-pub mod chat;
 pub mod character_creation;
+pub mod chat;
 pub mod combat;
+pub mod crafting;
 pub mod handshake;
 pub mod interaction;
 pub mod inventory;

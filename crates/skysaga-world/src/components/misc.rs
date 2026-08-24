@@ -2,7 +2,7 @@
 
 use skysaga_proto::bitstream::BitWriter;
 
-use super::ranged_bits;
+use super::{ranged_bits, write_count};
 
 /// `ClientUseEntityComponent` — what this entity is currently using.
 ///
@@ -25,9 +25,21 @@ impl UseEntityComponent {
 
 /// `ClientCraftingDropSlotsComponent` — the crafting grid's contents.
 ///
-/// The count encoding here has no count field for a short list: below the default of 2,
-/// nothing is written at all, so an empty list is a **zero-bit** payload whose flag is still
-/// set. At or above the default it writes an escape bit and a full 32-bit count.
+/// The count encoding here has no count field at all: the list's minimum and its maximum are
+/// both 2, so `bitlength(max - min)` is zero bits and the count carries no information. Below
+/// the default nothing is written, so an empty list is a **zero-bit** payload whose flag is
+/// still set.
+///
+/// # The player sits exactly on the boundary
+///
+/// The player is seeded with two slots, which is the default, so this is the one list in the
+/// entity that actually exercises the `count == default` case — and it was writing the escape
+/// bit **set**, followed by a 32-bit count, where the client writes a single clear bit (see
+/// [`write_count`]). Those 33 bits where 1 was expected shifted every parameter after sync
+/// index 17, which is `craftingslots` (18), `joblist` (45), `maxcraftingslots` (51),
+/// `numberofrecipescrollsused` (58) and `recipelist` (67) — the entire crafting and
+/// progression surface. The visible symptom was the client insisting every recipe was locked
+/// behind the tutorial however high the job ranks it was sent.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CraftingDropSlotsComponent {
     pub slots: Vec<u32>,
@@ -39,7 +51,9 @@ impl CraftingDropSlotsComponent {
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
         match parameter.to_ascii_lowercase().as_str() {
             "craftingdropslots" => {
-                if self.slots.len() >= Self::DEFAULT_COUNT {
+                if self.slots.len() == Self::DEFAULT_COUNT {
+                    writer.write_bit(false);
+                } else if self.slots.len() > Self::DEFAULT_COUNT {
                     writer.write_bit(true);
                     writer.write_u32(self.slots.len() as u32);
                 }
@@ -188,20 +202,4 @@ impl WalletComponent {
 
         true
     }
-}
-
-/// The protocol's usual count-optimised list header.
-///
-/// `min(count, default)` in a ranged field, then — only when the list is at or over the
-/// default — an escape bit and the real 32-bit count. Note the boundary: a list *at* the
-/// default takes the escape path.
-fn write_count(writer: &mut BitWriter, count: usize, default: usize) {
-    writer.write_bits_le(count.min(default) as u32, ranged_bits(default as u32));
-
-    if count < default {
-        return;
-    }
-
-    writer.write_bit(true);
-    writer.write_u32(count as u32);
 }

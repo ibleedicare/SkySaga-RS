@@ -170,11 +170,21 @@ fn the_player_entity_is_well_formed() {
     // resolves components by reflection over their names, so that parameter silently never
     // replicated and every character rendered with the client's built-in defaults no matter
     // what was chosen in the creator.
+    //
+    // The last five are crafting, none of which the C# sends. `craftingslots` (18) and
+    // `maxcraftingslots` (51) make the player a crafting station, which is what hand crafting
+    // is; `numberofrecipescrollsused` (58) and `recipelist` (67) are the recipe book, without
+    // which the panel has no category tabs; and `joblist` (45) is what unlocks the recipes in
+    // it, without which every one of them says "advance in the tutorial".
     assert_eq!(
         sync.present_indices().count(),
-        29,
-        "the C#'s 28, plus the customisationdata it never sent",
+        34,
+        "the C#'s 28, plus customisationdata and the five crafting parameters",
     );
+
+    for parameter in [18, 45, 51, 58, 67] {
+        assert!(sync.present[parameter], "parameter {parameter} is missing");
+    }
 
     assert!(
         sync.present[19],

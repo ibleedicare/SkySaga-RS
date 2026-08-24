@@ -561,9 +561,9 @@ impl World {
             .expect("Entities.json defines Player")
             .clone();
 
-        let player_entity_id = add("Player", player_components(config)).unwrap_or(0);
+        let player_entity_id = add("Player", player_components(config, &geodata)).unwrap_or(0);
         let player_index = entities.len() - 1;
-        let player_template = Entity::new(player_entity_id, player_components(config));
+        let player_template = Entity::new(player_entity_id, player_components(config, &geodata));
 
         // The biome the client resolves the world from has to be the one holding this
         // adventure; falling back to the configured name only matters for data that has no
@@ -776,8 +776,15 @@ pub fn health_of(definition: &EntityDefinition, geodata: &GeoData) -> Option<u32
 /// server computed from a client position was twice what the client meant.
 pub const POSITION_SCALE: u32 = 64;
 
+/// The rank every job is seeded at.
+///
+/// Progression is not modelled: nothing awards experience, so a rank the player could not
+/// raise would be a permanent lock rather than a goal. The reversing notes name 25 as
+/// "tutorial complete", and the starting recipes need at most 21.
+const FULL_JOB_RANK: u8 = 25;
+
 /// Everything the player entity replicates.
-fn player_components(config: &WorldConfig) -> Vec<Component> {
+fn player_components(config: &WorldConfig, geodata: &GeoData) -> Vec<Component> {
     use skysaga_world::*;
 
     let spawn = config.terrain.spawn();
@@ -798,9 +805,46 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             can_damage_devices: true,
             ..Default::default()
         }),
-        // Two slots, as the C# seeds. The count is at the list's default of 2, so this takes
-        // the escape path and is not the same bits as an empty list.
+        // **Every job at full rank.** A recipe is gated on RequiredJob and RequiredJobRank,
+        // and the client refuses to craft anything the player has not ranked up to, however
+        // well the recipe book says it is known. The starting recipes reach Tutorial 21, so
+        // anything short of the top leaves some of them locked with no way to earn a rank:
+        // nothing in the server awards experience yet. Twenty-five is the tutorial-complete
+        // rank the reversing notes name.
+        Component::JobRank(JobRankComponent {
+            jobs: geodata
+                .jobs()
+                .iter()
+                .map(|job| JobRank {
+                    name: skysaga_core::name_hash(job),
+                    rank: FULL_JOB_RANK,
+                    experience: 0,
+                    experience_to_next: 0,
+                })
+                .collect(),
+        }),
+        // One slot, which is what the data gives a player. Hand crafting is a station like
+        // any other; this component is what makes the player one.
+        Component::Crafting(CraftingComponent {
+            slots: Vec::new(),
+            max_slots: 1,
+        }),
+        // Two slots, as the C# seeds. That is exactly the list's default, which is the one
+        // count-optimised boundary this entity actually lands on: a clear escape bit and no
+        // 32-bit count.
         Component::CraftingDropSlots(CraftingDropSlotsComponent { slots: vec![0, 0] }),
+        // **Without this the hand-crafting panel has no category tabs at all.** The client
+        // builds the tab strip from the recipes the player knows, so an absent or empty book
+        // is a panel with nothing in it -- which reads as "crafting is not implemented"
+        // rather than as a missing parameter.
+        Component::RecipeBook(RecipeBookComponent {
+            recipes: geodata
+                .starting_recipes()
+                .iter()
+                .map(|recipe| recipe.id())
+                .collect(),
+            scrolls_used: 0,
+        }),
         Component::FeatureUnlock(FeatureUnlockComponent::default()),
         Component::Health(HealthComponent {
             half_hearts: 20,

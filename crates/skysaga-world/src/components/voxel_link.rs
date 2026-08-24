@@ -54,9 +54,16 @@ impl VoxelLinkComponent {
                     ranged_bits(DEFAULT_COUNT as u32 - 1),
                 );
 
+                // Same boundary rule as `write_count`: at the cap exactly the escape bit is
+                // clear and no count follows. No entity in the data occupies 200 cells, so
+                // this branch is unreachable today; it is written the client's way anyway.
                 if clamped == DEFAULT_COUNT {
-                    writer.write_bit(true);
-                    writer.write_u32(self.voxels.len() as u32);
+                    if self.voxels.len() == DEFAULT_COUNT {
+                        writer.write_bit(false);
+                    } else {
+                        writer.write_bit(true);
+                        writer.write_u32(self.voxels.len() as u32);
+                    }
                 }
 
                 let width = ranged_bits(OFFSET_RANGE);

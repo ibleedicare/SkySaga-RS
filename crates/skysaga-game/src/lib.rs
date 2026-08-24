@@ -48,6 +48,9 @@ use skysaga_proto::packets::mail::{
     TakeMailAttachment,
 };
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection, ANGLE_UNITS_PER_DEGREE};
+use skysaga_proto::packets::crafting::{
+    CollectCraftedItemInSlot, CraftingFailed, CraftingQueryQueue, QueueRecipeOnEntity,
+};
 use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -78,6 +81,12 @@ const FALL_DAMAGE: u32 = 4;
 
 /// The entity a floor drop is, from `Entities.json`.
 const PICKUP: &str = "Pickup";
+
+/// The station a hand craft names, as a resource like any other.
+///
+/// The data models hand crafting as a station whose entity happens to be the player's own, so
+/// this is a name from `geodata.json` and not a special case in the protocol.
+const HAND_CRAFTING: &str = "Hand_Crafting";
 
 /// A player's full health: `PhysicalProperties > player > Durability > Player > Health`.
 const PLAYER_HEALTH: u32 = 40;
@@ -190,6 +199,20 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+
+    // --- crafting ------------------------------------------------------------------------
+    //
+    // A station craft names the station's entity; a hand craft names the player's own. The
+    // packets are identical either way, which is why the station is validated against the
+    // recipe rather than read off a flag.
+    /// 39 — make this, here.
+    QueueRecipeOnEntity(QueueRecipeOnEntity),
+
+    /// 40 — take what a finished slot holds.
+    CollectCraftedItemInSlot(CollectCraftedItemInSlot),
+
+    /// 41 — "what is in this station's queue?". Answered with a sync, not a reply packet.
+    CraftingQueryQueue(CraftingQueryQueue),
 
     // --- combat --------------------------------------------------------------------------
     //
@@ -329,6 +352,18 @@ impl ClientPacket {
 
             PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
                 .map(Self::PerformVoxelActions)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            QueueRecipeOnEntity::ID => QueueRecipeOnEntity::decode(&mut reader)
+                .map(Self::QueueRecipeOnEntity)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            CollectCraftedItemInSlot::ID => CollectCraftedItemInSlot::decode(&mut reader)
+                .map(Self::CollectCraftedItemInSlot)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            CraftingQueryQueue::ID => CraftingQueryQueue::decode(&mut reader)
+                .map(Self::CraftingQueryQueue)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             EquippedItemUsed::ID => EquippedItemUsed::decode(&mut reader)
@@ -541,6 +576,13 @@ pub struct Session {
     /// Items lying on the floor, waiting to be walked over.
     pickups: Vec<FloorDrop>,
 
+    /// What is queued or waiting to be collected, one entry per occupied slot.
+    ///
+    /// On the session rather than the world because hand crafting happens on the player's own
+    /// entity. A station's queue belongs to the station and will have to move when stations
+    /// are placeable.
+    crafting: Vec<skysaga_world::CraftingSlot>,
+
     /// Where loot rolls come from.
     ///
     /// Seeded from the player's entity id rather than a clock, so this crate keeps its
@@ -593,6 +635,7 @@ impl Session {
             player_damage: 0,
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
+            crafting: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
@@ -1116,6 +1159,20 @@ impl Session {
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
 
+            // --- crafting -----------------------------------------------------------------
+            (ClientPacket::QueueRecipeOnEntity(packet), _) => self.queue_recipe(packet, world),
+
+            (ClientPacket::CollectCraftedItemInSlot(packet), _) => {
+                self.collect_craft(packet, world)
+            }
+
+            (ClientPacket::CraftingQueryQueue(packet), _) => {
+                // No reply packet exists. The answer is the station's own queue, synced.
+                self.sync_of(packet.entity_id, &["craftingslots"], world)
+                    .into_iter()
+                    .collect()
+            }
+
             // --- combat -------------------------------------------------------------------
             (ClientPacket::EquippedItemUsed(packet), _) => self.equipped_item_used(packet, world),
 
@@ -1546,6 +1603,164 @@ impl Session {
         out
     }
 
+    // --- crafting -----------------------------------------------------------------------
+
+    /// Start a craft, or say why not.
+    ///
+    /// **Every refusal answers.** `CraftingFailed` is the only thing that takes the client out
+    /// of its crafting state; refusing in silence leaves the panel spinning until the player
+    /// closes and reopens it, which looks like the server having crashed.
+    fn queue_recipe(&mut self, packet: QueueRecipeOnEntity, world: &World) -> Vec<Vec<u8>> {
+        let refuse = |reason: &str| {
+            debug!(entity = packet.entity_id, item = ?packet.item_id, reason, "craft refused");
+
+            vec![encode(|w| {
+                CraftingFailed {
+                    entity_id: packet.entity_id,
+                    resource: packet.item_id,
+                }
+                .encode(w)
+            })]
+        };
+
+        let Some(item) = packet.item_id else {
+            return refuse("no item named");
+        };
+
+        // The recipe is addressed by its own name's hash, not by what it makes.
+        let Some(recipe) = world.geodata.recipe_for_id(item).cloned() else {
+            return refuse("no such recipe");
+        };
+
+        // A station craft names the station. Only the player's own entity is servable yet,
+        // and that is exactly the `Hand_Crafting` station.
+        if packet.entity_id != self.player_entity_id {
+            return refuse("only hand crafting is served");
+        }
+
+        if recipe.station() != Some(HAND_CRAFTING) {
+            return refuse("that recipe needs a station");
+        }
+
+        if self.crafting.len() >= self.max_crafting_slots() as usize {
+            return refuse("no free slot");
+        }
+
+        // Check the whole list before taking any of it, or a craft that runs out halfway
+        // consumes the materials it did find.
+        for (material, quantity) in recipe.materials() {
+            if self.carried(skysaga_core::name_hash(material)) < quantity {
+                return refuse("not enough materials");
+            }
+        }
+
+        let mut out = Vec::new();
+
+        for (material, quantity) in recipe.materials() {
+            out.extend(self.take(skysaga_core::name_hash(material), quantity, world));
+        }
+
+        let (output, _) = recipe.output().unwrap_or(("", 0));
+
+        // Finished the moment it is queued. The record's timer is sixty-four raw bits whose
+        // type could not be settled from the binary, so a running craft cannot be expressed
+        // honestly yet; zero is unambiguous under either reading.
+        self.crafting.push(skysaga_world::CraftingSlot {
+            output: Some(skysaga_core::name_hash(output)),
+            recipe: recipe.id(),
+            timer: 0,
+            materials: Vec::new(),
+        });
+
+        info!(recipe = %recipe.name, output, "queued a craft");
+
+        out.extend(self.sync_of(self.player_entity_id, &["craftingslots"], world));
+
+        out
+    }
+
+    /// Take a finished craft out of its slot and into the rucksack.
+    fn collect_craft(&mut self, packet: CollectCraftedItemInSlot, world: &World) -> Vec<Vec<u8>> {
+        let Some(slot) = self.crafting.get(packet.slot as usize).cloned() else {
+            debug!(slot = packet.slot, "collecting an empty crafting slot");
+
+            return Vec::new();
+        };
+
+        if slot.output.is_none() {
+            return Vec::new();
+        }
+
+        // By the recipe the slot remembers, not by its output: the wire record carries only
+        // the output resource, and that does not name a recipe or its quantity.
+        let Some(recipe) = world.geodata.recipe_for_id(slot.recipe) else {
+            return Vec::new();
+        };
+
+        let (name, quantity) = recipe.output().unwrap_or(("", 1));
+        let name = name.to_owned();
+
+        self.crafting.remove(packet.slot as usize);
+
+        let Some(stack) = self.give(&name, quantity) else {
+            warn!(item = %name, "crafted, but the rucksack is full");
+
+            // The slot is already gone, so say so; the item is lost, which is worse than
+            // refusing would have been and is why a full rucksack should be checked earlier.
+            return self.sync_of(self.player_entity_id, &["craftingslots"], world)
+                .into_iter()
+                .collect();
+        };
+
+        let mut out = self.apply(
+            vec![
+                Effect::ItemCreated { entity: stack },
+                Effect::SlotsChanged {
+                    owner: self.player_entity_id,
+                },
+            ],
+            world,
+        );
+
+        out.extend(self.sync_of(self.player_entity_id, &["craftingslots"], world));
+
+        info!(item = %name, quantity, "collected a craft");
+
+        out
+    }
+
+    /// How many crafting slots this player has, which the template declares.
+    fn max_crafting_slots(&self) -> u8 {
+        1
+    }
+
+    /// How many of `hash` the player is carrying, across every stack.
+    fn carried(&self, hash: u32) -> u32 {
+        (0..self.inventory().len() as u32)
+            .filter_map(|slot| self.inventories.slot(self.player_entity_id, slot))
+            .filter(|item| *item != 0)
+            .filter(|item| self.inventories.name(*item) == Some(hash))
+            .filter_map(|item| self.inventories.count(item))
+            .sum()
+    }
+
+    /// Take `quantity` of `hash` out of the rucksack, and say what the client must be told.
+    fn take(&mut self, hash: u32, quantity: u32, world: &World) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+
+        for _ in 0..quantity {
+            let taken = self.take_one(hash);
+
+            if taken.is_empty() {
+                break;
+            }
+
+            out.extend(self.apply(taken, world));
+        }
+
+        out
+    }
+
     // --- the mailbox --------------------------------------------------------------------
 
     /// Every message in this player's inbox.
@@ -1886,6 +2101,11 @@ impl Session {
                         use_entity.using_entity_id = self.using_entity;
                     }
 
+                    // The queue is the player's own, which is what hand crafting is.
+                    Component::Crafting(crafting) => {
+                        crafting.slots = self.crafting.clone();
+                    }
+
                     // The template carries full health; what this player has left is here.
                     Component::Health(health) => {
                         *health = HealthComponent::with_health(self.player_health());
@@ -1990,6 +2210,11 @@ impl Session {
     /// and every player in every build of 10414 resolves to the same row.
     pub fn player_max_health(&self) -> u32 {
         PLAYER_HEALTH
+    }
+
+    /// What is queued or waiting to be collected.
+    pub fn crafting_slots(&self) -> &[skysaga_world::CraftingSlot] {
+        &self.crafting
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.

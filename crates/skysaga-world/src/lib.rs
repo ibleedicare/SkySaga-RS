@@ -12,12 +12,13 @@ pub mod loot;
 pub mod terrain;
 
 pub use components::{
-    CharacterCustomisationComponent, Component, CraftingDropSlotsComponent, Currency,
-    FeatureUnlockComponent, HealthComponent, InventoryItemComponent,
-    MailBoxComponent, MailItem, PlayerAspectsComponent, UseEntityComponent, WalletComponent, InteractionComponent, InventoryComponent, OwnerComponent,
-    PhysicsComponent, PickupComponent, PlayerNameComponent, ResourcePickupComponent,
-    TimeOfDayComponent,
-    TransformComponent, VoxelLink, VoxelLinkComponent,
+    CharacterCustomisationComponent, Component, CraftingComponent, CraftingDropSlotsComponent,
+    CraftingSlot, Currency,
+    FeatureUnlockComponent, HealthComponent, InteractionComponent, InventoryComponent,
+    InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, OwnerComponent, PhysicsComponent,
+    PickupComponent, PlayerAspectsComponent, PlayerNameComponent, RecipeBookComponent,
+    ResourcePickupComponent, TimeOfDayComponent, TransformComponent, UseEntityComponent,
+    VoxelLink, VoxelLinkComponent, WalletComponent,
 };
 pub use entity::Entity;
 pub use terrain::TerrainGenerator;
