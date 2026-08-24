@@ -132,6 +132,13 @@ struct Inner {
     /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
     photos: HashMap<String, Photo>,
 
+    /// What each account is carrying, by lowercased account name.
+    ///
+    /// Written by the game thread as it changes and read back when that account next joins.
+    /// Held here rather than on the game server so that a restart, which builds a new game
+    /// server around the loaded state, finds it already in place.
+    inventories: HashMap<String, Vec<StoredItem>>,
+
     /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
     snapshot: ServerSnapshot,
 
@@ -164,6 +171,16 @@ pub enum Change {
     Character { account: String, character: Character },
     DeleteCharacter { account: String },
     Photo { id: String, photo: Photo },
+
+    /// What an account is carrying, in full.
+    ///
+    /// The whole rucksack rather than the square that moved: a stack split writes two squares
+    /// and a merge clears one, so a per-square change would have to describe deletions as well
+    /// and the write is 45 small rows either way.
+    Inventory {
+        account: String,
+        items: Vec<StoredItem>,
+    },
 }
 
 /// A view of what the game server is doing right now.
@@ -310,6 +327,25 @@ pub struct Photo {
     pub captured_at: u64,
 }
 
+/// One square of a player's rucksack, as it is stored between sessions.
+///
+/// # Why the item is a hash and not an entity
+///
+/// A stack is an entity while the server runs, and that entity's id is minted per session: it
+/// means nothing tomorrow. What survives is what the square *holds*, so a restore creates a
+/// fresh stack with a fresh id and points the square at it, exactly as `/give` does.
+///
+/// The item is `name_hash` of a `geodata.json` resource, the same number the wire carries
+/// everywhere else. Storing the name instead would be friendlier to read in `sqlite3` and would
+/// mean two spellings of the same thing, so the hash wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredItem {
+    /// Which square, in the 45-slot layout. Equipment and hotbar squares are stored too.
+    pub slot: u32,
+    pub item: u32,
+    pub count: u32,
+}
+
 /// All mutable server state, shared between the auth, web and game servers.
 ///
 /// Interior mutability rather than `&mut self` so it can sit in an `Arc` and be handed to
@@ -355,7 +391,12 @@ impl AppState {
     ///
     /// Deliberately silent: this is a load, not a change, and echoing it back to the sink
     /// would rewrite the whole database on every start.
-    pub fn import(&self, accounts: Vec<AccountRecord>, photos: Vec<(String, Photo)>) {
+    pub fn import(
+        &self,
+        accounts: Vec<AccountRecord>,
+        photos: Vec<(String, Photo)>,
+        inventories: Vec<(String, Vec<StoredItem>)>,
+    ) {
         let mut inner = self.write();
 
         for record in accounts {
@@ -369,6 +410,37 @@ impl AppState {
         }
 
         inner.photos.extend(photos);
+        inner.inventories.extend(inventories);
+    }
+
+    /// What `account` is carrying, as last recorded. Empty for an account that has never played.
+    pub fn inventory(&self, account: &str) -> Vec<StoredItem> {
+        self.read()
+            .inventories
+            .get(&account.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record what an account is carrying now.
+    ///
+    /// Called from the game thread whenever the rucksack changes, which is often, so it returns
+    /// early when nothing actually differs: the sink writes to a database and a stack of dirt
+    /// picked up and put down again is not worth a round trip.
+    pub fn set_inventory(&self, account: &str, items: Vec<StoredItem>) {
+        let key = account.trim().to_ascii_lowercase();
+
+        {
+            let mut inner = self.write();
+
+            if inner.inventories.get(&key).is_some_and(|held| *held == items) {
+                return;
+            }
+
+            inner.inventories.insert(key.clone(), items.clone());
+        }
+
+        self.record(Change::Inventory { account: key, items });
     }
 
     fn record(&self, change: Change) {

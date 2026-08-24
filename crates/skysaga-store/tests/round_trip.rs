@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
-use skysaga_state::{AppState, CredentialPolicy};
+use skysaga_state::{AppState, CredentialPolicy, StoredItem};
 use skysaga_store::{Persistence, SqliteStore, Store};
 
 fn appearance() -> CustomisationData {
@@ -82,7 +82,7 @@ async fn a_character_survives_a_restart() {
     let snapshot = store.load().await.expect("loads");
     let state = AppState::new(CredentialPolicy::AnyNonEmpty);
 
-    state.import(snapshot.accounts, snapshot.photos);
+    state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
 
     let character = state.character("Alice").expect("the character came back");
 
@@ -116,7 +116,7 @@ async fn two_players_keep_their_own_characters_across_a_restart() {
     let snapshot = store.load().await.expect("loads");
     let state = AppState::new(CredentialPolicy::AnyNonEmpty);
 
-    state.import(snapshot.accounts, snapshot.photos);
+    state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
 
     assert_eq!(state.character("Alice").unwrap().name, "Rowan");
     assert_eq!(state.character("Bob").unwrap().name, "Sage");
@@ -148,7 +148,7 @@ async fn a_reset_character_stays_deleted_across_a_restart() {
     let snapshot = store.load().await.expect("loads");
     let state = AppState::new(CredentialPolicy::AnyNonEmpty);
 
-    state.import(snapshot.accounts, snapshot.photos);
+    state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
 
     assert_eq!(state.character("Alice"), None, "the character stayed deleted");
     assert!(
@@ -177,7 +177,79 @@ async fn a_photo_survives_a_restart() {
     let snapshot = store.load().await.expect("loads");
     let state = AppState::new(CredentialPolicy::AnyNonEmpty);
 
-    state.import(snapshot.accounts, snapshot.photos);
+    state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
 
     assert_eq!(state.photo("photo-1").expect("the photo came back").bytes, bytes);
+}
+
+/// The point of the whole exercise: a player's rucksack outlives the server.
+#[tokio::test]
+async fn an_inventory_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let carried = vec![
+        StoredItem { slot: 9, item: 0x1111_1111, count: 42 },
+        StoredItem { slot: 12, item: 0x2222_2222, count: 1 },
+    ];
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        // An account first: the rows are keyed to one, and a rucksack belonging to nobody
+        // could never be loaded back.
+        state.authenticate("Alice", "x").expect("signs in");
+        state.set_inventory("Alice", carried.clone());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
+
+    assert_eq!(state.inventory("Alice"), carried);
+    assert_eq!(state.inventory("alice"), carried, "the account key is case-insensitive");
+}
+
+/// A square that is emptied has to *stay* empty.
+///
+/// The change carries the whole rucksack, so a write that only upserts would leave the old row
+/// behind and hand the player back an item they had spent.
+#[tokio::test]
+async fn emptying_a_square_is_stored_as_empty() {
+    let (_guard, url) = database_url();
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").expect("signs in");
+
+        state.set_inventory(
+            "Alice",
+            vec![
+                StoredItem { slot: 9, item: 7, count: 3 },
+                StoredItem { slot: 10, item: 8, count: 1 },
+            ],
+        );
+
+        settle().await;
+
+        state.set_inventory("Alice", vec![StoredItem { slot: 9, item: 7, count: 3 }]);
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(
+        snapshot.inventories,
+        vec![("alice".to_owned(), vec![StoredItem { slot: 9, item: 7, count: 3 }])],
+    );
 }

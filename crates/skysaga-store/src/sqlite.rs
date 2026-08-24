@@ -8,7 +8,7 @@
 //! docs for why that is preferred to sqlx's `Any`.
 
 use async_trait::async_trait;
-use skysaga_state::{AccountRecord, Character, Photo};
+use skysaga_state::{AccountRecord, Character, Photo, StoredItem};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS photos (
     id          TEXT PRIMARY KEY NOT NULL,
     bytes       BLOB NOT NULL,
     captured_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inventories (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    slot        INTEGER NOT NULL,
+    item        INTEGER NOT NULL,
+    count       INTEGER NOT NULL,
+    PRIMARY KEY (account, slot)
 );
 ";
 
@@ -125,6 +134,28 @@ impl Store for SqliteStore {
             });
         }
 
+        let mut inventories: Vec<(String, Vec<StoredItem>)> = Vec::new();
+
+        for row in sqlx::query(
+            "SELECT account, slot, item, count FROM inventories ORDER BY account, slot",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let account: String = row.try_get("account")?;
+
+            let item = StoredItem {
+                slot: row.try_get::<i64, _>("slot")? as u32,
+                item: row.try_get::<i64, _>("item")? as u32,
+                count: row.try_get::<i64, _>("count")? as u32,
+            };
+
+            match inventories.last_mut() {
+                Some((held, items)) if *held == account => items.push(item),
+                _ => inventories.push((account, vec![item])),
+            }
+        }
+
         let photos = sqlx::query("SELECT id, bytes, captured_at FROM photos ORDER BY id")
             .fetch_all(&self.pool)
             .await?
@@ -142,7 +173,11 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-        Ok(Snapshot { accounts, photos })
+        Ok(Snapshot {
+            accounts,
+            photos,
+            inventories,
+        })
     }
 
     async fn save_account(&self, key: &str, display_name: &str) -> Result<(), StoreError> {
@@ -194,6 +229,34 @@ impl Store for SqliteStore {
             .bind(account)
             .execute(&self.pool)
             .await?;
+
+        Ok(())
+    }
+
+    /// Replace an account's whole rucksack.
+    ///
+    /// Delete-then-insert inside one transaction, because the change describes every square:
+    /// an upsert alone would leave rows behind for squares that were emptied, and those would
+    /// come back as items the player had spent.
+    async fn save_inventory(&self, account: &str, items: &[StoredItem]) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM inventories WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for item in items {
+            sqlx::query("INSERT INTO inventories (account, slot, item, count) VALUES (?, ?, ?, ?)")
+                .bind(account)
+                .bind(item.slot as i64)
+                .bind(item.item as i64)
+                .bind(item.count as i64)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        transaction.commit().await?;
 
         Ok(())
     }

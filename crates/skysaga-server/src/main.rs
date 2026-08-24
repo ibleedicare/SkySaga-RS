@@ -84,12 +84,13 @@ async fn main() -> anyhow::Result<()> {
             accounts = snapshot.accounts.len(),
             characters = snapshot.accounts.iter().filter(|a| a.character.is_some()).count(),
             photos = snapshot.photos.len(),
+            inventories = snapshot.inventories.len(),
             "loaded stored state",
         );
 
         let state = AppState::new(policy).with_sink(Arc::new(Persistence::start(store)));
 
-        state.import(snapshot.accounts, snapshot.photos);
+        state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
 
         state
     };
