@@ -604,10 +604,10 @@ impl GameServer {
     /// its id. The order matters -- the client must know the entity before a slot references
     /// it, or the slot points at nothing.
     ///
-    /// The item name is hashed rather than looked up. `geodata.json` holds the resource table
-    /// and this server does not read it yet, so an unknown name produces a stack the client
-    /// cannot draw instead of an error here. That is the one thing this is worse at than the
-    /// C#, which refuses `unknown item 'x'`.
+    /// **The name is checked before anything is minted.** A hash of a misspelling is a
+    /// perfectly good number that resolves to no resource, so an unchecked `/give` fills a
+    /// square with a stack the client cannot draw and reports success everywhere the server
+    /// looks. See [`Session::give_checked`].
     fn give(&mut self, account: &str, item: &str, count: u32) {
         let Some((guid, entity_id)) = self
             .sessions
@@ -634,10 +634,14 @@ impl GameServer {
         // connection's body.
         session.reserve_ids_from(self.next_entity_id);
 
-        let Some(item_entity) = session.give(item, count) else {
-            warn!(%account, "cannot give: the rucksack is full");
+        let item_entity = match session.give_checked(item, count, &self.world) {
+            Ok(entity) => entity,
 
-            return;
+            Err(refusal) => {
+                warn!(%account, %item, "cannot give: {refusal}");
+
+                return;
+            }
         };
 
         self.next_entity_id = self.next_entity_id.max(session.next_entity_id());

@@ -300,3 +300,43 @@ fn a_material_places_no_entity() {
     assert_eq!(geo.places_entity(skysaga_core::name_hash("Stone")), None);
     assert_eq!(geo.places_entity(skysaga_core::name_hash("Metal_Rod")), None);
 }
+
+// --- the resource catalogue ------------------------------------------------------------------
+
+/// The names a player may ask for by name.
+///
+/// `/give` hashes whatever it is handed, and a hash of a misspelling is a perfectly good number
+/// that resolves to no resource: the stack is minted, the log says it worked, and the square
+/// draws empty. This is the table that lets the ask be refused instead.
+#[test]
+fn every_resource_is_known_by_name() {
+    let Some(geo) = geodata() else { return };
+
+    // 365 in build 10414, asserted as a floor: a parse that found nothing is the failure
+    // worth catching, not a build with a different count.
+    assert!(geo.resource_names().len() >= 300, "{}", geo.resource_names().len());
+
+    assert!(geo.knows_resource("Dirt"));
+    assert!(geo.knows_resource("Wooden_Plank"));
+    assert!(geo.knows_resource("Anvil"));
+}
+
+/// A misspelling is refused. `Wooden_Plnk` is the one that cost a session an hour.
+#[test]
+fn a_name_that_is_not_in_the_table_is_not_known() {
+    let Some(geo) = geodata() else { return };
+
+    assert!(!geo.knows_resource("Wooden_Plnk"));
+    assert!(!geo.knows_resource(""));
+    assert!(!geo.knows_resource("Definitely_Not_An_Item"));
+}
+
+/// Case does not matter, because the hash does not care either: `name_hash` lower-cases before
+/// it hashes, so `dirt` and `Dirt` are the same item and both have to be accepted.
+#[test]
+fn a_resource_is_known_whatever_its_case() {
+    let Some(geo) = geodata() else { return };
+
+    assert!(geo.knows_resource("dirt"));
+    assert!(geo.knows_resource("WOODEN_PLANK"));
+}

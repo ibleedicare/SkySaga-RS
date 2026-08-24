@@ -8,7 +8,7 @@
 //!
 //! This crate does no I/O, so all of it is testable without a socket. See `tests/state.rs`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::RwLock;
 
@@ -154,6 +154,11 @@ struct Inner {
 
     /// Admin requests the game loop has not carried out yet. See [`AdminCommand`].
     commands: VecDeque<AdminCommand>,
+
+    /// Every item name the game defines, lower-cased. See [`AppState::set_item_catalogue`].
+    ///
+    /// Empty until something publishes it, and an empty catalogue refuses nothing.
+    item_catalogue: HashSet<String>,
 }
 
 /// One account and the character it owns, for loading and storing.
@@ -435,6 +440,32 @@ impl AppState {
 
         inner.photos.extend(photos);
         inner.inventories.extend(inventories);
+    }
+
+    /// Publish the names of every item the game defines.
+    ///
+    /// The chat server reads no data files and starts before the world is built, so the names
+    /// it needs to refuse `/give Wooden_Plnk` arrive here from whoever loaded `geodata.json`.
+    /// Names are stored lower-cased, because `name_hash` lower-cases before it hashes and so
+    /// case is not part of an item's identity anywhere downstream.
+    pub fn set_item_catalogue(&self, names: impl IntoIterator<Item = String>) {
+        self.write().item_catalogue = names
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+    }
+
+    /// Whether `name` is an item the game defines.
+    ///
+    /// **True while no catalogue has been published.** `geodata.json` belongs to the game and
+    /// is not in this repository, so a checkout without it has an empty catalogue, and refusing
+    /// every name there would be worse than the problem this solves. The game server checks
+    /// again against its own copy of the data before minting anything.
+    pub fn knows_item(&self, name: &str) -> bool {
+        let inner = self.read();
+
+        inner.item_catalogue.is_empty()
+            || inner.item_catalogue.contains(&name.to_ascii_lowercase())
     }
 
     /// Load the world's changed blocks at startup. Silent, as the rest of `import` is.
