@@ -15,7 +15,8 @@ use skysaga_game::{ClientPacket, PlacedDevice, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
 use skysaga_proto::packets::voxel::{ActionLocation, BlockSide, PerformVoxelActions};
-use skysaga_proto::packets::EntityAdd;
+use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
+use skysaga_proto::packets::{EntityAdd, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
 fn definitions() -> EntityDefinitions {
@@ -284,4 +285,67 @@ fn a_device_that_no_longer_exists_is_skipped() {
     );
 
     assert!(world.devices().is_empty());
+}
+
+// --- opening one -------------------------------------------------------------------------------
+
+/// **A placed device opens.** This is the regression that moving devices onto the world
+/// introduced: an anvil used to live on the session as a `Container`, so the interact path found
+/// it; once it became a `world::Device` that lookup missed and every placed device answered
+/// "not a container; nothing to open". Reported from a live client, on a mailbox.
+#[test]
+fn a_placed_device_can_be_opened() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_an_anvil(&mut session, &world);
+
+    let burst = session.handle(
+        ClientPacket::parse(&encode(|w| {
+            ExecuteEntityAction {
+                source_entity: session.player_entity_id(),
+                target_entity: anvil,
+                action: Some(Action::Interact),
+            }
+            .encode(w)
+        })),
+        &world,
+    );
+
+    assert_eq!(session.using_entity(), anvil, "the player is not using it");
+
+    assert!(
+        burst.iter().any(|bytes| {
+            BitReader::from_bytes(bytes).read_packet_id().ok() == Some(EntitySync::ID)
+        }),
+        "no sync came back, so the client draws no window",
+    );
+}
+
+/// And a second press re-opens it rather than toggling, because a device has an X button and
+/// the client never says when a panel was dismissed with it.
+#[test]
+fn pressing_again_re_opens_a_device() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_an_anvil(&mut session, &world);
+
+    let interact = encode(|w| {
+        ExecuteEntityAction {
+            source_entity: session.player_entity_id(),
+            target_entity: anvil,
+            action: Some(Action::Interact),
+        }
+        .encode(w)
+    });
+
+    session.handle(ClientPacket::parse(&interact), &world);
+    session.handle(ClientPacket::parse(&interact), &world);
+
+    assert_eq!(
+        session.using_entity(),
+        anvil,
+        "the second press closed it, so the player has to press twice to get it back",
+    );
 }

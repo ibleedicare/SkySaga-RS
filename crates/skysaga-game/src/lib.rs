@@ -72,7 +72,7 @@ use skysaga_world::geodata::EquippedAction;
 use skysaga_world::loot::Seeded;
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
 use skysaga_world::{
-    Component, Entity, HealthComponent, ResourcePickupComponent, TransformComponent,
+    Component, Entity, HealthComponent,
 };
 use tracing::{debug, info, warn};
 
@@ -2020,15 +2020,26 @@ impl Session {
     /// restored, because the client reacts to a *change* and would ignore being told the same
     /// id twice.
     fn open_container(&mut self, target: u32, world: &World) -> Vec<Vec<u8>> {
-        let Some(container) = self.container(target, world).cloned() else {
-            debug!(target, "not a container; nothing to open");
+        // A chest the world seeded, a chest a command spawned, **or a device a player put
+        // down** -- the last of which lives on the world rather than on this session, and was
+        // missed here when devices moved: every placed anvil and mailbox answered "not a
+        // container" and refused to open. Reported from a live client, on a mailbox.
+        let is_loot_chest = match self.container(target, world) {
+            Some(container) => container.is_loot_chest,
 
-            return Vec::new();
+            // A device has an X button, so it is re-opened rather than toggled; see below.
+            None if world.device(target).is_some() => false,
+
+            None => {
+                debug!(target, "not a container; nothing to open");
+
+                return Vec::new();
+            }
         };
 
         let opening = self.using_entity != target;
 
-        if !opening && !container.is_loot_chest {
+        if !opening && !is_loot_chest {
             // Re-open. Two syncs rather than one: the client ignores being told the id it
             // already holds, so it has to see 0 and then the id again.
             //

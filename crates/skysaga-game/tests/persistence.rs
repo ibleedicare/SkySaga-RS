@@ -14,7 +14,7 @@
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::BitReader;
 use skysaga_proto::packets::{EntityAdd, EntitySync};
-use skysaga_state::{StoredItem, StoredMail};
+use skysaga_state::StoredItem;
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
 fn world() -> World {
