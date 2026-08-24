@@ -564,3 +564,58 @@ impl ChunkSync {
         })
     }
 }
+
+/// `TimeSync` (57), hand the client the server's clock.
+///
+/// # This is the only thing that sets the client's clock
+///
+/// `FUN_00739900`, the handler, passes the body straight to `FUN_0089c620`, which stores the
+/// server's time and the client's own local time at that instant:
+///
+/// ```text
+/// _DAT_00ea0e60/64 = server_time          (this packet)
+/// _DAT_00ea0e68    = local_ms_at_sync
+/// now() = (local_ms_now - local_ms_at_sync) + server_time      -- FUN_0089c6b0
+/// ```
+///
+/// So after a sync `now()` returns **server time**, advanced locally between syncs. Those
+/// globals are written from nowhere else: `FUN_0089c620` has exactly one caller, and the only
+/// other writer is `FUN_00c40a60` at startup, which sets `local_ms_at_sync` and leaves the
+/// server time at **zero**.
+///
+/// That startup state is the trap. Un-synced, `now()` is
+/// `local_ms_now - local_ms_at_startup`, i.e. *milliseconds since the client launched*, a
+/// number in the thousands. Anything the server sends as a real timestamp is then astronomically
+/// larger than the client's clock, and every comparison against it reads as "in the future".
+///
+/// A crafting slot's start time is such a timestamp, and `FUN_008a7fa0` returns `0.0` when
+/// `timer >= now`, so an unsynced client shows every craft frozen at 0%: not slow, stuck.
+/// Neither this server nor the C# ever sent this packet, which is why it took a working craft
+/// to notice.
+///
+/// The value is milliseconds since the Unix epoch, the scale `FUN_0089c6b0` builds from
+/// `GetSystemTimeAsFileTime` against a `FILETIME` for year `0x7b2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimeSync {
+    /// Server time, in milliseconds since the Unix epoch.
+    pub now_ms: u64,
+}
+
+impl TimeSync {
+    pub const ID: u16 = 57;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+
+        // Flat little-endian sixty-four, as `TimeOfDayComponent::realworldstarttime` is
+        // written. The handler reads the body as two dwords, low then high, which is what this
+        // produces.
+        writer.write_u64_le(self.now_ms);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            now_ms: reader.read_u64_le()?,
+        })
+    }
+}

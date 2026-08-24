@@ -170,11 +170,25 @@ fn the_player_entity_is_well_formed() {
     // resolves components by reflection over their names, so that parameter silently never
     // replicated and every character rendered with the client's built-in defaults no matter
     // what was chosen in the creator.
+    //
+    // Five more are crafting, none of which the C# sends. `craftingslots` (18) and
+    // `maxcraftingslots` (51) make the player a crafting station, which is what hand crafting
+    // is; `numberofrecipescrollsused` (58) and `recipelist` (67) are the recipe book, without
+    // which the panel has no category tabs; and `joblist` (45) is what unlocks the recipes in
+    // it, without which every one of them says "advance in the tutorial".
+    //
+    // The last is `tasklist` (82), the quest log. It goes out empty rather than not at all:
+    // an absent parameter leaves the client with no list to hang rows on, so the panel draws
+    // and then cannot be clicked.
     assert_eq!(
         sync.present_indices().count(),
-        29,
-        "the C#'s 28, plus the customisationdata it never sent",
+        35,
+        "the C#'s 28, plus customisationdata, five crafting parameters and the quest log",
     );
+
+    for parameter in [18, 45, 51, 58, 67, 82] {
+        assert!(sync.present[parameter], "parameter {parameter} is missing");
+    }
 
     assert!(
         sync.present[19],
@@ -214,14 +228,18 @@ fn a_session_over_the_island_emits_a_complete_handshake() {
         .collect();
 
     // ServerInfo, MapDefinition, BeginSync, 16 chunks, 11 entities, sync-finished,
-    // SetClientEntity, tutorial. The eleventh entity is the chest, without which there is
-    // nothing in the world to press E on.
-    assert_eq!(ids.len(), 3 + 16 + 11 + 3);
+    // SetClientEntity, TimeSync, tutorial. The eleventh entity is the chest, without which
+    // there is nothing in the world to press E on.
+    //
+    // 191 is TimeSync, which the C# never sent: un-synced, the client's clock counts
+    // milliseconds since it launched rather than since the epoch, so every real timestamp the
+    // server sends reads as far in its future and a crafting slot sits at 0% for ever.
+    assert_eq!(ids.len(), 3 + 16 + 11 + 4);
 
     assert_eq!(&ids[..3], &[192, 140, 141]);
     assert!(ids[3..19].iter().all(|&id| id == 142), "the chunks");
     assert!(ids[19..30].iter().all(|&id| id == 234), "the entities");
-    assert_eq!(&ids[30..], &[139, 238, 162]);
+    assert_eq!(&ids[30..], &[139, 238, 191, 162]);
 
     // Every packet re-parses -- nothing is truncated or misframed.
     for bytes in &emitted {

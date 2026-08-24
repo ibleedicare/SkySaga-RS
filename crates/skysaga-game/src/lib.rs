@@ -21,7 +21,7 @@
 //! C->S ClientConnected            -> ServerInfo, MapDefinition
 //! C->S ClientReadyToSync          -> BeginSync(n), ChunkSync x n
 //! C->S ClientInitialSyncFinished  -> EntityAdd x n, ClientEntitiesSyncFinished
-//! C->S ClientReadyToPlay          -> SetClientEntity, DebugRequestFinishTutorial
+//! C->S ClientReadyToPlay          -> SetClientEntity, TimeSync, DebugRequestFinishTutorial
 //! ```
 
 pub mod combat;
@@ -31,7 +31,7 @@ pub mod world;
 pub use server::{GameServer, GameServerConfig};
 pub use world::{World, WorldConfig};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
@@ -48,6 +48,14 @@ use skysaga_proto::packets::mail::{
     TakeMailAttachment,
 };
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection, ANGLE_UNITS_PER_DEGREE};
+use skysaga_proto::packets::crafting::{
+    CollectCraftedItemInSlot, CraftingFailed, CraftingNotification, CraftingQueryQueue, ItemSpec,
+    MoveItemToCraftingDropSlot, NewResourceEncountered, PerformCraftingDropSlotAction,
+    QueueRecipeOnEntity, RemoveItemFromCraftingDropSlot,
+};
+use skysaga_proto::packets::todo_list::{
+    TodoListTaskAdd, TodoListTaskRef, TodoTask, TASK_LIST_DEFAULT,
+};
 use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -57,7 +65,7 @@ use skysaga_proto::packets::{
     BeginSync, EntityAdd, EntityRemoved, EntitySync, CharacterCreationResponse,
     ClientEntitiesSyncFinished, CreateHomeworld, DebugRequestFinishTutorial, NotifyPhotoCaptured,
     PhotoValidated, SaveCharacterName, SetCharacterCustomisationData, SetClientEntity,
-    TransferToServer,
+    TimeSync, TransferToServer,
 };
 use skysaga_world::geodata::EquippedAction;
 use skysaga_world::loot::Seeded;
@@ -78,6 +86,65 @@ const FALL_DAMAGE: u32 = 4;
 
 /// The entity a floor drop is, from `Entities.json`.
 const PICKUP: &str = "Pickup";
+
+/// The station a hand craft names, as a resource like any other.
+///
+/// The data models hand crafting as a station whose entity happens to be the player's own, so
+/// this is a name from `geodata.json` and not a special case in the protocol.
+const HAND_CRAFTING: &str = "Hand_Crafting";
+
+/// How many crafting drop squares the panel has: one to repair with, one to dismantle in.
+///
+/// Two, and the client's `craftingdropslots` list has a minimum and a maximum of two, so its
+/// count field is zero bits wide. See `CraftingDropSlotsComponent`.
+const DROP_SLOTS: usize = 2;
+
+/// The drop square that repairs, by index.
+const REPAIR_SLOT: usize = 0;
+
+/// The drop square that dismantles.
+const DISMANTLE_SLOT: usize = 1;
+
+/// How far ahead of the server a client's craft timer may run and still be honoured.
+///
+/// **The two never agree exactly, and they are not supposed to.** The server times a craft by
+/// the recipe's `ExecutionTimeInSeconds`; the client divides by a duration `FUN_008ab190`
+/// derives from the recipe *and the materials chosen*, and the clock it compares against is
+/// its own, rebased onto ours by `TimeSync` across a network hop.
+///
+/// Observed against a live client: it asked to collect a three-second craft at
+/// `elapsed_ms=2795`, was refused, and re-asked every thirty milliseconds until the server
+/// came round -- seven wasted round trips for a craft that was, by the client's own reckoning,
+/// finished. A quarter of a second of slack absorbs that. It is far too little to be worth
+/// anything to someone shortening a craft on purpose, and it is the difference between one
+/// exchange and eight.
+const COLLECT_GRACE_MS: u64 = 250;
+
+/// Whether to send `CraftingNotification` (67), the "your item is ready" toast.
+///
+/// # A diagnostic lever, and a warning about how one is used
+///
+/// This exists because a live client hung with a craft on its panel, and the two toasts were
+/// the only bytes on that wire a working server had never sent. Suppressing both appeared to
+/// fix it and the packet was blamed here in writing -- wrongly. The hang was reproducible only
+/// when the craft was started **without dragging the materials into the recipe's slot**: the
+/// client sends `QueueRecipeOnEntity` from the button anyway, and then waits for ever on a
+/// craft its own panel never considers begun. Driven properly -- pick the recipe, drag the
+/// resource into the square, press craft -- four consecutive crafts queue, run and collect with
+/// both toasts sent.
+///
+/// The lesson is worth more than the switch: a bisect over server packets is meaningless while
+/// the *client* is being driven differently between runs.
+///
+/// `SKYSAGA_CRAFT_NOTIFICATION=0` suppresses it.
+fn craft_notification_enabled() -> bool {
+    std::env::var("SKYSAGA_CRAFT_NOTIFICATION").as_deref() != Ok("0")
+}
+
+/// Whether to send `NewResourceEncountered` (43), the discovery popup. See above.
+fn discovery_toasts_enabled() -> bool {
+    std::env::var("SKYSAGA_DISCOVERY_TOASTS").as_deref() != Ok("0")
+}
 
 /// A player's full health: `PhysicalProperties > player > Durability > Player > Health`.
 const PLAYER_HEALTH: u32 = 40;
@@ -190,6 +257,49 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+
+    // --- crafting ------------------------------------------------------------------------
+    //
+    // A station craft names the station's entity; a hand craft names the player's own. The
+    // packets are identical either way, which is why the station is validated against the
+    // recipe rather than read off a flag.
+    /// 39, make this, here.
+    QueueRecipeOnEntity(QueueRecipeOnEntity),
+
+    /// 40, take what a finished slot holds.
+    CollectCraftedItemInSlot(CollectCraftedItemInSlot),
+
+    /// 41, "what is in this station's queue?". Answered with a sync, not a reply packet.
+    CraftingQueryQueue(CraftingQueryQueue),
+
+    // --- the drop slots ------------------------------------------------------------------
+    //
+    // The pocket-crafting panel's repair and dismantle tabs. `slotType` is an index into the
+    // two-element drop-slot array and not a verb: 0 is repair, 1 is dismantle.
+    /// 153, an item was dragged onto a drop square.
+    MoveItemToCraftingDropSlot(MoveItemToCraftingDropSlot),
+
+    /// 154, and dragged back out.
+    RemoveItemFromCraftingDropSlot(RemoveItemFromCraftingDropSlot),
+
+    /// 155, the repair or dismantle button was pressed.
+    PerformCraftingDropSlotAction(PerformCraftingDropSlotAction),
+
+    // --- the quest log -------------------------------------------------------------------
+    //
+    // All four are answered the same way: mutate `tasklist` and sync it back. There is no
+    // reply packet -- the component sync *is* the reply, as it is for the wallet.
+    /// 146, put an objective on the list.
+    TodoListTaskAdd(TodoListTaskAdd),
+
+    /// 145, delete a task for good.
+    TodoListTaskErase(TodoListTaskRef),
+
+    /// 147, take a task off the visible list, keeping it.
+    TodoListTaskRemove(TodoListTaskRef),
+
+    /// 148, put a removed task back.
+    TodoListTaskReAdd(TodoListTaskRef),
 
     // --- combat --------------------------------------------------------------------------
     //
@@ -329,6 +439,48 @@ impl ClientPacket {
 
             PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
                 .map(Self::PerformVoxelActions)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            QueueRecipeOnEntity::ID => QueueRecipeOnEntity::decode(&mut reader)
+                .map(Self::QueueRecipeOnEntity)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            CollectCraftedItemInSlot::ID => CollectCraftedItemInSlot::decode(&mut reader)
+                .map(Self::CollectCraftedItemInSlot)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            CraftingQueryQueue::ID => CraftingQueryQueue::decode(&mut reader)
+                .map(Self::CraftingQueryQueue)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            MoveItemToCraftingDropSlot::ID => MoveItemToCraftingDropSlot::decode(&mut reader)
+                .map(Self::MoveItemToCraftingDropSlot)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            RemoveItemFromCraftingDropSlot::ID => {
+                RemoveItemFromCraftingDropSlot::decode(&mut reader)
+                    .map(Self::RemoveItemFromCraftingDropSlot)
+                    .unwrap_or(Self::Unknown(wire_id))
+            }
+
+            PerformCraftingDropSlotAction::ID => PerformCraftingDropSlotAction::decode(&mut reader)
+                .map(Self::PerformCraftingDropSlotAction)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskAdd::ID => TodoListTaskAdd::decode(&mut reader)
+                .map(Self::TodoListTaskAdd)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::ERASE => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskErase)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::REMOVE => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskRemove)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::READD => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskReAdd)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             EquippedItemUsed::ID => EquippedItemUsed::decode(&mut reader)
@@ -541,6 +693,49 @@ pub struct Session {
     /// Items lying on the floor, waiting to be walked over.
     pickups: Vec<FloorDrop>,
 
+    /// What is queued or waiting to be collected, per station, one entry per occupied slot.
+    ///
+    /// **Keyed by the station's entity, and the player is one of them.** Hand crafting is not a
+    /// special case: the player carries a crafting component with one slot, an `Anvil` carries
+    /// one with three, and the packets name whichever entity the panel was opened on. One
+    /// shared queue would have a craft started at the anvil appear in the player's own hands.
+    ///
+    /// On the session rather than the world because every station a player can reach is one
+    /// they placed, and placements are per session too. Both move together.
+    crafting: BTreeMap<u32, Vec<skysaga_world::CraftingSlot>>,
+
+    /// What is sitting on the two crafting drop squares, by item entity id, 0 for empty.
+    ///
+    /// **Square 0 repairs and square 1 dismantles**, which the client decides and the server
+    /// only has to agree with: `FUN_008d72a0` refuses a drop into 0 for an item with no
+    /// durability, and `FUN_007fd290` refuses one into 1 for a stack smaller than the recipe's
+    /// output. Both refusals happen before anything is sent, so a server never sees them.
+    ///
+    /// The item is **out of the rucksack while it sits here**, exactly as the client draws it:
+    /// the inventory square empties and the drop square fills.
+    drop_slots: [u32; DROP_SLOTS],
+
+    /// Resources this player has been seen holding, so a discovery is announced once.
+    ///
+    /// The client keeps a set of its own -- `FUN_00878100` -- so a repeat costs only a packet;
+    /// this is what stops the toast firing every time a stack changes size.
+    seen_resources: BTreeSet<u32>,
+
+    /// A fixed wall clock, in milliseconds since the Unix epoch, or `None` for the real one.
+    ///
+    /// Crafting is the first thing here that needs the time of day rather than a tick count:
+    /// a slot carries the moment its craft *started* and the client divides by the recipe's
+    /// duration to get a progress bar. Reading `SystemTime::now()` inline would make every
+    /// crafting test depend on how fast it runs, so the clock is a value the tests can pin.
+    clock_ms: Option<u64>,
+
+    /// The quest log, one entry per row the client shows.
+    ///
+    /// On the session for the same reason as `crafting`: it lives on the player's own entity.
+    /// The client drives it entirely, the server allocates ids and stores what it is told , 
+    /// because nothing yet activates a job challenge, which is what would auto-add a row.
+    todo_tasks: Vec<TodoTask>,
+
     /// Where loot rolls come from.
     ///
     /// Seeded from the player's entity id rather than a clock, so this crate keeps its
@@ -593,6 +788,11 @@ impl Session {
             player_damage: 0,
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
+            crafting: BTreeMap::new(),
+            drop_slots: [0; DROP_SLOTS],
+            seen_resources: BTreeSet::new(),
+            clock_ms: None,
+            todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
@@ -847,6 +1047,18 @@ impl Session {
                     encode(|w| {
                         SetClientEntity {
                             entity_id: self.player_entity_id,
+                        }
+                        .encode(w)
+                    }),
+                    // **Give the client a clock.** Until this arrives its `now()` counts
+                    // milliseconds since the client launched, not since the epoch, so every
+                    // real timestamp the server sends is far in its future. A crafting slot's
+                    // start time is one of those, and the craft then sits at 0% for ever.
+                    // Nothing else sets it: the client's clock globals have exactly one writer
+                    // reachable from the network, and this is the packet that reaches it.
+                    encode(|w| {
+                        TimeSync {
+                            now_ms: self.now_ms(),
                         }
                         .encode(w)
                     }),
@@ -1115,6 +1327,50 @@ impl Session {
 
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
+
+            // --- crafting -----------------------------------------------------------------
+            (ClientPacket::QueueRecipeOnEntity(packet), _) => self.queue_recipe(packet, world),
+
+            (ClientPacket::CollectCraftedItemInSlot(packet), _) => {
+                self.collect_craft(packet, world)
+            }
+
+            (ClientPacket::CraftingQueryQueue(packet), _) => {
+                // No reply packet exists. The answer is the station's own queue, synced.
+                self.sync_of(packet.entity_id, &["craftingslots"], world)
+                    .into_iter()
+                    .collect()
+            }
+
+            (ClientPacket::MoveItemToCraftingDropSlot(packet), _) => {
+                self.move_to_drop_slot(packet, world)
+            }
+
+            (ClientPacket::RemoveItemFromCraftingDropSlot(packet), _) => {
+                self.take_from_drop_slot(packet.slot_type, world)
+            }
+
+            (ClientPacket::PerformCraftingDropSlotAction(packet), _) => {
+                self.perform_drop_slot_action(packet.slot_type, world)
+            }
+
+            // --- the quest log ------------------------------------------------------------
+            (ClientPacket::TodoListTaskAdd(packet), _) => self.todo_add(packet, world),
+
+            (ClientPacket::TodoListTaskErase(packet), _) => self.todo_erase(packet, world),
+
+            // Remove and ReAdd are a visibility flip rather than a deletion. Nothing in the
+            // record has been identified as a "hidden" bit, so until one is, both are
+            // acknowledged with a sync and change nothing, which keeps the client's list and
+            // the server's identical instead of silently diverging.
+            (ClientPacket::TodoListTaskRemove(packet), _)
+            | (ClientPacket::TodoListTaskReAdd(packet), _) => {
+                debug!(task = packet.task_id, "todo visibility change");
+
+                self.sync_of(self.player_entity_id, &["tasklist"], world)
+                    .into_iter()
+                    .collect()
+            }
 
             // --- combat -------------------------------------------------------------------
             (ClientPacket::EquippedItemUsed(packet), _) => self.equipped_item_used(packet, world),
@@ -1510,10 +1766,27 @@ impl Session {
     /// as a missing handler, which is why this is worth answering even though nothing else
     /// depends on it yet.
     fn perform_voxel_action(&mut self, packet: PerformVoxelActions, world: &World) -> Vec<Vec<u8>> {
-        // Only a hand can be holding anything, and only a placeable block places. The hotbar
-        // keeps resource *hashes*, so it can still name an item the player has run out of --
-        // hence the check that a stack actually exists before one is taken from it.
-        let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
+        // Only a hand can be holding anything, and what it holds decides between three
+        // outcomes: a block places a voxel, a device or a decoration places an *entity*, and
+        // everything else digs. The hotbar keeps resource *hashes*, so it can still name an
+        // item the player has run out of -- hence the check that a stack actually exists
+        // before one is taken from it.
+        let held = packet.location.is_hand().then(|| self.held_resource()).flatten();
+
+        // An Anvil is not a placeable block, so before this branch existed it fell through to
+        // the dig below and broke the ground it was clicked on.
+        if let Some((item, entity)) =
+            held.and_then(|held| Some((held, world.geodata.places_entity(held)?)))
+        {
+            return self.place_entity(item, entity, &packet, world);
+        }
+
+        let placing = held.and_then(|held| {
+            world
+                .geodata
+                .placeable_for_hash(held)
+                .map(|material| (held, material))
+        });
 
         let Some((item, material)) = placing else {
             return self.dig(packet.chunk, packet.voxel, world);
@@ -1542,6 +1815,734 @@ impl Session {
         let mut out = vec![Self::chunk_edit(packet.chunk, voxel, material)];
 
         out.extend(self.apply(taken, world));
+
+        out
+    }
+
+    /// Put a device or a decoration in the world, out of the stack the player is holding.
+    ///
+    /// # The voxel packet is the whole placement
+    ///
+    /// `PerformVoxelActions` is the **only** packet a device placement sends. A live Anvil
+    /// produced no `ExecuteEntityAction` at all, so there is no second half to wait for and
+    /// nothing here needs the action row: which slot acted, which voxel and which face are all
+    /// in the packet already.
+    ///
+    /// # The entity is the resource's own name
+    ///
+    /// The `Anvil` item places the `Anvil` entity, and the data says so only by way of
+    /// `ActionVoxel`. The definition is looked up **before** the stack is touched, so a
+    /// resource naming an entity the data file does not define places nothing rather than
+    /// eating an item.
+    fn place_entity(
+        &mut self,
+        item: u32,
+        name: &str,
+        packet: &PerformVoxelActions,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(definition) = world.definitions.get(name).cloned() else {
+            warn!(%name, "places an entity the data file does not define");
+
+            return Vec::new();
+        };
+
+        let taken = self.take_one(item);
+
+        if taken.is_empty() {
+            debug!(item, %name, "the hotbar names a device the player does not have");
+
+            return self.dig(packet.chunk, packet.voxel, world);
+        }
+
+        // Next to the face that was clicked, as a block placement is: the clicked voxel is
+        // solid, so an entity put there is inside it.
+        let voxel = packet.placement_voxel();
+        let position = World::voxel_corner(packet.chunk, voxel);
+
+        let id = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(id + 1);
+
+        let links = definition
+            .default_voxel_links()
+            .into_iter()
+            .map(|(offset, voxel_index)| skysaga_world::VoxelLink {
+                x: offset[0],
+                y: offset[1],
+                z: offset[2],
+                voxel_index,
+            })
+            .collect();
+
+        let built = Entity::new(
+            id,
+            world::device_components(position, links, definition.max_crafting_slots()),
+        );
+
+        self.spawned.push(world::Container {
+            id,
+            name: name.to_owned(),
+            entity: built,
+            definition,
+            // Not a container: a station's window is its crafting queue, and a device with an
+            // inventory would draw an empty rucksack over the top of it.
+            slots: 0,
+            is_loot_chest: false,
+        });
+
+        info!(entity = id, %name, ?voxel, ?position, "placed a device");
+
+        // The entity, then the stack it came out of -- the same order and the same reason as a
+        // block: a placement that reports only the entity leaves the player holding an
+        // inexhaustible stack.
+        let mut out = Vec::new();
+
+        if let Some((built, definition)) = self.entity_now(id, world) {
+            out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+        }
+
+        out.extend(self.apply(taken, world));
+
+        out
+    }
+
+    // --- the quest log ------------------------------------------------------------------
+
+    /// Put an objective on the list and sync it back.
+    ///
+    /// **There is no reply packet.** `TodoListTaskAdd` is client-to-server only, and what
+    /// confirms it is the `tasklist` sync, the same shape as the wallet, where the currency
+    /// sync *is* the answer to `RechargeLifeTickets`.
+    ///
+    /// The id the client sends is not trusted. Ids are 8 bits over a list capped at 32 and the
+    /// UI element is slot-indexed (`Todo_00_tutorial`), so they are the server's to allocate;
+    /// honouring a client-chosen id lets two rows collide and makes Erase ambiguous.
+    fn todo_add(&mut self, packet: TodoListTaskAdd, world: &World) -> Vec<Vec<u8>> {
+        if self.todo_tasks.len() >= TASK_LIST_DEFAULT as usize {
+            debug!("the quest log is full");
+
+            return Vec::new();
+        }
+
+        let Some(task_id) = self.todo_list().free_id() else {
+            return Vec::new();
+        };
+
+        let task = TodoTask {
+            task_id,
+            ..packet.task
+        };
+
+        debug!(
+            task = task_id,
+            manually_added = packet.manually_added,
+            "todo task added",
+        );
+
+        self.todo_tasks.push(task);
+
+        self.sync_of(self.player_entity_id, &["tasklist"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// Delete a task for good.
+    fn todo_erase(&mut self, packet: TodoListTaskRef, world: &World) -> Vec<Vec<u8>> {
+        let before = self.todo_tasks.len();
+
+        self.todo_tasks.retain(|task| task.task_id != packet.task_id);
+
+        if self.todo_tasks.len() == before {
+            debug!(task = packet.task_id, "erasing a task that is not there");
+        }
+
+        // Synced even when nothing changed: the client has already taken the row off its own
+        // list, so staying silent leaves the two disagreeing.
+        self.sync_of(self.player_entity_id, &["tasklist"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// The quest log as a component, for syncing.
+    fn todo_list(&self) -> skysaga_world::TodoListComponent {
+        skysaga_world::TodoListComponent {
+            tasks: self.todo_tasks.clone(),
+        }
+    }
+
+    // --- crafting -----------------------------------------------------------------------
+
+    /// Start a craft, or say why not.
+    ///
+    /// **Every refusal answers.** `CraftingFailed` is the only thing that takes the client out
+    /// of its crafting state; refusing in silence leaves the panel spinning until the player
+    /// closes and reopens it, which looks like the server having crashed.
+    fn queue_recipe(&mut self, packet: QueueRecipeOnEntity, world: &World) -> Vec<Vec<u8>> {
+        // **The refusal names what could not be made, not the recipe that would have made
+        // it.** The client's handler resolves this field through the *resource* table
+        // (`FUN_008787e0`) before it clears the crafting state, so a recipe id -- which is a
+        // hash of a recipe name and resolves to no resource at all -- leaves the panel spinning
+        // for ever. Observed live: a torch queued at an anvil was refused, the packet went out,
+        // and the window stayed busy until the client was restarted.
+        let output_of = |recipe: Option<&skysaga_world::geodata::Recipe>| {
+            recipe
+                .and_then(|recipe| recipe.output())
+                .map(|(name, _)| skysaga_core::name_hash(name))
+        };
+
+        let refuse = |reason: &str, recipe: Option<&skysaga_world::geodata::Recipe>| {
+            debug!(entity = packet.entity_id, item = ?packet.item_id, reason, "craft refused");
+
+            vec![encode(|w| {
+                CraftingFailed {
+                    entity_id: packet.entity_id,
+                    resource: output_of(recipe),
+                }
+                .encode(w)
+            })]
+        };
+
+        let Some(item) = packet.item_id else {
+            return refuse("no item named", None);
+        };
+
+        // The recipe is addressed by its own name's hash, not by what it makes.
+        let Some(recipe) = world.geodata.recipe_for_id(item).cloned() else {
+            return refuse("no such recipe", None);
+        };
+
+        // **The packet names whichever panel is open, which is not always the right station.**
+        //
+        // Observed live: with an anvil's window open, the client queued `Hand_Craft_Torch`
+        // against the *anvil's* entity. The hand-crafting panel does not address the player's
+        // own entity while a station is open -- it addresses the station -- so a server that
+        // insists the two agree refuses every hand recipe the moment the player stands at an
+        // anvil, which is most of the time.
+        //
+        // So a hand recipe is served wherever it is asked for: a pair of hands is available at
+        // an anvil as much as anywhere else. Anything needing a real station still has to name
+        // that station, which is what stops an anvil recipe being made in mid-air.
+        let Some(station) = self.station_of(packet.entity_id, world) else {
+            return refuse("not a crafting station", Some(&recipe));
+        };
+
+        let made_here =
+            recipe.station() == Some(station.as_str()) || recipe.station() == Some(HAND_CRAFTING);
+
+        if !made_here {
+            return refuse("that recipe is not made here", Some(&recipe));
+        }
+
+        let queued = self.crafting.get(&packet.entity_id).map_or(0, Vec::len);
+
+        if queued >= self.max_crafting_slots_of(packet.entity_id, world) as usize {
+            return refuse("no free slot", Some(&recipe));
+        }
+
+        // Check the whole list before taking any of it, or a craft that runs out halfway
+        // consumes the materials it did find.
+        for (material, quantity) in recipe.materials() {
+            if self.carried(skysaga_core::name_hash(material)) < quantity {
+                return refuse("not enough materials", Some(&recipe));
+            }
+        }
+
+        // **The clock, before the craft that depends on it.**
+        //
+        // A crafting slot carries the moment it started, and the client turns that into a
+        // progress bar with its own `now()`. Until a `TimeSync` lands, that `now()` is
+        // milliseconds since the client *launched* -- a number in the thousands -- so every
+        // real timestamp is in its far future, progress stays at 0.0 for ever, and the panel
+        // hangs holding the keyboard. Sending the clock once at handover is not enough: it is
+        // one packet in the middle of a busy handshake, and a client that misses it can never
+        // finish a craft again for the whole session. Measured live -- the same three crafts
+        // completed or hung depending on the run, with byte-identical crafting traffic.
+        //
+        // The handler rebases exactly (`FUN_0089c620` stores the server's time *and* a fresh
+        // local baseline), so re-sending costs eight bytes and cannot drift.
+        let mut out = vec![encode(|w| {
+            TimeSync {
+                now_ms: self.now_ms(),
+            }
+            .encode(w)
+        })];
+
+        for (material, quantity) in recipe.materials() {
+            out.extend(self.take(skysaga_core::name_hash(material), quantity, world));
+        }
+
+        let (output, _) = recipe.output().unwrap_or(("", 0));
+
+        // **The moment it started, not zero.** The client's progress is
+        // `(now - timer) / duration`, so a zero start time is one at the Unix epoch and every
+        // craft read as finished the instant it was queued -- the recipe's three seconds
+        // elapsed before the panel had drawn.
+        let started = self.now_ms();
+
+        self.crafting
+            .entry(packet.entity_id)
+            .or_default()
+            .push(skysaga_world::CraftingSlot {
+                recipe: Some(recipe.id()),
+                output: Some(skysaga_core::name_hash(output)),
+                timer: started,
+                ready_ms: started + Self::duration_ms(&recipe),
+                announced: false,
+                materials: Vec::new(),
+            });
+
+        info!(recipe = %recipe.name, output, %station, "queued a craft");
+
+        out.extend(self.sync_of(packet.entity_id, &["craftingslots"], world));
+
+        // No "your item is ready" here: it is not. See [`Self::take_notifications`], which
+        // sends one when the timer actually runs out.
+        out
+    }
+
+    /// How long a craft takes, in milliseconds.
+    ///
+    /// The client derives its own figure from the recipe **and the materials chosen**, so the
+    /// two never agree exactly; see [`COLLECT_GRACE_MS`].
+    fn duration_ms(recipe: &skysaga_world::geodata::Recipe) -> u64 {
+        (recipe.execution_time_seconds.max(0.0) * 1000.0) as u64
+    }
+
+    /// "Your item is ready", for every craft whose timer has just run out.
+    ///
+    /// **A toast, not a state change.** `FUN_0073b210` touches nothing but the notification
+    /// queue, so this does not make a slot collectable -- the slot's own start time does that.
+    /// Without it a finished craft still collects; the player is simply never told, which looks
+    /// exactly like a craft that silently did nothing.
+    fn crafting_announcements(&mut self) -> Vec<Vec<u8>> {
+        if !craft_notification_enabled() {
+            return Vec::new();
+        }
+
+        let now = self.now_ms();
+        let mut out = Vec::new();
+
+        for queue in self.crafting.values_mut() {
+            for slot in queue.iter_mut() {
+                if slot.announced || slot.ready_ms > now {
+                    continue;
+                }
+
+                slot.announced = true;
+
+                out.push(encode(|w| {
+                    CraftingNotification {
+                        resource: slot.output,
+                        // **Both specs name the item.** Sent empty, this packet wedges the
+                        // client's crafting panel: measured live, three consecutive crafts
+                        // complete with the toast suppressed and the craft it announces hangs
+                        // with it sent. The handler builds a notification record out of the
+                        // resource *and* both specs, so an empty pair is the obvious suspect.
+                        item_spec_a: ItemSpec {
+                            resource: slot.output,
+                            ..Default::default()
+                        },
+                        item_spec_b: ItemSpec {
+                            resource: slot.output,
+                            ..Default::default()
+                        },
+                    }
+                    .encode(w)
+                }));
+            }
+        }
+
+        out
+    }
+
+    /// Take a finished craft out of its slot and into the rucksack.
+    fn collect_craft(&mut self, packet: CollectCraftedItemInSlot, world: &World) -> Vec<Vec<u8>> {
+        // Logged on arrival, not just on failure. Whether the client ever asks to collect is
+        // the first question when a craft "does nothing", and a handler that is silent on the
+        // happy path cannot answer it.
+        debug!(
+            station = packet.entity_id,
+            slot = packet.slot,
+            "collect requested"
+        );
+
+        let Some(slot) = self
+            .crafting
+            .get(&packet.entity_id)
+            .and_then(|queue| queue.get(packet.slot as usize))
+            .cloned()
+        else {
+            debug!(slot = packet.slot, "collecting an empty crafting slot");
+
+            return Vec::new();
+        };
+
+        let Some(recipe) = slot.recipe.and_then(|id| world.geodata.recipe_for_id(id)) else {
+            return Vec::new();
+        };
+
+        // **The server decides when a craft is done, not the client.**
+        //
+        // The client already refuses to offer a slot below 100% -- `FUN_008a7fa0` gates the
+        // collect on its progress reaching 1.0 -- so an early request means either a modified
+        // client or a clock the two disagree about. Either way, handing the item over would
+        // make the recipe's `ExecutionTimeInSeconds` advisory, which is the whole point of it.
+        //
+        // Silent, because there is no "not yet" packet: `CraftingFailed` unsticks the crafting
+        // *panel*, and sending one for a collect the player never consciously made would take
+        // them out of a UI they are still using.
+        let elapsed_ms = self.now_ms().saturating_sub(slot.timer);
+        let full_ms = (recipe.execution_time_seconds.max(0.0) * 1000.0) as u64;
+        let required_ms = full_ms.saturating_sub(COLLECT_GRACE_MS);
+
+        if elapsed_ms < required_ms {
+            debug!(
+                slot = packet.slot,
+                elapsed_ms, required_ms, full_ms, "collecting a craft that is not finished",
+            );
+
+            return Vec::new();
+        }
+
+        let (name, quantity) = recipe.output().unwrap_or(("", 1));
+        let name = name.to_owned();
+
+        if let Some(queue) = self.crafting.get_mut(&packet.entity_id) {
+            queue.remove(packet.slot as usize);
+        }
+
+        let Some(stack) = self.give(&name, quantity) else {
+            warn!(item = %name, "crafted, but the rucksack is full");
+
+            // The slot is already gone, so say so; the item is lost, which is worse than
+            // refusing would have been and is why a full rucksack should be checked earlier.
+            return self.sync_of(packet.entity_id, &["craftingslots"], world)
+                .into_iter()
+                .collect();
+        };
+
+        let mut out = self.apply(
+            vec![
+                Effect::ItemCreated { entity: stack },
+                Effect::SlotsChanged {
+                    owner: self.player_entity_id,
+                },
+            ],
+            world,
+        );
+
+        out.extend(self.sync_of(packet.entity_id, &["craftingslots"], world));
+
+        info!(item = %name, quantity, "collected a craft");
+
+        out
+    }
+
+    // --- the drop slots: repair and dismantle -------------------------------------------
+
+    /// Drag an item out of the rucksack and onto a drop square.
+    ///
+    /// **The client does not move it itself.** It sends the packet and waits, so both
+    /// `inventoryentitylist` and `craftingdropslots` have to be synced back or the square stays
+    /// empty and the item stays in the bag -- the "UI looks frozen" failure that
+    /// `InventoryItemSwap` documents.
+    fn move_to_drop_slot(
+        &mut self,
+        packet: MoveItemToCraftingDropSlot,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(square) = self.drop_slot(packet.slot_type) else {
+            return Vec::new();
+        };
+
+        // One item per square. The client will not offer a second, and quietly swapping would
+        // leave the first nowhere: it is out of the rucksack while it sits here.
+        if self.drop_slots[square] != 0 {
+            debug!(square, "that drop square is already full");
+
+            return Vec::new();
+        }
+
+        let Some((item, effects)) = self
+            .inventories
+            .detach(self.player_entity_id, packet.slot)
+        else {
+            debug!(slot = packet.slot, "dropped an empty square onto a drop square");
+
+            return Vec::new();
+        };
+
+        self.drop_slots[square] = item;
+
+        debug!(square, item, from = packet.slot, "moved onto a drop square");
+
+        let mut out = self.apply(effects, world);
+
+        out.extend(self.sync_drop_slots(world));
+
+        out
+    }
+
+    /// Drag it back out again.
+    ///
+    /// Into the first free rucksack square, and if there is none the item **stays where it
+    /// is**: dropping it on the floor or destroying it would lose something the player put
+    /// down deliberately.
+    fn take_from_drop_slot(&mut self, slot_type: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(square) = self.drop_slot(slot_type) else {
+            return Vec::new();
+        };
+
+        let item = self.drop_slots[square];
+
+        if item == 0 {
+            return Vec::new();
+        }
+
+        let effects = self.inventories.collect(self.player_entity_id, item);
+
+        if effects.is_empty() {
+            warn!(square, item, "nowhere to put it back; the rucksack is full");
+
+            return Vec::new();
+        }
+
+        self.drop_slots[square] = 0;
+
+        debug!(square, item, "taken back off a drop square");
+
+        let mut out = self.apply(effects, world);
+
+        out.extend(self.sync_drop_slots(world));
+
+        out
+    }
+
+    /// Press repair, or dismantle.
+    ///
+    /// # Repair is honest about doing nothing
+    ///
+    /// The server does not model item durability -- an item entity is a name and a count -- so
+    /// there is nothing to restore. The item goes back to the rucksack and the panel is told
+    /// the job is done, which is what the client needs to leave its busy state. When durability
+    /// arrives this is the one line that changes.
+    ///
+    /// # Dismantle gives the recipe's materials back
+    ///
+    /// The item is taken apart into whatever the recipe that builds it consumed. Only one
+    /// output's worth is consumed at a time, which matches the client's own precondition: it
+    /// refuses the drop when the stack is smaller than the recipe's output quantity.
+    fn perform_drop_slot_action(&mut self, slot_type: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(square) = self.drop_slot(slot_type) else {
+            return Vec::new();
+        };
+
+        let item = self.drop_slots[square];
+
+        if item == 0 {
+            debug!(square, "the button was pressed with nothing on the square");
+
+            return Vec::new();
+        }
+
+        match square {
+            DISMANTLE_SLOT => self.dismantle(item, world),
+
+            // Repair. Nothing to restore, so the item simply comes back.
+            REPAIR_SLOT => {
+                let resource = self.inventories.name(item);
+
+                let mut out = self.take_from_drop_slot(slot_type, world);
+
+                out.push(encode(|w| {
+                    CraftingNotification {
+                        resource,
+                        ..Default::default()
+                    }
+                    .encode(w)
+                }));
+
+                info!(item, "repaired, as far as anything is damaged");
+
+                out
+            }
+
+            // Unreachable: `drop_slot` has already refused anything outside the two squares.
+            _ => Vec::new(),
+        }
+    }
+
+    /// Take the item on the dismantle square apart, and hand its materials back.
+    fn dismantle(&mut self, item: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(resource) = self.inventories.name(item) else {
+            return Vec::new();
+        };
+
+        // The recipe that **builds** this item is what says what it is made of. Repair recipes
+        // (`RecipeType` 0) are excluded: their output is a repaired entity rather than a thing
+        // with materials in it.
+        let Some(recipe) = world
+            .geodata
+            .recipes()
+            .iter()
+            .find(|recipe| {
+                recipe.recipe_type == 1
+                    && recipe
+                        .output()
+                        .is_some_and(|(name, _)| skysaga_core::name_hash(name) == resource)
+            })
+            .cloned()
+        else {
+            debug!(item, "nothing makes that, so nothing takes it apart");
+
+            return Vec::new();
+        };
+
+        let (_, made) = recipe.output().unwrap_or(("", 1));
+
+        let effects = self.inventories.consume_loose(item, made.max(1));
+
+        if effects.is_empty() {
+            debug!(item, made, "not enough of it to dismantle one");
+
+            return Vec::new();
+        }
+
+        if self.inventories.item(item).is_none() {
+            self.drop_slots[DISMANTLE_SLOT] = 0;
+        }
+
+        let mut out = self.apply(effects, world);
+
+        // The materials, as new stacks in the rucksack. A full rucksack loses them, which is
+        // the same trade-off a collected craft makes and the same place a check belongs when
+        // one is added.
+        for (material, quantity) in recipe.materials() {
+            let material = material.to_owned();
+
+            let Some(stack) = self.give(&material, quantity) else {
+                warn!(item = %material, "dismantled, but the rucksack is full");
+
+                continue;
+            };
+
+            out.extend(self.apply(
+                vec![
+                    Effect::ItemCreated { entity: stack },
+                    Effect::SlotsChanged {
+                        owner: self.player_entity_id,
+                    },
+                ],
+                world,
+            ));
+        }
+
+        info!(%recipe.name, "dismantled");
+
+        out.extend(self.sync_drop_slots(world));
+
+        out
+    }
+
+    /// Which square a `slotType` names, or `None` for one that does not exist.
+    ///
+    /// The field is two bits wide because there are two squares, not because indices go up to
+    /// three -- so 2 and 3 are values a well-behaved client never sends.
+    fn drop_slot(&self, slot_type: u32) -> Option<usize> {
+        let square = slot_type as usize;
+
+        (square < DROP_SLOTS).then_some(square).or_else(|| {
+            debug!(slot_type, "no such crafting drop square");
+
+            None
+        })
+    }
+
+    /// Tell the client what is on the drop squares now.
+    fn sync_drop_slots(&self, world: &World) -> Vec<Vec<u8>> {
+        self.sync_of(self.player_entity_id, &["craftingdropslots"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// What is on the two drop squares, by item entity id.
+    pub fn drop_slots(&self) -> [u32; DROP_SLOTS] {
+        self.drop_slots
+    }
+
+    /// The station `entity` is, by the resource name a recipe would call it.
+    ///
+    /// **`Hand_Crafting` is a station like any other.** It is a real resource name, it appears
+    /// in the client, and 17 recipes name it as their non-expendable input -- so the player's
+    /// own entity answers with it and hand crafting needs no special case beyond this line.
+    ///
+    /// `None` for anything that is not a station, which is what refuses a craft queued against
+    /// a sheep.
+    fn station_of(&self, entity: u32, world: &World) -> Option<String> {
+        if entity == self.player_entity_id {
+            return Some(HAND_CRAFTING.to_owned());
+        }
+
+        let container = self.container(entity, world)?;
+
+        // A placed device is named by the resource that placed it, and a recipe's station is
+        // that same name -- `Anvil` the item, `Anvil` the entity, `Anvil` the input.
+        container
+            .definition
+            .max_crafting_slots()
+            .map(|_| container.name.clone())
+    }
+
+    /// How long `entity`'s crafting queue is, from the entity's own data.
+    ///
+    /// A station's queue length is a property of the station: an `Anvil` takes three crafts at
+    /// once, a pair of hands one. Reading it from the definition rather than assuming keeps a
+    /// placed station's window agreeing with the server about how many slots it has, and the
+    /// client draws exactly as many squares as `maxcraftingslots` says.
+    ///
+    /// Zero for an entity that is not a station at all, which refuses a craft queued against
+    /// a sheep without a special case for it.
+    pub fn max_crafting_slots_of(&self, entity: u32, world: &World) -> u8 {
+        self.entity_now(entity, world)
+            .and_then(|(_, definition)| definition.max_crafting_slots())
+            .unwrap_or(0)
+    }
+
+    /// Where a placed device stands, in the client's position units.
+    pub fn device_position(&self, entity: u32, world: &World) -> Option<[u32; 3]> {
+        let container = self.container(entity, world)?;
+
+        container.entity.components.iter().find_map(|component| {
+            match component {
+                Component::Transform(transform) => Some(transform.position),
+                _ => None,
+            }
+        })
+    }
+
+    /// How many of `hash` the player is carrying, across every stack.
+    fn carried(&self, hash: u32) -> u32 {
+        (0..self.inventory().len() as u32)
+            .filter_map(|slot| self.inventories.slot(self.player_entity_id, slot))
+            .filter(|item| *item != 0)
+            .filter(|item| self.inventories.name(*item) == Some(hash))
+            .filter_map(|item| self.inventories.count(item))
+            .sum()
+    }
+
+    /// Take `quantity` of `hash` out of the rucksack, and say what the client must be told.
+    fn take(&mut self, hash: u32, quantity: u32, world: &World) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+
+        for _ in 0..quantity {
+            let taken = self.take_one(hash);
+
+            if taken.is_empty() {
+                break;
+            }
+
+            out.extend(self.apply(taken, world));
+        }
 
         out
     }
@@ -1613,8 +2614,16 @@ impl Session {
     ///
     /// Draining, so a notification goes out once. `Session::handle` answers a request; this is
     /// how something that happens *to* a player reaches them.
+    ///
+    /// A finished craft is checked for here rather than pushed from a timer: the server has no
+    /// per-session tick, and this is called after every packet a client sends -- which, with
+    /// movement arriving several times a second, is as good as one.
     pub fn take_notifications(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.notifications)
+        let mut out = self.crafting_announcements();
+
+        out.append(&mut self.notifications);
+
+        out
     }
 
     /// Send the inbox, then say it is complete.
@@ -1771,17 +2780,6 @@ impl Session {
         out
     }
 
-    /// The item hash the player is holding, and the block it places, if it places one.
-    fn held_block(&self, world: &World) -> Option<(u32, u8)> {
-        let held = self.held_resource()?;
-
-        // The hotbar carries a hash and the table is keyed by name, so this is a reverse
-        // lookup: which placeable block's resource hashes to what the hand holds.
-        let material = world.geodata.placeable_for_hash(held)?;
-
-        Some((held, material))
-    }
-
     /// Take one item of `hash` out of the rucksack, and say what the client must be told.
     ///
     /// **Empty means nothing was taken**, which is how a caller tells "the hotbar names an item
@@ -1886,6 +2884,21 @@ impl Session {
                         use_entity.using_entity_id = self.using_entity;
                     }
 
+                    // The queue is the player's own, which is what hand crafting is.
+                    Component::Crafting(crafting) => {
+                        crafting.slots = self.queue_of(entity);
+                    }
+
+                    // What is sitting on the repair and dismantle squares.
+                    Component::CraftingDropSlots(drop_slots) => {
+                        drop_slots.slots = self.drop_slots.to_vec();
+                    }
+
+                    // The quest log likewise: the world's template carries an empty one.
+                    Component::TodoList(todo) => {
+                        todo.tasks = self.todo_tasks.clone();
+                    }
+
                     // The template carries full health; what this player has left is here.
                     Component::Health(health) => {
                         *health = HealthComponent::with_health(self.player_health());
@@ -1948,6 +2961,12 @@ impl Session {
                     interaction.has_been_opened = self.closed_lids.contains(&entity);
                 }
 
+                // A station's queue, which is what its window draws. The entity was built
+                // empty when it was placed, and everything queued since lives on the session.
+                Component::Crafting(crafting) => {
+                    crafting.slots = self.queue_of(entity);
+                }
+
                 _ => {}
             }
         }
@@ -1990,6 +3009,52 @@ impl Session {
     /// and every player in every build of 10414 resolves to the same row.
     pub fn player_max_health(&self) -> u32 {
         PLAYER_HEALTH
+    }
+
+    /// What is queued at `station`, or waiting to be collected there.
+    pub fn crafting_queue(&self, station: u32) -> &[skysaga_world::CraftingSlot] {
+        self.crafting
+            .get(&station)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// What the player has on the go in their own hands.
+    pub fn crafting_slots(&self) -> &[skysaga_world::CraftingSlot] {
+        self.crafting_queue(self.player_entity_id)
+    }
+
+    /// A station's queue as the wire wants it, ready to be written into its component.
+    fn queue_of(&self, station: u32) -> Vec<skysaga_world::CraftingSlot> {
+        self.crafting_queue(station).to_vec()
+    }
+
+    /// The quest log's rows, in the order the client shows them.
+    pub fn todo_tasks(&self) -> &[TodoTask] {
+        &self.todo_tasks
+    }
+
+    /// Milliseconds since the Unix epoch, which is the clock the client reads.
+    ///
+    /// `FUN_0089c6b0` builds it from `GetSystemTimeAsFileTime` against a `FILETIME` for 1970,
+    /// so this is the same scale the crafting slot's start time is compared against.
+    fn now_ms(&self) -> u64 {
+        if let Some(fixed) = self.clock_ms {
+            return fixed;
+        }
+
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Pin the wall clock, so a test that crafts does not depend on how fast it runs.
+    ///
+    /// Craft timings are the only thing here that reads the time of day. Advance this rather
+    /// than sleeping: a three-second recipe would otherwise cost three seconds per test.
+    pub fn set_clock_ms(&mut self, now: u64) {
+        self.clock_ms = Some(now);
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
@@ -2516,10 +3581,54 @@ impl Session {
     /// an inventory belonging to something other than this player -- which is what a chest
     /// will be, and is the extension point when containers arrive.
     fn apply(&mut self, effects: Vec<Effect>, world: &World) -> Vec<Vec<u8>> {
-        effects
+        let out: Vec<Vec<u8>> = effects
             .into_iter()
             .filter_map(|effect| self.packet_for(effect, world))
-            .collect()
+            .collect();
+
+        // Every route by which a player comes to hold something ends here -- a craft
+        // collected, a pickup walked over, a dismantle, an admin `/give` -- so this is the one
+        // place a discovery has to be noticed.
+        self.announce_discoveries();
+
+        out
+    }
+
+    /// "You have never seen one of these before", once per resource.
+    ///
+    /// Queued as a notification rather than returned: a discovery is something that happens
+    /// *to* a player as a side effect of something else, and the packet is a toast the client's
+    /// handler drops on its own if it disagrees (`FUN_0073b140` keeps its own seen set).
+    fn announce_discoveries(&mut self) {
+        if !discovery_toasts_enabled() {
+            return;
+        }
+
+        let held: Vec<u32> = self
+            .inventory()
+            .iter()
+            .copied()
+            .chain(self.drop_slots)
+            .filter(|item| *item != 0)
+            .filter_map(|item| self.inventories.name(item))
+            .collect();
+
+        for resource in held {
+            if !self.seen_resources.insert(resource) {
+                continue;
+            }
+
+            self.notifications.push(encode(|w| {
+                NewResourceEncountered {
+                    entity_id: self.player_entity_id,
+                    item_spec: ItemSpec {
+                        resource: Some(resource),
+                        ..Default::default()
+                    },
+                }
+                .encode(w)
+            }));
+        }
     }
 
     fn packet_for(&self, effect: Effect, world: &World) -> Option<Vec<u8>> {

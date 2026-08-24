@@ -561,9 +561,9 @@ impl World {
             .expect("Entities.json defines Player")
             .clone();
 
-        let player_entity_id = add("Player", player_components(config)).unwrap_or(0);
+        let player_entity_id = add("Player", player_components(config, &geodata)).unwrap_or(0);
         let player_index = entities.len() - 1;
-        let player_template = Entity::new(player_entity_id, player_components(config));
+        let player_template = Entity::new(player_entity_id, player_components(config, &geodata));
 
         // The biome the client resolves the world from has to be the one holding this
         // adventure; falling back to the configured name only matters for data that has no
@@ -719,6 +719,58 @@ pub fn container_components(
     ]
 }
 
+/// Everything a placed device replicates: an anvil, a forge, a camp fire.
+///
+/// The same four components a chest needs -- transform, interaction, owner, pickup, voxel links
+/// -- and a crafting queue where the entity has one. What it does *not* have is an inventory: a
+/// station is not a container, and its window is drawn from `craftingslots` instead.
+///
+/// `max_crafting_slots` comes from the entity's own `maxcraftingslots` default, so an `Anvil`
+/// gets three and something that is not a station gets no crafting component at all. A
+/// parameter an entity does not declare is never sent, so the component costs nothing where it
+/// is not wanted -- but leaving it off entirely means a station whose queue can never be shown.
+pub fn device_components(
+    position: [u32; 3],
+    links: Vec<VoxelLink>,
+    max_crafting_slots: Option<u8>,
+) -> Vec<Component> {
+    let mut components = vec![
+        Component::Transform(TransformComponent {
+            position,
+            // One, not zero: an unset size renders as nothing at all. See the container.
+            size: [1, 1, 1],
+            ..Default::default()
+        }),
+        Component::Interaction(InteractionComponent {
+            enabled: true,
+            // **Not a loot chest.** The flag decides whether E toggles the window shut, and a
+            // station has an X button of its own -- so a toggle would leave the server a press
+            // out of phase the moment the player closed the panel with the mouse.
+            is_loot_chest: false,
+            has_been_opened: false,
+            owner_only: false,
+            allow_multiple_users: true,
+        }),
+        Component::Owner(OwnerComponent::default()),
+        Component::Pickup(PickupComponent::default()),
+        // What puts the device in the world grid rather than floating in front of it. An Anvil
+        // is twelve linked cells, a Camp_Fire one, and the shape is read from the entity.
+        Component::VoxelLink(VoxelLinkComponent {
+            voxels: links,
+            can_replace_voxels_of_entity_id: 0,
+        }),
+    ];
+
+    if let Some(max_slots) = max_crafting_slots {
+        components.push(Component::Crafting(skysaga_world::CraftingComponent {
+            slots: Vec::new(),
+            max_slots,
+        }));
+    }
+
+    components
+}
+
 /// Everything a creature replicates, wherever it stands and however healthy it is.
 ///
 /// Shared by the props the world seeds and anything `/mob` puts down, so the two cannot drift.
@@ -776,8 +828,15 @@ pub fn health_of(definition: &EntityDefinition, geodata: &GeoData) -> Option<u32
 /// server computed from a client position was twice what the client meant.
 pub const POSITION_SCALE: u32 = 64;
 
+/// The rank every job is seeded at.
+///
+/// Progression is not modelled: nothing awards experience, so a rank the player could not
+/// raise would be a permanent lock rather than a goal. The reversing notes name 25 as
+/// "tutorial complete", and the starting recipes need at most 21.
+const FULL_JOB_RANK: u8 = 25;
+
 /// Everything the player entity replicates.
-fn player_components(config: &WorldConfig) -> Vec<Component> {
+fn player_components(config: &WorldConfig, geodata: &GeoData) -> Vec<Component> {
     use skysaga_world::*;
 
     let spawn = config.terrain.spawn();
@@ -798,9 +857,51 @@ fn player_components(config: &WorldConfig) -> Vec<Component> {
             can_damage_devices: true,
             ..Default::default()
         }),
-        // Two slots, as the C# seeds. The count is at the list's default of 2, so this takes
-        // the escape path and is not the same bits as an empty list.
+        // **Every job at full rank.** A recipe is gated on RequiredJob and RequiredJobRank,
+        // and the client refuses to craft anything the player has not ranked up to, however
+        // well the recipe book says it is known. The starting recipes reach Tutorial 21, so
+        // anything short of the top leaves some of them locked with no way to earn a rank:
+        // nothing in the server awards experience yet. Twenty-five is the tutorial-complete
+        // rank the reversing notes name.
+        Component::JobRank(JobRankComponent {
+            jobs: geodata
+                .jobs()
+                .iter()
+                .map(|job| JobRank {
+                    name: skysaga_core::name_hash(job),
+                    rank: FULL_JOB_RANK,
+                    experience: 0,
+                    experience_to_next: 0,
+                })
+                .collect(),
+        }),
+        // **The quest log renders from this parameter, so an empty list still has to go out.**
+        // Absent is not the same as empty: with no list the client has nothing to hang rows or
+        // click targets on, and the panel draws its frame and then sits inert. Six bits buys a
+        // working panel. The contents are the session's, folded in by `entity_now`.
+        Component::TodoList(TodoListComponent::default()),
+        // One slot, which is what the data gives a player. Hand crafting is a station like
+        // any other; this component is what makes the player one.
+        Component::Crafting(CraftingComponent {
+            slots: Vec::new(),
+            max_slots: 1,
+        }),
+        // Two slots, as the C# seeds. That is exactly the list's default, which is the one
+        // count-optimised boundary this entity actually lands on: a clear escape bit and no
+        // 32-bit count.
         Component::CraftingDropSlots(CraftingDropSlotsComponent { slots: vec![0, 0] }),
+        // **Without this the hand-crafting panel has no category tabs at all.** The client
+        // builds the tab strip from the recipes the player knows, so an absent or empty book
+        // is a panel with nothing in it -- which reads as "crafting is not implemented"
+        // rather than as a missing parameter.
+        Component::RecipeBook(RecipeBookComponent {
+            recipes: geodata
+                .starting_recipes()
+                .iter()
+                .map(|recipe| recipe.id())
+                .collect(),
+            scrolls_used: 0,
+        }),
         Component::FeatureUnlock(FeatureUnlockComponent::default()),
         Component::Health(HealthComponent {
             half_hearts: 20,
@@ -941,6 +1042,24 @@ impl World {
         }
 
         centre
+    }
+
+    /// The corner of a voxel, in the client's position units.
+    ///
+    /// **Where a placed entity goes**, and deliberately not [`Self::voxel_centre`]. The client
+    /// resolves each linked cell as `transform + (offset + 0.5)` rotated by yaw, so the half
+    /// voxel is already in the link; adding it here as well would put a one-cell device half a
+    /// block into the next one. Confirmed by the live C# placement recorded in
+    /// `documentations/device-placement.md`: voxel `(13, 17, 19)` became position
+    /// `(832, 1088, 1216)`, which is exactly `worldVoxel * 64`.
+    pub fn voxel_corner(chunk: [u32; 3], voxel: [u32; 3]) -> [u32; 3] {
+        let mut corner = [0; 3];
+
+        for (axis, out) in corner.iter_mut().enumerate() {
+            *out = (chunk[axis] * CHUNK_SIZE as u32 + voxel[axis]) * POSITION_SCALE;
+        }
+
+        corner
     }
 
     /// Where a player drops in, in the client's position units.

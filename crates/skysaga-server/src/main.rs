@@ -46,6 +46,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    log_build_age();
+
     let policy = CredentialPolicy::from_env();
 
     if matches!(policy, CredentialPolicy::AnyNonEmpty) {
@@ -193,5 +195,40 @@ async fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
+    }
+}
+
+/// Say how old this binary is, in the first line of the log.
+///
+/// **So a stale server cannot masquerade as a fresh one.** Testing a protocol change means
+/// rebuild *and* restart; restarting only the client leaves the old server running, and the
+/// symptom is identical to the fix not working. That mistake cost two debugging cycles --
+/// two rounds of "still broken" against a binary that never contained the change.
+///
+/// The executable's own mtime is read at startup rather than stamped in at compile time. A
+/// compile-time stamp needs a `build.rs`, and a `build.rs` only re-runs when cargo decides to,
+/// so the stamp itself goes stale -- which is worse than not having one, because it lies with
+/// authority. The file on disk cannot.
+fn log_build_age() {
+    let built = std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .and_then(|metadata| metadata.modified());
+
+    let Ok(built) = built else {
+        // Not worth failing over: this is a diagnostic, not a feature.
+        return;
+    };
+
+    let age = built.elapsed().unwrap_or_default();
+
+    let minutes = age.as_secs() / 60;
+
+    if minutes >= 60 {
+        warn!(
+            hours = minutes / 60,
+            "this binary is over an hour old -- rebuild and restart if you are testing a change",
+        );
+    } else {
+        info!(built_minutes_ago = minutes, "server binary");
     }
 }

@@ -155,6 +155,9 @@ pub struct EntityDefinition {
 
     /// The `PhysicalProperties` row this entity uses, from its `physicalproperties` default.
     physical_properties: Option<String>,
+
+    /// How many things this entity can have on the go at once, from `maxcraftingslots`.
+    max_crafting_slots: Option<u8>,
 }
 
 impl EntityDefinition {
@@ -185,6 +188,19 @@ impl EntityDefinition {
     /// `None` for entities that declare no such parameter, which is most of the props.
     pub fn physical_properties(&self) -> Option<&str> {
         self.physical_properties.as_deref()
+    }
+
+    /// How many crafts this entity can have queued, from its `maxcraftingslots` default.
+    ///
+    /// **The queue's length is per station and lives in the data.** An `Anvil` is 3, a
+    /// `Workbench` and the `Player` are 1. The same number is in `geodata.json` as
+    /// `Resources[].Device.QueueLength`, but this is the one that goes on the wire, so it is
+    /// the one read.
+    ///
+    /// `None` for the entities that declare no such parameter, which is everything that is not
+    /// a crafting station.
+    pub fn max_crafting_slots(&self) -> Option<u8> {
+        self.max_crafting_slots
     }
 
     /// `CRC32(name)` — what `EntityAdd` puts on the wire.
@@ -330,6 +346,13 @@ fn definition(entity: RawEntity) -> EntityDefinition {
         .and_then(|value| value.as_str())
         .map(str::to_owned);
 
+    let max_crafting_slots = entity
+        .parameters
+        .get("maxcraftingslots")
+        .and_then(|parameter| parameter.value.as_ref())
+        .and_then(serde_json::Value::as_u64)
+        .map(|slots| slots as u8);
+
     EntityDefinition {
         name_hash: name_hash(&entity.name),
         name: entity.name,
@@ -338,6 +361,7 @@ fn definition(entity: RawEntity) -> EntityDefinition {
         by_index,
         voxel_links,
         physical_properties,
+        max_crafting_slots,
     }
 }
 

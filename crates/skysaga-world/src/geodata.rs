@@ -125,6 +125,12 @@ pub struct GeoData {
     /// Name hash to stack limit, for the items that override the default.
     stack_overrides: HashMap<u32, u32>,
 
+    /// Name hash to the entity that item places, for the resources that place one.
+    ///
+    /// The entity's name is the resource's own, so this is a set as much as a map; the name is
+    /// kept because what places an entity needs to look it up in `Entities.json`.
+    places: HashMap<u32, String>,
+
     /// `name_hash(EquippedActions[].Name)` to the flattened swing.
     ///
     /// Keyed by hash rather than by name because the hash is what arrives: the client sends
@@ -144,6 +150,19 @@ pub struct GeoData {
 
     /// Lower-cased adventure name to its `WorldType`.
     world_type_of_adventure: HashMap<String, u32>,
+
+    /// `Recipes`: what can be made, and where.
+    recipes: Vec<Recipe>,
+
+    /// `Jobs`: the twenty job names, which are what a recipe's `RequiredJob` refers to.
+    jobs: Vec<String>,
+
+    /// `name_hash(recipe name)` to a position in [`Self::recipes`].
+    ///
+    /// The recipe's *own* name is the key because that is what arrives: `QueueRecipeOnEntity`
+    /// names the recipe, not the item it makes. Every recipe name in the table is distinct, so
+    /// this is a total function rather than a first-match.
+    by_id: HashMap<u32, usize>,
 }
 
 /// One `Adventures` entry. Only its world type is read.
@@ -170,6 +189,72 @@ struct RawBiome {
 
     #[serde(rename = "Adventures", default)]
     adventures: Vec<String>,
+}
+
+/// One entry of `geodata.json > Recipes`.
+///
+/// # The station is an input
+///
+/// A recipe says where it can be made by listing the station among its inputs, marked
+/// `IsExpendable: false`. Everything else in `Input` is a material and is consumed. So
+/// `Hand_Crafting` is a resource name like any other, and hand crafting is not a special case
+/// in the data: it is the station whose entity is the player's own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recipe {
+    pub name: String,
+
+    /// `1` builds something, `0` repairs it. Only two repair recipes exist in 10414.
+    pub recipe_type: u32,
+
+    pub execution_time_seconds: f32,
+
+    /// Whether a new player already knows it. 45 of the 177 do.
+    pub available_to_new_players: bool,
+
+    pub input: Vec<Ingredient>,
+    pub output: Vec<Ingredient>,
+}
+
+/// One line of a recipe's `Input` or `Output`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ingredient {
+    pub name: String,
+    pub quantity: u32,
+    /// Consumed by the craft. False marks the station, and the repaired entity in a repair.
+    pub is_expendable: bool,
+}
+
+impl Recipe {
+    /// The station this is made at, which is the input that is not consumed.
+    pub fn station(&self) -> Option<&str> {
+        self.input
+            .iter()
+            .find(|ingredient| !ingredient.is_expendable)
+            .map(|ingredient| ingredient.name.as_str())
+    }
+
+    /// The inputs that are consumed, as `(name, quantity)`.
+    pub fn materials(&self) -> impl Iterator<Item = (&str, u32)> {
+        self.input
+            .iter()
+            .filter(|ingredient| ingredient.is_expendable)
+            .map(|ingredient| (ingredient.name.as_str(), ingredient.quantity))
+    }
+
+    /// What it makes. Every recipe in 10414 has exactly one output.
+    pub fn output(&self) -> Option<(&str, u32)> {
+        self.output
+            .first()
+            .map(|ingredient| (ingredient.name.as_str(), ingredient.quantity))
+    }
+
+    /// The id the recipe book carries, which is the hash of the recipe's **own** name.
+    ///
+    /// Not the same number as the one `QueueRecipeOnEntity` sends: that is the hash of the
+    /// output item. Two hashes, two purposes, and mixing them silently empties the book.
+    pub fn id(&self) -> u32 {
+        skysaga_core::name_hash(&self.name)
+    }
 }
 
 impl GeoData {
@@ -231,9 +316,26 @@ impl GeoData {
 
         let stack_overrides = file
             .resources
-            .into_iter()
+            .iter()
             .filter(|resource| resource.is_overriding_stack_limit && resource.stack_limit > 0)
             .map(|resource| (skysaga_core::name_hash(&resource.name), resource.stack_limit))
+            .collect();
+
+        // **An item places the entity of its own name.** `Anvil` the resource puts down `Anvil`
+        // the entity, and the only thing that says so is `ActionVoxel`: there is no field naming
+        // the entity. The two verbs differ in the client's UI and not here -- `CreateDevice` is
+        // the 31 usable things (stations, chests, the mailbox) and `CreateEntity` the 143
+        // decorations -- so both are kept, keyed by the hash the hotbar carries.
+        let places = file
+            .resources
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource.action_voxel.as_str(),
+                    "CreateDevice" | "CreateEntity"
+                )
+            })
+            .map(|resource| (skysaga_core::name_hash(&resource.name), resource.name.clone()))
             .collect();
 
         // --- the combat join ---------------------------------------------------------------
@@ -302,11 +404,34 @@ impl GeoData {
             })
             .collect();
 
+        let recipes: Vec<Recipe> = file
+            .recipes
+            .into_iter()
+            .map(|entry| Recipe {
+                name: entry.name,
+                recipe_type: entry.recipe_type,
+                execution_time_seconds: entry.execution_time_seconds,
+                available_to_new_players: entry.available_to_new_players,
+                input: entry.input.into_iter().map(Ingredient::from).collect(),
+                output: entry.output.into_iter().map(Ingredient::from).collect(),
+            })
+            .collect();
+
+        // Keyed on the recipe's own name, because that is what the client sends. Every recipe
+        // name in 10414 is distinct; a duplicate would be a data change worth noticing rather
+        // than silently resolving, so the first entry wins and the test asserts uniqueness.
+        let mut by_id = HashMap::new();
+
+        for (at, recipe) in recipes.iter().enumerate() {
+            by_id.entry(recipe.id()).or_insert(at);
+        }
+
         Ok(Self {
             voxels,
             placeable,
             by_index,
             stack_overrides,
+            places,
             actions,
             physical,
             loot: Loot::from_file(file.loot_tables, file.loot_lists),
@@ -327,7 +452,44 @@ impl GeoData {
                         .map(move |adventure| (adventure.to_ascii_lowercase(), name.clone()))
                 })
                 .collect(),
+            recipes,
+            by_id,
+            jobs: file.jobs.into_iter().map(|job| job.name).collect(),
         })
+    }
+
+    /// Every job the game defines, by name.
+    pub fn jobs(&self) -> &[String] {
+        &self.jobs
+    }
+
+    /// Every recipe the game knows.
+    pub fn recipes(&self) -> &[Recipe] {
+        &self.recipes
+    }
+
+    /// The recipes a new player already knows, which is what seeds the recipe book.
+    pub fn starting_recipes(&self) -> Vec<&Recipe> {
+        self.recipes
+            .iter()
+            .filter(|recipe| recipe.available_to_new_players)
+            .collect()
+    }
+
+    /// The recipe whose own name hashes to `id`.
+    ///
+    /// **This is the lookup `QueueRecipeOnEntity` needs, and its field names the recipe.**
+    /// `crafting.md` says the opposite, that the field is the hash of the output resource,
+    /// "the same hash used for hotbar bindings and `InventorySlotData.Name`", and that is
+    /// wrong. A live client queuing `Hand_Craft_Carved_Stone_Piece` sends `2767626641`, which
+    /// is `name_hash` of the **recipe's** name; the output is `Carved_Stone_Piece` and hashes
+    /// to something else entirely.
+    ///
+    /// So there is only one recipe id scheme, not two: this is the same number
+    /// `RecipeBookComponent.recipelist` carries, which is what makes the book and the queue
+    /// agree.
+    pub fn recipe_for_id(&self, id: u32) -> Option<&Recipe> {
+        self.by_id.get(&id).map(|at| &self.recipes[*at])
     }
 
     /// The loot tables, for rolling a drop directly.
@@ -433,6 +595,21 @@ impl GeoData {
             .map(|(_, index)| *index)
     }
 
+    /// The entity this item places, or `None` when it places none.
+    ///
+    /// **This is the second half of the place-or-dig decision.** A block resolves through
+    /// [`Self::placeable_for_hash`]; an Anvil is not a block and resolves here. An item that is
+    /// neither -- a pickaxe, a lump of ore -- digs, which is why an Anvil used to break the
+    /// ground it was clicked on.
+    ///
+    /// The entity's name is the resource's own. Nothing in the data names it, and there is no
+    /// need: the 31 `CreateDevice` and 143 `CreateEntity` resources all share a name with an
+    /// entity in `Entities.json`. The caller still has to look that up, and a resource whose
+    /// entity is missing must place nothing rather than eat the stack.
+    pub fn places_entity(&self, hash: u32) -> Option<&str> {
+        self.places.get(&hash).map(String::as_str)
+    }
+
     /// The item a broken block drops, or `None` for blocks with no item form.
     pub fn item_for_voxel(&self, index: u8) -> Option<String> {
         let voxel = self.voxel(index)?;
@@ -474,6 +651,62 @@ impl GeoData {
 
 // --- the JSON, as it is on disk ---------------------------------------------------------
 
+/// A table entry the server needs nothing from but its name.
+#[derive(Debug, Deserialize)]
+struct RawNamed {
+    #[serde(rename = "Name", default)]
+    name: String,
+}
+
+/// One `Recipes` entry, as the file spells it.
+#[derive(Debug, Deserialize)]
+struct RawRecipe {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "RecipeType", default)]
+    recipe_type: u32,
+
+    #[serde(rename = "ExecutionTimeInSeconds", default)]
+    execution_time_seconds: f32,
+
+    #[serde(rename = "MakeAvailableToNewPlayers", default)]
+    available_to_new_players: bool,
+
+    #[serde(rename = "Input", default)]
+    input: Vec<RawIngredient>,
+
+    #[serde(rename = "Output", default)]
+    output: Vec<RawIngredient>,
+}
+
+/// One line of a recipe's `Input` or `Output`.
+///
+/// The file carries a dozen more fields per line -- rarity bounds, material slots, difficulty
+/// curves -- and none of them is read. They matter for material variants, which the server does
+/// not model yet.
+#[derive(Debug, Deserialize)]
+struct RawIngredient {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "Quantity", default)]
+    quantity: u32,
+
+    #[serde(rename = "IsExpendable", default)]
+    is_expendable: bool,
+}
+
+impl From<RawIngredient> for Ingredient {
+    fn from(raw: RawIngredient) -> Self {
+        Self {
+            name: raw.name,
+            quantity: raw.quantity,
+            is_expendable: raw.is_expendable,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct File {
     #[serde(rename = "Voxels", default)]
@@ -505,6 +738,12 @@ struct File {
 
     #[serde(rename = "Adventures", default)]
     adventures: Vec<RawAdventure>,
+
+    #[serde(rename = "Recipes", default)]
+    recipes: Vec<RawRecipe>,
+
+    #[serde(rename = "Jobs", default)]
+    jobs: Vec<RawNamed>,
 
     #[serde(rename = "LootTables", default)]
     loot_tables: Vec<RawLootTable>,
@@ -634,4 +873,9 @@ struct RawResource {
 
     #[serde(rename = "StackLimitOverride", default)]
     stack_limit: u32,
+
+    /// What using this item against a voxel does: `PlaceVoxel`, `Dig`, `CreateDevice`,
+    /// `CreateEntity`, or nothing at all for the 151 resources that are only ever materials.
+    #[serde(rename = "ActionVoxel", default)]
+    action_voxel: String,
 }

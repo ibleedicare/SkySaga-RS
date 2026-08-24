@@ -10,15 +10,17 @@
 //! Every layout here is checked against bytes captured from the C# server or the live client,
 //! never against a reading of the C# source alone.
 
-pub mod chat;
 pub mod character_creation;
+pub mod chat;
 pub mod combat;
+pub mod crafting;
 pub mod handshake;
 pub mod interaction;
 pub mod inventory;
 pub mod mail;
 pub mod movement;
 pub mod photo;
+pub mod todo_list;
 pub mod transfer;
 pub mod voxel;
 
@@ -42,10 +44,11 @@ pub use mail::{
 };
 pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
+pub use todo_list::{ItemObjective, TodoListTaskAdd, TodoListTaskRef, TodoTask, ValueObjective};
 pub use transfer::TransferToServer;
 pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     EntityRemoved, EntitySync,
-    MapDefinition, ServerInfo, SetClientEntity, SyncData,
+    MapDefinition, ServerInfo, SetClientEntity, SyncData, TimeSync,
 };
