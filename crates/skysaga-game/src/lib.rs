@@ -3643,6 +3643,14 @@ impl Session {
             action = %action.name,
             damage = before - after,
             health = after,
+            // In voxels, from the attacker's last reported position. Only ever logged on a
+            // *refusal* before, which made the one check this server has never been verified in
+            // a real fight: a swing that connects is exactly the case worth measuring. The
+            // reach that matters is a sword's, so these should read as single digits; the
+            // doubled-scale fight that first exposed the position units logged 4.8 to 17.1.
+            distance = self
+                .position
+                .map(|position| combat::distance(position, creature.position)),
             "hit",
         );
 
