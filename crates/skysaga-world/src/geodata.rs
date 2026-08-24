@@ -28,6 +28,13 @@ use crate::inventory::StackLimits;
 use crate::loot::{Loot, RawLootList, RawLootTable};
 pub use crate::loot::Roll;
 
+/// The item categories that wear out: 3 tools and weapons, 6 armour.
+///
+/// `ObjectType` is the resource's category. The others are 0 and 1 blocks and materials, 4
+/// devices, 5 currency, 7 consumables, 8 decorations and 9 portals, none of which the repair
+/// square accepts.
+const DURABLE_OBJECT_TYPES: [u32; 2] = [3, 6];
+
 /// Where `geodata.json` lives by default.
 ///
 /// The C# tree's `Bundled/` copy, for the same reason as `Entities.json`: this is the game's
@@ -124,6 +131,12 @@ pub struct GeoData {
 
     /// Name hash to stack limit, for the items that override the default.
     stack_overrides: HashMap<u32, u32>,
+
+    /// Name hash to how much wear an item has in it, for the items that wear out.
+    ///
+    /// Empty for everything else, which is most of the table: see [`Self::durability_of`] for
+    /// why naming a stat template is not the same as being durable.
+    durability: HashMap<u32, u32>,
 
     /// Every `Resources` name, lower-cased: the set of things a player may ask for by name.
     ///
@@ -321,6 +334,35 @@ impl GeoData {
             .map(|(position, voxel)| (voxel.index, position))
             .collect();
 
+        // --- what wears out ----------------------------------------------------------------
+        //
+        // **Two conditions, and the second is the one that is easy to get wrong.** The number
+        // comes from `StatTemplates`, reached through the resource's `StatTemplateName`;
+        // `PhysicalProperties` is a red herring, because a sword's `Tool_Sword` resolves its
+        // `Durability` to `Tool_Default`, whose health is zero.
+        //
+        // But naming a template is not enough to *be* durable: `Dirt` names `Voxel`, whose
+        // `BaseDurability` is 100 like everything else, and a stack of dirt has no durability
+        // bar. What separates them is `ObjectType`, the item's category: 3 is tools and weapons
+        // and 6 is armour, which are exactly the two the repair square accepts.
+        let base_durability: HashMap<&str, u32> = file
+            .stat_templates
+            .iter()
+            .map(|template| (template.name.as_str(), template.template.base_durability))
+            .collect();
+
+        let durability: HashMap<u32, u32> = file
+            .resources
+            .iter()
+            .filter(|resource| DURABLE_OBJECT_TYPES.contains(&resource.object_type))
+            .filter_map(|resource| {
+                let durability = *base_durability.get(resource.stat_template.as_str())?;
+
+                (durability > 0)
+                    .then(|| (skysaga_core::name_hash(&resource.name), durability))
+            })
+            .collect();
+
         let resource_names: BTreeSet<String> = file
             .resources
             .iter()
@@ -444,6 +486,7 @@ impl GeoData {
             placeable,
             by_index,
             stack_overrides,
+            durability,
             resource_names,
             places,
             actions,
@@ -470,6 +513,24 @@ impl GeoData {
             by_id,
             jobs: file.jobs.into_iter().map(|job| job.name).collect(),
         })
+    }
+
+    /// How much wear `hash` has in it, or `None` if it does not wear out.
+    ///
+    /// Tools, weapons and armour only. The number is the `StatTemplates` row's
+    /// `BaseDurability`: a sword has 600, a pickaxe 1500, a piece of armour 100.
+    pub fn durability_of(&self, hash: u32) -> Option<u32> {
+        self.durability.get(&hash).copied()
+    }
+
+    /// Every item that wears out, as `(name hash, durability)`.
+    pub fn durable_items(&self) -> Vec<(u32, u32)> {
+        let mut items: Vec<(u32, u32)> =
+            self.durability.iter().map(|(hash, wear)| (*hash, *wear)).collect();
+
+        items.sort_unstable();
+
+        items
     }
 
     /// Every resource name the game defines, lower-cased and sorted.
@@ -742,6 +803,9 @@ struct File {
     #[serde(rename = "Resources", default)]
     resources: Vec<RawResource>,
 
+    #[serde(rename = "StatTemplates", default)]
+    stat_templates: Vec<RawStatTemplate>,
+
     #[serde(rename = "EquippedActions", default)]
     equipped_actions: Vec<RawEquippedActionEntry>,
 
@@ -905,4 +969,29 @@ struct RawResource {
     /// `CreateEntity`, or nothing at all for the 151 resources that are only ever materials.
     #[serde(rename = "ActionVoxel", default)]
     action_voxel: String,
+
+    /// The item's category. 3 is tools and weapons and 6 is armour, which are the two that
+    /// wear out; see [`GeoData::durability_of`].
+    #[serde(rename = "ObjectType", default)]
+    object_type: u32,
+
+    /// The `StatTemplates` row this item's numbers come from, or empty.
+    #[serde(rename = "StatTemplateName", default)]
+    stat_template: String,
+}
+
+/// One `StatTemplates` entry. Only the durability is read.
+#[derive(Debug, Deserialize)]
+struct RawStatTemplate {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "StatTemplate", default)]
+    template: RawStatTemplateBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawStatTemplateBody {
+    #[serde(rename = "BaseDurability", default)]
+    base_durability: u32,
 }

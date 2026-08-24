@@ -28,6 +28,7 @@
 
 pub mod character_customisation;
 pub mod crafting;
+pub mod durability;
 pub mod health;
 pub mod interaction;
 pub mod inventory;
@@ -48,6 +49,7 @@ pub mod voxel_link;
 
 pub use character_customisation::CharacterCustomisationComponent;
 pub use crafting::{CraftingComponent, CraftingSlot};
+pub use durability::DurabilityComponent;
 pub use health::HealthComponent;
 pub use interaction::InteractionComponent;
 pub use inventory::InventoryComponent;
@@ -127,6 +129,8 @@ pub enum Component {
     /// `clientcharactercustomisationcomponent` -- the appearance chosen in the creator.
     CharacterCustomisation(CharacterCustomisationComponent),
     CharacterPhysics(PhysicsComponent),
+    /// `clientdurabilitycomponent` -- how worn a tool is. See [`durability`] on the widths.
+    Durability(DurabilityComponent),
     /// `clientcraftingcomponent` -- a station's queue, and the player's own.
     Crafting(CraftingComponent),
     CraftingDropSlots(CraftingDropSlotsComponent),
@@ -171,6 +175,7 @@ impl Component {
             Self::Interaction(_) => "clientinteractioncomponent",
             Self::Inventory(_) => "clientinventorycomponent",
             Self::InventoryItem(_) => "inventoryitemcomponent",
+            Self::Durability(_) => "clientdurabilitycomponent",
             Self::JobRank(_) => "clientjobrankcomponent",
             Self::MailBox(_) => "clientmailboxcomponent",
             Self::Owner(_) => "clientownercomponent",
@@ -204,6 +209,7 @@ impl Component {
             Self::Interaction(component) => component.sync(parameter, writer),
             Self::Inventory(component) => component.sync(parameter, writer),
             Self::InventoryItem(component) => component.sync(parameter, writer),
+            Self::Durability(component) => component.sync(parameter, writer),
             Self::JobRank(component) => component.sync(parameter, writer),
             Self::MailBox(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),

@@ -141,6 +141,45 @@ fn craft_notification_enabled() -> bool {
     std::env::var("SKYSAGA_CRAFT_NOTIFICATION").as_deref() != Ok("0")
 }
 
+/// Whether tools and armour are minted as `DurableInventoryItem`.
+///
+/// **Off by default, and the reason is the wire format rather than the feature.** The widths of
+/// `durability` and `durabilitymax` are not known: no capture carries one and the C# oracle
+/// never wrote one. They are sync indices 1 and 2 against `inventoryslotdata`'s 5, so a wrong
+/// width shifts the slot data and every rucksack square draws wrong. Turn it on with
+/// `SKYSAGA_DURABLE_ITEMS=1` to sweep the width in front of a client; see
+/// `skysaga_world::components::durability`.
+fn durable_items_enabled() -> bool {
+    match DURABLE_ITEMS.load(std::sync::atomic::Ordering::Relaxed) {
+        UNSET => {
+            let from_env = std::env::var("SKYSAGA_DURABLE_ITEMS").as_deref() == Ok("1");
+
+            set_durable_items(from_env);
+
+            from_env
+        }
+
+        state => state == ON,
+    }
+}
+
+/// Turn durable items on or off while the server is running.
+///
+/// Runtime rather than start-up, because the point is to *sweep*: the width has to be tried,
+/// looked at in the client, and tried again, and a restart between each costs a minute of
+/// loading screen. Pairs with `skysaga_world::components::durability::set_bits`.
+pub fn set_durable_items(on: bool) {
+    DURABLE_ITEMS.store(if on { ON } else { OFF }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Three states, because "not asked yet" has to be told apart from "asked, and off": the
+/// environment is read once, on the first question, and a later call may still override it.
+const UNSET: u8 = 0;
+const ON: u8 = 1;
+const OFF: u8 = 2;
+
+static DURABLE_ITEMS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNSET);
+
 /// Whether to send `NewResourceEncountered` (43), the discovery popup. See above.
 fn discovery_toasts_enabled() -> bool {
     std::env::var("SKYSAGA_DISCOVERY_TOASTS").as_deref() != Ok("0")
@@ -681,18 +720,6 @@ pub struct Session {
     /// probe and the capture tool connect without going through the conductor.
     account: Option<String>,
 
-    /// Creatures spawned while this session runs, beside the ones the world seeded.
-    ///
-    /// Per session, as containers are: a bandit one player spawns is not in another player's
-    /// world. The same limitation, and it moves at the same time.
-    creatures: Vec<world::Creature>,
-
-    /// Hit points taken off each creature, by entity id.
-    ///
-    /// Damage rather than remaining health, so the world's own creatures need no mutable
-    /// copy: what is left is the definition's maximum minus this.
-    damage: std::collections::HashMap<u32, u32>,
-
     /// Hit points taken off this player.
     player_damage: u32,
 
@@ -706,8 +733,6 @@ pub struct Session {
     /// swinging is dropped rather than credited to whatever was used last.
     armed: std::collections::HashMap<u32, EquippedAction>,
 
-    /// Items lying on the floor, waiting to be walked over.
-    pickups: Vec<FloorDrop>,
 
     /// What is queued or waiting to be collected, per station, one entry per occupied slot.
     ///
@@ -808,11 +833,8 @@ impl Session {
             closed_lids: BTreeSet::new(),
             dig_damage: std::collections::HashMap::new(),
             spawned: Vec::new(),
-            creatures: Vec::new(),
-            damage: std::collections::HashMap::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
-            pickups: Vec::new(),
             crafting: BTreeMap::new(),
             drop_slots: [0; DROP_SLOTS],
             seen_resources: BTreeSet::new(),
@@ -1184,12 +1206,47 @@ impl Session {
                     .chain(others.iter().map(|entity| encode(|w| entity.encode(w))))
                     .collect();
 
-                // Anything players have put down since the island was built. Part of the world
-                // rather than of the burst's frozen entity list, so a joiner is told about it
-                // here or never told at all.
-                for device in world.devices() {
-                    if let Some((built, definition)) = self.entity_now(device.id, world) {
+                // Anything players have put down since the island was built, and anything that
+                // has wandered in. Part of the world rather than of the burst's frozen entity
+                // list, so a joiner is told about them here or never told at all.
+                let since: Vec<u32> = world
+                    .devices()
+                    .iter()
+                    .map(|device| device.id)
+                    .chain(world.spawned_creatures().iter().map(|creature| creature.id))
+                    .filter(|id| !world.is_dead(*id))
+                    .collect();
+
+                for id in since {
+                    if let Some((built, definition)) = self.entity_now(id, world) {
                         out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+                    }
+                }
+
+                // ...and anything lying on the floor. Two entities each, **the stack before the
+                // pickup that names it**, and the stack has to exist in this session's own model
+                // before it can be encoded: it was minted in whichever session dropped it.
+                for drop in world.floor_drops() {
+                    self.ensure_stack(&drop);
+
+                    if let Some(stack) = self.inventories.item(drop.stack).cloned() {
+                        if let Some(definition) = world.item_definition() {
+                            let entity = Entity::new(
+                                drop.stack,
+                                vec![Component::InventoryItem(stack)],
+                            );
+
+                            out.push(encode(|w| entity.to_entity_add(definition).encode(w)));
+                        }
+                    }
+
+                    if let Some(definition) = world.definitions.get(PICKUP) {
+                        let entity = Entity::new(
+                            drop.pickup,
+                            world::pickup_components(drop.stack, drop.position),
+                        );
+
+                        out.push(encode(|w| entity.to_entity_add(definition).encode(w)));
                     }
                 }
 
@@ -3100,9 +3157,13 @@ impl Session {
             return Some((player, definition));
         }
 
-        // A creature, whose only mutable state is what is left of it.
-        if let Some(creature) = self.creature(entity, world) {
-            let health = creature.max_health.saturating_sub(self.damage_to(entity));
+        // A creature, whose only mutable state is what is left of it. Like a device, it lives
+        // behind the world's lock, so its definition is looked up by name from the table that
+        // outlives the lock rather than borrowed from the creature itself.
+        if let Some(creature) = world.creature_now(entity) {
+            let definition = world.definitions.get(&creature.name)?;
+
+            let health = creature.max_health.saturating_sub(world.damage_to(entity));
 
             let mut built = creature.entity.clone();
 
@@ -3112,7 +3173,7 @@ impl Session {
                 }
             }
 
-            return Some((built, &creature.definition));
+            return Some((built, definition));
         }
 
         // A device a player placed. It lives on the world rather than on any session, so its
@@ -3169,22 +3230,18 @@ impl Session {
     ///
     /// The session first, for the same reason as a container: the world is fixed once built,
     /// so anything created while the server runs lives here.
-    pub fn creature<'a>(&'a self, id: u32, world: &'a World) -> Option<&'a world::Creature> {
-        self.creatures
-            .iter()
-            .find(|creature| creature.id == id)
-            .or_else(|| world.creature(id))
+    pub fn creature(&self, id: u32, world: &World) -> Option<world::Creature> {
+        world.creature_now(id)
     }
 
     /// Hit points left on a creature, or `None` if that id is not one.
-    pub fn creature_health(&self, id: u32) -> Option<u32> {
-        let creature = self.creatures.iter().find(|creature| creature.id == id)?;
+    ///
+    /// Takes the world because that is where creatures live: what is left of one is a fact
+    /// about the world and not about whoever is asking.
+    pub fn creature_health(&self, id: u32, world: &World) -> Option<u32> {
+        let creature = world.creature_now(id)?;
 
-        Some(creature.max_health.saturating_sub(self.damage_to(id)))
-    }
-
-    fn damage_to(&self, id: u32) -> u32 {
-        self.damage.get(&id).copied().unwrap_or(0)
+        Some(creature.max_health.saturating_sub(world.damage_to(id)))
     }
 
     /// Hit points left on this player.
@@ -3247,15 +3304,22 @@ impl Session {
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
-    pub fn floor_drops(&self) -> Vec<(u32, u32)> {
-        self.pickups.iter().map(|drop| (drop.id, drop.item)).collect()
+    ///
+    /// Takes the world because the floor is the world's: see [`World::floor_drops`].
+    pub fn floor_drops_in(&self, world: &World) -> Vec<(u32, u32)> {
+        world
+            .floor_drops()
+            .iter()
+            .map(|drop| (drop.pickup, drop.stack))
+            .collect()
     }
 
     /// Where a floor drop is lying, in position units of 1/64 of a voxel.
-    pub fn floor_drop_position(&self, pickup: u32) -> Option<[u32; 3]> {
-        self.pickups
+    pub fn floor_drop_position(&self, pickup: u32, world: &World) -> Option<[u32; 3]> {
+        world
+            .floor_drops()
             .iter()
-            .find(|drop| drop.id == pickup)
+            .find(|drop| drop.pickup == pickup)
             .map(|drop| drop.position)
     }
 
@@ -3302,7 +3366,10 @@ impl Session {
 
         info!(entity = id, %entity, max_health, ?position, "spawned a creature");
 
-        self.creatures.push(world::Creature {
+        // **On the world, not on this session.** One knight, one pool of hit points: a
+        // creature per connection let two players kill the same thing twice and collect its
+        // loot twice.
+        world.spawn_creature(world::Creature {
             id,
             name: entity.to_owned(),
             entity: built,
@@ -3310,6 +3377,9 @@ impl Session {
             position,
             max_health,
         });
+
+        // Everyone already in the world sees it appear. A joiner gets it from the burst.
+        self.broadcasts.extend(packets.iter().cloned());
 
         Some(Spawned {
             entity: id,
@@ -3397,14 +3467,14 @@ impl Session {
             return Vec::new();
         }
 
-        let Some(creature) = self.creature(packet.entity_id, world).cloned() else {
+        let Some(creature) = world.creature_now(packet.entity_id) else {
             // A chest, a tree, another player, or an id belonging to nothing.
             debug!(target = packet.entity_id, "hit something that is not a creature");
 
             return Vec::new();
         };
 
-        if creature.max_health <= self.damage_to(creature.id) {
+        if world.is_dead(creature.id) || creature.max_health <= world.damage_to(creature.id) {
             debug!(target = creature.id, "hit a corpse");
 
             return Vec::new();
@@ -3444,11 +3514,10 @@ impl Session {
     ) -> Vec<Vec<u8>> {
         let target = creature.id;
 
-        let before = creature.max_health.saturating_sub(self.damage_to(target));
+        let before = creature.max_health.saturating_sub(world.damage_to(target));
         let after = before.saturating_sub(action.attack_strength);
 
-        self.damage
-            .insert(target, creature.max_health.saturating_sub(after));
+        world.set_damage(target, creature.max_health.saturating_sub(after));
 
         info!(
             target,
@@ -3478,8 +3547,13 @@ impl Session {
             .encode(w)
         })];
 
-        // ...and the heart bar itself, which is an ordinary parameter sync.
-        out.extend(self.sync_health(target, world));
+        // ...and the heart bar itself, which is an ordinary parameter sync. Everyone sees it:
+        // the knight is one knight, so its hearts have to move on every screen.
+        let health_sync = self.sync_health(target, world);
+
+        self.broadcasts.extend(health_sync.iter().cloned());
+
+        out.extend(health_sync);
 
         if after > 0 {
             // Still alive, so it may still give something up: shearing. Only a sheep has a
@@ -3487,21 +3561,33 @@ impl Session {
             out.extend(self.award_hit_loot(&creature, world));
         }
 
-        if after == 0 {
-            out.push(encode(|w| {
+        // **Once.** Two players swinging at the same knight can both land what looks like a
+        // killing blow; the world decides which of them actually did, and the loser's swing
+        // rolls no loot and announces no kill.
+        if after == 0 && world.mark_dead(target) {
+            let kill = encode(|w| {
                 KillOccurred {
                     killer: self.player_entity_id,
                     victim: target,
                     weapon: None,
                 }
                 .encode(w)
-            }));
+            });
+
+            let removal = encode(|w| EntityRemoved { entity_id: target }.encode(w));
+
+            out.push(kill.clone());
 
             // Rolled on the killing blow and only then, so a corpse cannot be farmed.
             out.extend(self.award_loot(&creature, world));
 
             // Only after the kill: the client resolves the victim before it draws anything.
-            out.push(encode(|w| EntityRemoved { entity_id: target }.encode(w)));
+            out.push(removal.clone());
+
+            // The other players watch it die too, or it stands there at full health on their
+            // screens until they next log in.
+            self.broadcasts.push(kill);
+            self.broadcasts.push(removal);
         }
 
         out
@@ -3621,29 +3707,50 @@ impl Session {
             return Vec::new();
         };
 
-        let built = Entity::new(
-            id,
-            vec![
-                Component::ResourcePickup(ResourcePickupComponent::at(stack, at)),
-                // `size` is the only thing the transform contributes here, and an unset one is
-                // [0,0,0] -- present, collectable, and invisible.
-                Component::Transform(TransformComponent {
-                    size: [1, 1, 1],
-                    ..Default::default()
-                }),
-            ],
-        );
+        let built = Entity::new(id, world::pickup_components(stack, at));
 
-        out.push(encode(|w| built.to_entity_add(&definition).encode(w)));
+        let announcement = encode(|w| built.to_entity_add(&definition).encode(w));
 
-        self.pickups.push(FloorDrop {
-            id,
-            item: stack,
-            definition,
+        out.push(announcement.clone());
+
+        // **On the world.** A pile of dirt on the ground is on everybody's ground: the other
+        // players have to see it, and whoever walks over it first gets it.
+        world.drop_item(world::FloorDrop {
+            pickup: id,
+            stack,
+            item: skysaga_core::name_hash(item),
+            count,
             position: at,
         });
 
+        // The stack first and the pickup second, to everyone else as well: a pickup naming an
+        // entity the client has not been told about draws nothing at all.
+        self.broadcasts.extend(out.iter().cloned());
+
         out
+    }
+
+    /// Put an item on the floor and answer the `Pickup` entity, for tests and for commands.
+    pub fn drop_item(
+        &mut self,
+        item: &str,
+        count: u32,
+        at: [u32; 3],
+        world: &World,
+    ) -> Option<u32> {
+        self.drop_pickup(item, count, at, world);
+
+        world.floor_drops().last().map(|drop| drop.pickup)
+    }
+
+    /// Make sure this session's model holds the stack a floor drop points at.
+    ///
+    /// A drop another player made was minted in *their* inventory model. The ids belong to the
+    /// world, so the same stack is recreated here under the same id rather than allocated
+    /// afresh; see [`skysaga_world::Inventories::create_loose_with_id`].
+    fn ensure_stack(&mut self, drop: &world::FloorDrop) {
+        self.inventories
+            .create_loose_with_id(drop.stack, drop.item, drop.count);
     }
 
     /// Collect a floor drop into the rucksack.
@@ -3656,12 +3763,17 @@ impl Session {
     /// `EntityAdd`. That is the whole difference between collecting a drop and being given an
     /// item.
     fn collect_pickup(&mut self, pickup: u32, world: &World) -> Vec<Vec<u8>> {
-        let Some(position) = self.pickups.iter().position(|drop| drop.id == pickup) else {
+        // Taken off the floor first, so that two players standing on the same pile cannot both
+        // be handed it: whoever gets here first has it, and the other finds nothing.
+        let Some(drop) = world.take_floor_drop(pickup) else {
             // Not a pickup, or already taken.
             return Vec::new();
         };
 
-        let stack = self.pickups[position].item;
+        // It may be another player's drop, in which case this session has never held the stack.
+        self.ensure_stack(&drop);
+
+        let stack = drop.stack;
 
         let effects = self.inventories.collect(self.player_entity_id, stack);
 
@@ -3669,10 +3781,10 @@ impl Session {
             warn!(pickup, "cannot collect: the rucksack is full");
 
             // Left on the floor deliberately: destroying it would lose the item.
+            world.drop_item(drop);
+
             return Vec::new();
         }
-
-        self.pickups.remove(position);
 
         info!(pickup, stack, "collected");
 
@@ -3872,18 +3984,77 @@ impl Session {
         entity: u32,
         world: &'a World,
     ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
+        let component = self.inventories.item(entity)?;
+
+        // A tool is a different *entity* from a stack of dirt: it carries a durability
+        // component, and the repair square refuses anything that does not resolve one.
+        if let Some(durability) = self.durability_of(entity, world) {
+            if let Some(definition) = world.durable_item_definition() {
+                return Some((
+                    Entity::new(
+                        entity,
+                        vec![
+                            Component::Durability(durability),
+                            Component::InventoryItem(component.clone()),
+                        ],
+                    ),
+                    definition,
+                ));
+            }
+        }
+
         let definition = world.item_definition().or_else(|| {
             warn!("BasicInventoryItem is not defined; cannot serialise a stack");
 
             None
         })?;
 
-        let component = self.inventories.item(entity)?;
-
         Some((
             Entity::new(entity, vec![Component::InventoryItem(component.clone())]),
             definition,
         ))
+    }
+
+    /// How worn the stack in `entity` is, or `None` if it is not the kind of thing that wears.
+    ///
+    /// A stack is a fresh item every time one is minted, so the numbers come straight from the
+    /// data: a sword is a sword. Wear that a player has *done* is not modelled yet, which is
+    /// the next thing repair needs.
+    pub fn durability_of(
+        &self,
+        entity: u32,
+        world: &World,
+    ) -> Option<skysaga_world::DurabilityComponent> {
+        if !durable_items_enabled() {
+            return None;
+        }
+
+        let name = self.inventories.name(entity)?;
+
+        world
+            .geodata
+            .durability_of(name)
+            .map(skysaga_world::DurabilityComponent::new)
+    }
+
+    /// Create a stack and say what the client must be told, for tests and for probes.
+    ///
+    /// `give` alone changes the model and sends nothing; this is the pair, which is what the
+    /// admin path does.
+    pub fn give_announced(&mut self, item: &str, count: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(entity) = self.give(item, count) else {
+            return Vec::new();
+        };
+
+        self.apply(
+            vec![
+                Effect::ItemCreated { entity },
+                Effect::SlotsChanged {
+                    owner: self.player_entity_id,
+                },
+            ],
+            world,
+        )
     }
 }
 
@@ -3961,23 +4132,3 @@ pub struct Spawned {
     pub packets: Vec<Vec<u8>>,
 }
 
-/// An item lying on the floor: the `Pickup` entity, and the stack it names.
-///
-/// Held per session for the same reason as spawned containers and creatures -- the world is
-/// built once, so anything created while the server runs lives here, and a drop one player
-/// makes is not in another player's world.
-#[derive(Debug, Clone)]
-struct FloorDrop {
-    /// The `Pickup` entity the client fires `ResourcePickupAction` at.
-    id: u32,
-
-    /// The `BasicInventoryItem` it points at, which is what ends up in a slot.
-    item: u32,
-
-    /// Kept so the pickup can be re-encoded without looking it up again.
-    #[allow(dead_code)]
-    definition: skysaga_world::EntityDefinition,
-
-    /// Where it is lying, in position units of 1/64 of a voxel.
-    position: [u32; 3],
-}

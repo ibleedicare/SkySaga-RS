@@ -194,6 +194,35 @@ impl Inventories {
         self.create_stack(name, count)
     }
 
+    /// The same, under an id somebody else chose.
+    ///
+    /// **For a stack that already exists elsewhere.** An item lying on the floor belongs to the
+    /// world, so every session has to name it by the same entity id: one player drops it, and
+    /// another has to be able to build the same stack in its own model to pick it up. Minting a
+    /// fresh id there would leave the client holding a pickup pointing at nothing.
+    ///
+    /// Does nothing if that id is already known, and keeps the allocator ahead of it either way.
+    pub fn create_loose_with_id(&mut self, entity: u32, name: u32, count: u32) {
+        self.reserve_ids_from(entity + 1);
+
+        if self.items.contains_key(&entity) {
+            return;
+        }
+
+        self.items.insert(
+            entity,
+            InventoryItemComponent {
+                slot_data: InventorySlotData {
+                    name: Some(name),
+                    count,
+                    item_uuid: stack_uuid(entity),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    }
+
     /// Take a loose stack into `owner`'s rucksack.
     ///
     /// Merges into a matching stack that still has room before taking a fresh square, so
