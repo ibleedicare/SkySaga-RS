@@ -239,7 +239,7 @@ fn an_unknown_packet_is_ignored() {
     let world = world_from_capture();
     let mut session = Session::new(world.player_entity_id);
 
-    let out = drive(&mut session, &world, ClientPacket::Unknown(9999));
+    let out = drive(&mut session, &world, ClientPacket::from_wire_id(9999));
 
     assert!(out.is_empty());
 }

@@ -775,7 +775,7 @@ fn a_voxel_action_is_not_reported_as_unhandled() {
 
     swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
 
-    assert_eq!(session.reported_unhandled(), Vec::<u16>::new());
+    assert!(session.reported_unhandled().is_empty());
 }
 
 
@@ -837,4 +837,81 @@ fn a_block_one_player_places_is_there_for_the_other() {
 
     assert!(!burst.is_empty(), "the other player could not dig the new block");
     assert_eq!(digger.floor_drops_in(&world).len(), 1, "and it dropped what it was made of");
+}
+
+// --- unhandled packets carry their bytes -----------------------------------------------------
+
+/// **An unhandled packet is a reversing lead, and the id alone is not enough.**
+///
+/// The id says which row of the documentation to read; the payload says what the client
+/// actually sent, which is what a layout is reconstructed from. `RequestUnEquipInventoryItem`
+/// was found this way: the e2e run reported wire 148 and nothing else, and reading its bytes is
+/// the difference between "there is a gap" and "here is the packet".
+#[test]
+fn an_unhandled_packet_keeps_its_payload() {
+    // A first byte nothing claims, whatever follows it.
+    let bytes = vec![0x80, 0x11, 0x22, 0x33, 0x44];
+
+    let ClientPacket::Unknown { wire_id, payload } = ClientPacket::parse(&bytes) else {
+        panic!("0xf0 is not a packet this server handles");
+    };
+
+    assert!(wire_id > 0, "the id is still reported: {wire_id}");
+    assert_eq!(payload, bytes, "the bytes are kept as they arrived, id included");
+}
+
+/// A payload is truncated rather than kept whole: this exists to be read in a log line, and a
+/// chunk sync would drown it.
+#[test]
+fn a_long_payload_is_truncated() {
+    // The same leading bytes as the test above, so it is the same unhandled id, then filler.
+    let bytes: Vec<u8> = vec![0x80, 0x11, 0x22, 0x33, 0x44]
+        .into_iter()
+        .chain(std::iter::repeat(0xaa).take(200))
+        .collect();
+
+    let ClientPacket::Unknown { payload, .. } = ClientPacket::parse(&bytes) else {
+        panic!("unhandled");
+    };
+
+    assert_eq!(payload.len(), skysaga_game::UNKNOWN_PAYLOAD_BYTES);
+}
+
+/// **An id is reported once per distinct payload, not once per id.**
+///
+/// The silencing exists so a client that repeats an unhandled packet every tick does not fill
+/// the log. But while a packet is being reversed the *payload* is the whole point, and one
+/// sample is not a layout: `RequestUnEquipInventoryItem` turned out to be two bytes, and
+/// reading the field meant varying the action and watching the byte change. Repeats of the same
+/// bytes stay quiet; a new payload for a known id is news.
+#[test]
+fn an_unhandled_id_is_reported_again_when_its_payload_differs() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // The same id three times: two identical payloads and one different.
+    session.handle(ClientPacket::parse(&[0x80, 0x11]), &world);
+    session.handle(ClientPacket::parse(&[0x80, 0x11]), &world);
+    session.handle(ClientPacket::parse(&[0x80, 0x22]), &world);
+
+    assert_eq!(
+        session.reported_unhandled().len(),
+        2,
+        "reported: {:?}",
+        session.reported_unhandled(),
+    );
+}
+
+/// ...but not for ever. A field that moves every tick would otherwise report every tick, which
+/// is the flooding the silencing exists to prevent.
+#[test]
+fn a_moving_payload_stops_being_reported() {
+    let world = world();
+    let mut session = playing(&world);
+
+    for byte in 0..64u8 {
+        session.handle(ClientPacket::parse(&[0x80, byte]), &world);
+    }
+
+    assert_eq!(session.reported_unhandled().len(), skysaga_game::UNHANDLED_SAMPLES);
 }

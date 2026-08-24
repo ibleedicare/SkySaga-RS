@@ -412,7 +412,7 @@ fn a_bare_interact_with_entity_opens_nothing_and_is_not_unhandled() {
 
     assert!(burst.is_empty(), "{burst:?}");
     assert_eq!(session.using_entity(), 0);
-    assert_eq!(session.reported_unhandled(), Vec::<u16>::new());
+    assert!(session.reported_unhandled().is_empty());
 }
 
 // --- moving things in and out -----------------------------------------------------------

@@ -464,3 +464,70 @@ fn a_slot_dropped_onto_itself_changes_nothing() {
     assert_eq!(inventories.slot(player, 9), Some(item));
     assert_eq!(inventories.count(item), Some(10), "it did not merge with itself");
 }
+
+// --- unequipping -------------------------------------------------------------------------------
+
+/// Taking a piece of armour off puts it back in the rucksack.
+///
+/// The inverse of [`Inventories::equip`], and the same move: equipment and the rucksack are one
+/// 45-entry list, so this is a swap between a low index and the first free high one.
+#[test]
+fn unequipping_returns_the_item_to_the_rucksack() {
+    let (mut inventories, player) = player();
+
+    let helmet = inventories.give(player, 9, skysaga_core::name_hash("MetalArmourHead"), 1).unwrap();
+
+    inventories.equip(player, 9, 2);
+
+    assert_eq!(inventories.slot(player, 2), Some(helmet), "it is on the head");
+
+    let effects = inventories.unequip(player, 2);
+
+    assert!(!effects.is_empty(), "nothing happened");
+    assert_eq!(inventories.slot(player, 2), Some(0), "the head is bare");
+
+    assert_eq!(
+        inventories.slot(player, 9),
+        Some(helmet),
+        "and the helmet is back in the first free square",
+    );
+}
+
+/// An empty equipment slot is an ordinary no-op: the client sends this on any drag out of the
+/// panel, including one that moved nothing.
+#[test]
+fn unequipping_an_empty_slot_does_nothing() {
+    let (mut inventories, player) = player();
+
+    assert!(inventories.unequip(player, 2).is_empty());
+}
+
+/// **The hands are not storage.** They hold what the hotbar names, so there is nothing to move
+/// out of them and the model reports no change; the session clears the binding instead.
+#[test]
+fn unequipping_a_hand_moves_nothing() {
+    let (mut inventories, player) = player();
+
+    inventories.give(player, 9, skysaga_core::name_hash("Metal_Sword"), 1).unwrap();
+
+    assert!(inventories.unequip(player, 0).is_empty());
+    assert!(inventories.unequip(player, 1).is_empty());
+}
+
+/// A full rucksack leaves it equipped rather than destroying it.
+#[test]
+fn unequipping_with_nowhere_to_put_it_leaves_it_on() {
+    let (mut inventories, player) = player();
+
+    let helmet = inventories.give(player, 9, skysaga_core::name_hash("MetalArmourHead"), 1).unwrap();
+
+    inventories.equip(player, 9, 2);
+
+    // Every rucksack square taken by something that will not merge with a helmet.
+    for slot in 9..45 {
+        inventories.give(player, slot, skysaga_core::name_hash("Dirt"), 1);
+    }
+
+    assert!(inventories.unequip(player, 2).is_empty());
+    assert_eq!(inventories.slot(player, 2), Some(helmet), "it stayed on");
+}

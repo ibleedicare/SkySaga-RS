@@ -543,6 +543,27 @@ impl Inventories {
         self.exchange(owner, bag_slot, owner, equip_slot)
     }
 
+    /// Take something off, putting it in the first free rucksack square.
+    ///
+    /// The inverse of [`Self::equip`], with the same two refusals: the hands hold what the
+    /// hotbar names rather than storing anything, and a rucksack with no free square leaves the
+    /// item equipped rather than destroying it.
+    pub fn unequip(&mut self, owner: u32, equip_slot: u32) -> Vec<Effect> {
+        if HAND_SLOTS.contains(&equip_slot) {
+            return Vec::new();
+        }
+
+        if self.slot(owner, equip_slot).unwrap_or(0) == 0 {
+            return Vec::new();
+        }
+
+        let Some(free) = self.first_free_rucksack_slot(owner) else {
+            return Vec::new();
+        };
+
+        self.exchange(owner, equip_slot, owner, free)
+    }
+
     // --- the primitives -----------------------------------------------------------------
 
     /// Whether both slots exist on inventories that exist.
