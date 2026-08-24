@@ -29,7 +29,7 @@ pub mod server;
 pub mod world;
 
 pub use server::{GameServer, GameServerConfig};
-pub use world::{World, WorldConfig};
+pub use world::{VoxelEdit, World, WorldConfig};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -627,12 +627,6 @@ pub struct Session {
     /// and closes it when that goes back to 0.
     using_entity: u32,
 
-    /// Voxels this player has changed: (chunk, voxel) to the new material.
-    ///
-    /// Held per connection, as containers are, so a block one player places is not in another
-    /// player's world. The same limitation, and it moves at the same time.
-    voxel_edits: std::collections::HashMap<([u32; 3], [u32; 3]), u8>,
-
     /// Containers spawned while this session runs, beside the ones the world seeded.
     ///
     /// Per session, as the seeded containers effectively are: a chest one player spawns is
@@ -715,6 +709,16 @@ pub struct Session {
     /// the inventory square empties and the drop square fills.
     drop_slots: [u32; DROP_SLOTS],
 
+    /// Whether this session has been handed back what its account was carrying.
+    ///
+    /// A restore is refused once the rucksack holds anything, but this is what stops the
+    /// server *asking* every tick, and what keeps the first tick from recording an empty
+    /// rucksack over a stored one.
+    items_restored: bool,
+
+    /// The rucksack as last written down, so an unchanged tick costs nothing.
+    recorded_items: Option<Vec<skysaga_state::StoredItem>>,
+
     /// Resources this player has been seen holding, so a discovery is announced once.
     ///
     /// The client keeps a set of its own -- `FUN_00878100` -- so a repeat costs only a packet;
@@ -780,7 +784,6 @@ impl Session {
             using_entity: 0,
             raise_lid_on_close: true,
             closed_lids: BTreeSet::new(),
-            voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
             spawned: Vec::new(),
             creatures: Vec::new(),
@@ -791,6 +794,8 @@ impl Session {
             crafting: BTreeMap::new(),
             drop_slots: [0; DROP_SLOTS],
             seen_resources: BTreeSet::new(),
+            items_restored: false,
+            recorded_items: None,
             clock_ms: None,
             todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
@@ -853,6 +858,109 @@ impl Session {
 
         self.inventories
             .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
+    }
+
+    /// Whether this session has already been handed back what it was carrying.
+    pub fn items_restored(&self) -> bool {
+        self.items_restored
+    }
+
+    /// Say that it has, so a later tick does not do it again.
+    pub fn mark_items_restored(&mut self) {
+        self.items_restored = true;
+    }
+
+    /// What to write down, or `None` when nothing has changed since the last time.
+    ///
+    /// The comparison lives here so the game loop can ask every tick: a tick where nobody moved
+    /// an item costs one walk of the rucksack and no lock, where calling into `AppState` would
+    /// take a write lock to discover the same thing.
+    pub fn items_to_record(&mut self) -> Option<Vec<skysaga_state::StoredItem>> {
+        // Nothing is worth recording until the restore has happened. Otherwise the first tick
+        // of a session writes down an empty rucksack and erases what the player had.
+        if !self.items_restored {
+            return None;
+        }
+
+        let items = self.carried_items();
+
+        if self.recorded_items.as_ref() == Some(&items) {
+            return None;
+        }
+
+        self.recorded_items = Some(items.clone());
+
+        Some(items)
+    }
+
+    /// What this player is carrying, square by square, for writing down.
+    ///
+    /// Only the occupied squares: an empty rucksack is no rows rather than 45 empty ones. The
+    /// item is its name hash, because a stack's *entity* is minted per session and means
+    /// nothing tomorrow. See [`skysaga_state::StoredItem`].
+    pub fn carried_items(&self) -> Vec<skysaga_state::StoredItem> {
+        self.inventory()
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| **entity != 0)
+            .filter_map(|(slot, entity)| {
+                let stack = self.inventories.item(*entity)?;
+
+                Some(skysaga_state::StoredItem {
+                    slot: slot as u32,
+                    item: stack.slot_data.name?,
+                    count: stack.slot_data.count,
+                })
+            })
+            .collect()
+    }
+
+    /// Put a stored rucksack back, and say what the client must be told.
+    ///
+    /// **Each stack is announced before the slot list that names it.** The handshake burst
+    /// carries no item entities at all, so a restore has to create them the way `/give` does:
+    /// an `EntityAdd` per stack, then one sync of `inventoryentitylist`. A list naming an
+    /// entity the client has not been told about draws an empty square.
+    ///
+    /// Does nothing when the player is already carrying something. The join path cannot be sure
+    /// it runs exactly once, and a second restore would double a player's belongings.
+    pub fn restore_items(
+        &mut self,
+        items: &[skysaga_state::StoredItem],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        if items.is_empty() || !self.carried_items().is_empty() {
+            return Vec::new();
+        }
+
+        let mut effects = Vec::new();
+
+        for item in items {
+            let Some(entity) = self
+                .inventories
+                .give(self.player_entity_id, item.slot, item.item, item.count)
+            else {
+                warn!(slot = item.slot, "no such square to restore into");
+
+                continue;
+            };
+
+            self.inventories.reserve_ids_from(self.inventories.next_entity_id());
+
+            effects.push(Effect::ItemCreated { entity });
+        }
+
+        if effects.is_empty() {
+            return Vec::new();
+        }
+
+        effects.push(Effect::SlotsChanged {
+            owner: self.player_entity_id,
+        });
+
+        info!(squares = items.len(), "restored what the player was carrying");
+
+        self.apply(effects, world)
     }
 
     /// Create a stack of `item` in one particular square, for tests and for seeding.
@@ -1805,7 +1913,7 @@ impl Session {
         // the one that was hit.
         let voxel = packet.placement_voxel();
 
-        self.voxel_edits.insert((packet.chunk, voxel), material);
+        world.set_block(packet.chunk, voxel, material);
 
         debug!(?packet.chunk, ?voxel, material, "place");
 
@@ -2702,15 +2810,13 @@ impl Session {
         )
     }
 
-    /// What block stands at a voxel now: what the player has done to it, or the world as built.
+    /// What block stands at a voxel now: what players have done to it, or the world as built.
     ///
-    /// The session's own edits come first, so a block placed and then dug drops the thing that
-    /// was placed rather than the terrain that used to be underneath it.
+    /// The edits belong to the **world**, so a block one player places is a block every player
+    /// digs. They come first, so a block placed and then dug drops the thing that was placed
+    /// rather than the terrain that used to be underneath it.
     fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> u8 {
-        self.voxel_edits
-            .get(&(chunk, voxel))
-            .copied()
-            .unwrap_or_else(|| world.material_at(chunk, voxel))
+        world.block_at(chunk, voxel)
     }
 
     /// One dig tick on a voxel. The block gives way once enough of them land, and leaves
@@ -2753,8 +2859,7 @@ impl Session {
 
         self.dig_damage.remove(&(chunk, voxel));
 
-        self.voxel_edits
-            .insert((chunk, voxel), PartialChunkEditsSync::AIR);
+        world.set_block(chunk, voxel, PartialChunkEditsSync::AIR);
 
         // The hole first, then what fell out of it. The other order puts the item inside a
         // block the client still believes is solid.
@@ -2815,11 +2920,6 @@ impl Session {
             }
             .encode(w)
         })
-    }
-
-    /// Every voxel this session has changed, for anything that has to rebuild the terrain.
-    pub fn voxel_edits(&self) -> &std::collections::HashMap<([u32; 3], [u32; 3]), u8> {
-        &self.voxel_edits
     }
 
     /// The entity this player has a container open on, or 0.

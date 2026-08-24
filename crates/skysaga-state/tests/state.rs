@@ -696,6 +696,7 @@ mod persistence {
                 }),
             }],
             vec![("photo-1".into(), Photo { bytes: vec![9], captured_at: 7 })],
+            Vec::new(),
         );
 
         let character = state.character("Alice").expect("the character came back");
@@ -717,6 +718,7 @@ mod persistence {
                 display_name: "Alice".into(),
                 character: None,
             }],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -740,6 +742,7 @@ mod persistence {
                     appearance: CustomisationData::default(),
                 }),
             }],
+            Vec::new(),
             Vec::new(),
         );
 

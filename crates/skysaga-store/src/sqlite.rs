@@ -8,7 +8,7 @@
 //! docs for why that is preferred to sqlx's `Any`.
 
 use async_trait::async_trait;
-use skysaga_state::{AccountRecord, Character, Photo};
+use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredItem};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -43,6 +43,26 @@ CREATE TABLE IF NOT EXISTS photos (
     id          TEXT PRIMARY KEY NOT NULL,
     bytes       BLOB NOT NULL,
     captured_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    chunk_x  INTEGER NOT NULL,
+    chunk_y  INTEGER NOT NULL,
+    chunk_z  INTEGER NOT NULL,
+    voxel_x  INTEGER NOT NULL,
+    voxel_y  INTEGER NOT NULL,
+    voxel_z  INTEGER NOT NULL,
+    material INTEGER NOT NULL,
+    PRIMARY KEY (chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z)
+);
+
+CREATE TABLE IF NOT EXISTS inventories (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    slot        INTEGER NOT NULL,
+    item        INTEGER NOT NULL,
+    count       INTEGER NOT NULL,
+    PRIMARY KEY (account, slot)
 );
 ";
 
@@ -125,6 +145,53 @@ impl Store for SqliteStore {
             });
         }
 
+        let blocks = sqlx::query(
+            "SELECT chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z, material
+             FROM blocks
+             ORDER BY chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(StoredBlock {
+                chunk: [
+                    row.try_get::<i64, _>("chunk_x")? as u32,
+                    row.try_get::<i64, _>("chunk_y")? as u32,
+                    row.try_get::<i64, _>("chunk_z")? as u32,
+                ],
+                voxel: [
+                    row.try_get::<i64, _>("voxel_x")? as u32,
+                    row.try_get::<i64, _>("voxel_y")? as u32,
+                    row.try_get::<i64, _>("voxel_z")? as u32,
+                ],
+                material: row.try_get::<i64, _>("material")? as u8,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+
+        let mut inventories: Vec<(String, Vec<StoredItem>)> = Vec::new();
+
+        for row in sqlx::query(
+            "SELECT account, slot, item, count FROM inventories ORDER BY account, slot",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let account: String = row.try_get("account")?;
+
+            let item = StoredItem {
+                slot: row.try_get::<i64, _>("slot")? as u32,
+                item: row.try_get::<i64, _>("item")? as u32,
+                count: row.try_get::<i64, _>("count")? as u32,
+            };
+
+            match inventories.last_mut() {
+                Some((held, items)) if *held == account => items.push(item),
+                _ => inventories.push((account, vec![item])),
+            }
+        }
+
         let photos = sqlx::query("SELECT id, bytes, captured_at FROM photos ORDER BY id")
             .fetch_all(&self.pool)
             .await?
@@ -142,7 +209,12 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-        Ok(Snapshot { accounts, photos })
+        Ok(Snapshot {
+            accounts,
+            photos,
+            inventories,
+            blocks,
+        })
     }
 
     async fn save_account(&self, key: &str, display_name: &str) -> Result<(), StoreError> {
@@ -194,6 +266,59 @@ impl Store for SqliteStore {
             .bind(account)
             .execute(&self.pool)
             .await?;
+
+        Ok(())
+    }
+
+    /// Replace an account's whole rucksack.
+    ///
+    /// Delete-then-insert inside one transaction, because the change describes every square:
+    /// an upsert alone would leave rows behind for squares that were emptied, and those would
+    /// come back as items the player had spent.
+    async fn save_inventory(&self, account: &str, items: &[StoredItem]) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM inventories WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for item in items {
+            sqlx::query("INSERT INTO inventories (account, slot, item, count) VALUES (?, ?, ?, ?)")
+                .bind(account)
+                .bind(item.slot as i64)
+                .bind(item.item as i64)
+                .bind(item.count as i64)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(())
+    }
+
+    /// Record one changed block, replacing whatever stood there.
+    ///
+    /// A single row per swing: a player digging a tunnel writes one row per block rather than
+    /// rewriting the whole world, which is why this change is per block and the rucksack's is
+    /// not.
+    async fn save_block(&self, block: &StoredBlock) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO blocks (chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z, material)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z)
+             DO UPDATE SET material = excluded.material",
+        )
+        .bind(block.chunk[0] as i64)
+        .bind(block.chunk[1] as i64)
+        .bind(block.chunk[2] as i64)
+        .bind(block.voxel[0] as i64)
+        .bind(block.voxel[1] as i64)
+        .bind(block.voxel[2] as i64)
+        .bind(block.material as i64)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

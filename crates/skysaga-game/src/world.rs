@@ -15,6 +15,9 @@ use skysaga_world::{
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
     TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLink, VoxelLinkComponent,
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -95,6 +98,45 @@ pub struct World {
     /// command needs its definition to know which parameters to write, and the name comes from
     /// a chat message rather than from this list. Empty for a world decoded from a capture.
     pub definitions: EntityDefinitions,
+
+    /// The half of the world that changes while the server runs.
+    ///
+    /// # Why this is behind a lock rather than `&mut World`
+    ///
+    /// A block one player breaks is broken for everybody, so this state cannot live on a
+    /// session. Passing `&mut World` into `Session::handle` would say so in the type, at the
+    /// cost of every call site and of borrowing the world mutably while iterating sessions.
+    /// The game loop is a single thread draining one packet at a time, so the lock is never
+    /// contended and the sessions keep taking `&World`.
+    ///
+    /// Shared rather than copied on clone: a cloned world is the same world.
+    /// Use the methods rather than this: [`World::block_at`], [`World::set_block`] and
+    /// [`World::take_unsaved_edits`]. It is public only so a world can be built by hand, as the
+    /// capture-backed tests do.
+    pub changes: Arc<Mutex<WorldChanges>>,
+}
+
+/// What has happened to the world since it was built. Opaque on purpose: it is reached
+/// through `World`, which keeps the unsaved queue and the block map in step.
+#[derive(Debug, Default)]
+pub struct WorldChanges {
+    /// `(chunk, voxel)` to the block that stands there now.
+    voxels: HashMap<([u32; 3], [u32; 3]), u8>,
+
+    /// Edits nobody has written down yet, oldest first.
+    ///
+    /// The world cannot reach the store: it is a value, and persistence lives at the edge. So
+    /// it keeps a queue and the game loop drains it, the same shape as a session's
+    /// notifications.
+    unsaved: Vec<VoxelEdit>,
+}
+
+/// One block, changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoxelEdit {
+    pub chunk: [u32; 3],
+    pub voxel: [u32; 3],
+    pub material: u8,
 }
 
 /// Something in the world with health: an animal, a bandit, a knight.
@@ -625,6 +667,7 @@ impl World {
             item_definition: definitions.get("BasicInventoryItem").cloned(),
             geodata,
             definitions: definitions.clone(),
+            changes: Arc::new(Mutex::new(WorldChanges::default())),
             creatures,
             spawn_voxel: {
                 let spawn = config.terrain.spawn();
@@ -1002,6 +1045,72 @@ impl World {
     /// Air for a voxel outside the world, or in one of the all-air chunks that are never sent.
     /// That is the same answer the client would give and it makes an out-of-range dig a
     /// no-op rather than an error to handle.
+    /// What block stands at a voxel **now**: what players have done to it, or the terrain.
+    ///
+    /// This is the one to ask. [`Self::material_at`] answers what the generator produced, which
+    /// is only the same thing until somebody digs.
+    pub fn block_at(&self, chunk: [u32; 3], voxel: [u32; 3]) -> u8 {
+        if let Some(material) = self.changes.lock().expect("world lock").voxels.get(&(chunk, voxel))
+        {
+            return *material;
+        }
+
+        self.material_at(chunk, voxel)
+    }
+
+    /// Put a block somewhere, for everybody.
+    ///
+    /// Queues the edit for storage as well: see [`Self::take_unsaved_edits`].
+    pub fn set_block(&self, chunk: [u32; 3], voxel: [u32; 3], material: u8) {
+        let mut changes = self.changes.lock().expect("world lock");
+
+        changes.voxels.insert((chunk, voxel), material);
+
+        changes.unsaved.push(VoxelEdit {
+            chunk,
+            voxel,
+            material,
+        });
+    }
+
+    /// Every block a player has changed, for rebuilding a world or writing one down.
+    pub fn block_edits(&self) -> Vec<VoxelEdit> {
+        let changes = self.changes.lock().expect("world lock");
+
+        let mut edits: Vec<VoxelEdit> = changes
+            .voxels
+            .iter()
+            .map(|((chunk, voxel), material)| VoxelEdit {
+                chunk: *chunk,
+                voxel: *voxel,
+                material: *material,
+            })
+            .collect();
+
+        // Sorted so that two servers holding the same world report it identically, which is
+        // what makes a round-trip test an equality rather than a set comparison.
+        edits.sort_by_key(|edit| (edit.chunk, edit.voxel));
+
+        edits
+    }
+
+    /// Put back edits loaded from storage, without queueing them to be written again.
+    pub fn restore_block_edits(&self, edits: &[VoxelEdit]) {
+        let mut changes = self.changes.lock().expect("world lock");
+
+        for edit in edits {
+            changes.voxels.insert((edit.chunk, edit.voxel), edit.material);
+        }
+    }
+
+    /// Take the edits nobody has written down yet.
+    ///
+    /// Drained by the game loop each tick, exactly as a session's notifications are.
+    pub fn take_unsaved_edits(&self) -> Vec<VoxelEdit> {
+        std::mem::take(&mut self.changes.lock().expect("world lock").unsaved)
+    }
+
+    /// What the terrain generator produced, before anybody touched it.
     pub fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3]) -> u8 {
         let Some(sync) = self.chunks.iter().find(|sync| sync.coords == chunk) else {
             return PartialChunkEditsSync::AIR;

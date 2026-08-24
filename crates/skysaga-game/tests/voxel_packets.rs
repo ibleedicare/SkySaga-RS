@@ -481,15 +481,18 @@ fn the_drop_lands_in_the_middle_of_the_hole() {
 ///
 /// The C# reads `hit` as if it agreed with `chunk * 32 + voxel` and it does not; taking the
 /// voxel's own centre means that disagreement cannot reach a drop position.
+/// **A world each.** The block is now the world's rather than the session's, so two players
+/// sharing one world cannot both dig it: the second finds the hole the first left.
 #[test]
 fn where_the_tool_struck_does_not_move_the_drop() {
-    let world = world();
+    let first_world = world();
+    let second_world = world();
 
-    let mut first = playing(&world);
-    let mut second = playing(&world);
+    let mut first = playing(&first_world);
+    let mut second = playing(&second_world);
 
-    dig_through_hitting(&mut first, &world, SAND, [0, 0, 0]);
-    dig_through_hitting(&mut second, &world, SAND, [999, 999, 999]);
+    dig_through_hitting(&mut first, &first_world, SAND, [0, 0, 0]);
+    dig_through_hitting(&mut second, &second_world, SAND, [999, 999, 999]);
 
     let at = |session: &Session| {
         let (pickup, _) = session.floor_drops()[0];
@@ -771,4 +774,56 @@ fn a_voxel_action_is_not_reported_as_unhandled() {
     swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
 
     assert_eq!(session.reported_unhandled(), Vec::<u16>::new());
+}
+
+
+// --- one world, shared -----------------------------------------------------------------------
+
+/// A block one player breaks is broken for everybody.
+///
+/// Voxel edits used to live on the session, so two players stood in the same world dug their
+/// own private copies of it: each could break the same block, and neither saw the other's
+/// holes. They belong to the world now.
+#[test]
+fn a_block_one_player_digs_is_gone_for_the_other() {
+    let world = world();
+
+    let mut first = playing(&world);
+    let mut second = playing(&world);
+
+    dig_through(&mut first, &world, SAND);
+
+    assert_eq!(
+        world.block_at([1, 0, 1], SAND),
+        skysaga_proto::packets::voxel::PartialChunkEditsSync::AIR,
+        "the world has the hole",
+    );
+
+    let burst = dig_through(&mut second, &world, SAND);
+
+    assert!(burst.is_empty(), "the second player dug a hole that was already there");
+    assert!(second.floor_drops().is_empty(), "and got a second block out of it");
+}
+
+/// And a block one player places stands in the other's world too.
+#[test]
+fn a_block_one_player_places_is_there_for_the_other() {
+    let world = world();
+
+    let mut builder = playing(&world);
+    let mut digger = playing(&world);
+
+    builder.give("Dirt", 10).expect("a free square");
+    hold(&mut builder, &world, "Dirt");
+
+    swing(&mut builder, &world, [4, 20, 4], [0, 1, 0]);
+
+    // The placed block is one voxel above the face that was clicked.
+    assert_eq!(world.block_at([1, 0, 1], [4, 21, 4]), 0, "dirt stands there");
+
+    // ...and the other player can break it, which is only possible if they can see it.
+    let burst = dig_through(&mut digger, &world, [4, 21, 4]);
+
+    assert!(!burst.is_empty(), "the other player could not dig the new block");
+    assert_eq!(digger.floor_drops().len(), 1, "and it dropped what it was made of");
 }

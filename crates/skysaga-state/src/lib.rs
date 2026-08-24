@@ -132,6 +132,19 @@ struct Inner {
     /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
     photos: HashMap<String, Photo>,
 
+    /// Every block the players have changed, by its place in the world.
+    ///
+    /// The world itself lives on the game thread; this is the copy that outlives it, kept here
+    /// so that a restart, which builds a fresh world, has something to put back.
+    blocks: HashMap<([u32; 3], [u32; 3]), StoredBlock>,
+
+    /// What each account is carrying, by lowercased account name.
+    ///
+    /// Written by the game thread as it changes and read back when that account next joins.
+    /// Held here rather than on the game server so that a restart, which builds a new game
+    /// server around the loaded state, finds it already in place.
+    inventories: HashMap<String, Vec<StoredItem>>,
+
     /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
     snapshot: ServerSnapshot,
 
@@ -164,6 +177,34 @@ pub enum Change {
     Character { account: String, character: Character },
     DeleteCharacter { account: String },
     Photo { id: String, photo: Photo },
+
+    /// What an account is carrying, in full.
+    ///
+    /// The whole rucksack rather than the square that moved: a stack split writes two squares
+    /// and a merge clears one, so a per-square change would have to describe deletions as well
+    /// and the write is 45 small rows either way.
+    Inventory {
+        account: String,
+        items: Vec<StoredItem>,
+    },
+
+    /// One block, changed.
+    ///
+    /// Per block rather than per world, unlike a rucksack: a world holds thousands of edits and
+    /// a player digging a tunnel would rewrite all of them on every swing. A block that is dug
+    /// is stored as air rather than deleted, because "there is a hole here" is a fact about the
+    /// world and the terrain underneath would otherwise grow back.
+    Block(StoredBlock),
+}
+
+/// One voxel the players have changed, as it is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredBlock {
+    pub chunk: [u32; 3],
+    pub voxel: [u32; 3],
+    /// The `geodata.json` voxel index standing there now. 255 is air, which is what a dig
+    /// leaves behind.
+    pub material: u8,
 }
 
 /// A view of what the game server is doing right now.
@@ -310,6 +351,25 @@ pub struct Photo {
     pub captured_at: u64,
 }
 
+/// One square of a player's rucksack, as it is stored between sessions.
+///
+/// # Why the item is a hash and not an entity
+///
+/// A stack is an entity while the server runs, and that entity's id is minted per session: it
+/// means nothing tomorrow. What survives is what the square *holds*, so a restore creates a
+/// fresh stack with a fresh id and points the square at it, exactly as `/give` does.
+///
+/// The item is `name_hash` of a `geodata.json` resource, the same number the wire carries
+/// everywhere else. Storing the name instead would be friendlier to read in `sqlite3` and would
+/// mean two spellings of the same thing, so the hash wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredItem {
+    /// Which square, in the 45-slot layout. Equipment and hotbar squares are stored too.
+    pub slot: u32,
+    pub item: u32,
+    pub count: u32,
+}
+
 /// All mutable server state, shared between the auth, web and game servers.
 ///
 /// Interior mutability rather than `&mut self` so it can sit in an `Arc` and be handed to
@@ -355,7 +415,12 @@ impl AppState {
     ///
     /// Deliberately silent: this is a load, not a change, and echoing it back to the sink
     /// would rewrite the whole database on every start.
-    pub fn import(&self, accounts: Vec<AccountRecord>, photos: Vec<(String, Photo)>) {
+    pub fn import(
+        &self,
+        accounts: Vec<AccountRecord>,
+        photos: Vec<(String, Photo)>,
+        inventories: Vec<(String, Vec<StoredItem>)>,
+    ) {
         let mut inner = self.write();
 
         for record in accounts {
@@ -369,6 +434,70 @@ impl AppState {
         }
 
         inner.photos.extend(photos);
+        inner.inventories.extend(inventories);
+    }
+
+    /// Load the world's changed blocks at startup. Silent, as the rest of `import` is.
+    pub fn import_blocks(&self, blocks: Vec<StoredBlock>) {
+        let mut inner = self.write();
+
+        for block in blocks {
+            inner.blocks.insert((block.chunk, block.voxel), block);
+        }
+    }
+
+    /// Every block the players have changed, for rebuilding a world at startup.
+    pub fn blocks(&self) -> Vec<StoredBlock> {
+        let mut blocks: Vec<StoredBlock> = self.read().blocks.values().copied().collect();
+
+        blocks.sort_by_key(|block| (block.chunk, block.voxel));
+
+        blocks
+    }
+
+    /// Record a block a player changed.
+    pub fn set_block(&self, block: StoredBlock) {
+        {
+            let mut inner = self.write();
+
+            if inner.blocks.get(&(block.chunk, block.voxel)) == Some(&block) {
+                return;
+            }
+
+            inner.blocks.insert((block.chunk, block.voxel), block);
+        }
+
+        self.record(Change::Block(block));
+    }
+
+    /// What `account` is carrying, as last recorded. Empty for an account that has never played.
+    pub fn inventory(&self, account: &str) -> Vec<StoredItem> {
+        self.read()
+            .inventories
+            .get(&account.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record what an account is carrying now.
+    ///
+    /// Called from the game thread whenever the rucksack changes, which is often, so it returns
+    /// early when nothing actually differs: the sink writes to a database and a stack of dirt
+    /// picked up and put down again is not worth a round trip.
+    pub fn set_inventory(&self, account: &str, items: Vec<StoredItem>) {
+        let key = account.trim().to_ascii_lowercase();
+
+        {
+            let mut inner = self.write();
+
+            if inner.inventories.get(&key).is_some_and(|held| *held == items) {
+                return;
+            }
+
+            inner.inventories.insert(key.clone(), items.clone());
+        }
+
+        self.record(Change::Inventory { account: key, items });
     }
 
     fn record(&self, change: Change) {

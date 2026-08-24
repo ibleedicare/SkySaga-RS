@@ -73,5 +73,9 @@ async fn apply(store: &dyn Store, change: &Change) -> Result<(), crate::StoreErr
         Change::DeleteCharacter { account } => store.delete_character(account).await,
 
         Change::Photo { id, photo } => store.save_photo(id, photo).await,
+
+        Change::Inventory { account, items } => store.save_inventory(account, items).await,
+
+        Change::Block(block) => store.save_block(block).await,
     }
 }
