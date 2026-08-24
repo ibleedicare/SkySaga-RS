@@ -715,6 +715,16 @@ pub struct Session {
     /// the inventory square empties and the drop square fills.
     drop_slots: [u32; DROP_SLOTS],
 
+    /// Whether this session has been handed back what its account was carrying.
+    ///
+    /// A restore is refused once the rucksack holds anything, but this is what stops the
+    /// server *asking* every tick, and what keeps the first tick from recording an empty
+    /// rucksack over a stored one.
+    items_restored: bool,
+
+    /// The rucksack as last written down, so an unchanged tick costs nothing.
+    recorded_items: Option<Vec<skysaga_state::StoredItem>>,
+
     /// Resources this player has been seen holding, so a discovery is announced once.
     ///
     /// The client keeps a set of its own -- `FUN_00878100` -- so a repeat costs only a packet;
@@ -791,6 +801,8 @@ impl Session {
             crafting: BTreeMap::new(),
             drop_slots: [0; DROP_SLOTS],
             seen_resources: BTreeSet::new(),
+            items_restored: false,
+            recorded_items: None,
             clock_ms: None,
             todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
@@ -853,6 +865,109 @@ impl Session {
 
         self.inventories
             .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
+    }
+
+    /// Whether this session has already been handed back what it was carrying.
+    pub fn items_restored(&self) -> bool {
+        self.items_restored
+    }
+
+    /// Say that it has, so a later tick does not do it again.
+    pub fn mark_items_restored(&mut self) {
+        self.items_restored = true;
+    }
+
+    /// What to write down, or `None` when nothing has changed since the last time.
+    ///
+    /// The comparison lives here so the game loop can ask every tick: a tick where nobody moved
+    /// an item costs one walk of the rucksack and no lock, where calling into `AppState` would
+    /// take a write lock to discover the same thing.
+    pub fn items_to_record(&mut self) -> Option<Vec<skysaga_state::StoredItem>> {
+        // Nothing is worth recording until the restore has happened. Otherwise the first tick
+        // of a session writes down an empty rucksack and erases what the player had.
+        if !self.items_restored {
+            return None;
+        }
+
+        let items = self.carried_items();
+
+        if self.recorded_items.as_ref() == Some(&items) {
+            return None;
+        }
+
+        self.recorded_items = Some(items.clone());
+
+        Some(items)
+    }
+
+    /// What this player is carrying, square by square, for writing down.
+    ///
+    /// Only the occupied squares: an empty rucksack is no rows rather than 45 empty ones. The
+    /// item is its name hash, because a stack's *entity* is minted per session and means
+    /// nothing tomorrow. See [`skysaga_state::StoredItem`].
+    pub fn carried_items(&self) -> Vec<skysaga_state::StoredItem> {
+        self.inventory()
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| **entity != 0)
+            .filter_map(|(slot, entity)| {
+                let stack = self.inventories.item(*entity)?;
+
+                Some(skysaga_state::StoredItem {
+                    slot: slot as u32,
+                    item: stack.slot_data.name?,
+                    count: stack.slot_data.count,
+                })
+            })
+            .collect()
+    }
+
+    /// Put a stored rucksack back, and say what the client must be told.
+    ///
+    /// **Each stack is announced before the slot list that names it.** The handshake burst
+    /// carries no item entities at all, so a restore has to create them the way `/give` does:
+    /// an `EntityAdd` per stack, then one sync of `inventoryentitylist`. A list naming an
+    /// entity the client has not been told about draws an empty square.
+    ///
+    /// Does nothing when the player is already carrying something. The join path cannot be sure
+    /// it runs exactly once, and a second restore would double a player's belongings.
+    pub fn restore_items(
+        &mut self,
+        items: &[skysaga_state::StoredItem],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        if items.is_empty() || !self.carried_items().is_empty() {
+            return Vec::new();
+        }
+
+        let mut effects = Vec::new();
+
+        for item in items {
+            let Some(entity) = self
+                .inventories
+                .give(self.player_entity_id, item.slot, item.item, item.count)
+            else {
+                warn!(slot = item.slot, "no such square to restore into");
+
+                continue;
+            };
+
+            self.inventories.reserve_ids_from(self.inventories.next_entity_id());
+
+            effects.push(Effect::ItemCreated { entity });
+        }
+
+        if effects.is_empty() {
+            return Vec::new();
+        }
+
+        effects.push(Effect::SlotsChanged {
+            owner: self.player_entity_id,
+        });
+
+        info!(squares = items.len(), "restored what the player was carrying");
+
+        self.apply(effects, world)
     }
 
     /// Create a stack of `item` in one particular square, for tests and for seeding.

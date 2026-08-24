@@ -162,8 +162,63 @@ impl GameServer {
             }
         }
 
+        self.restore_inventories();
+        self.record_inventories();
+
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
+    }
+
+    /// Give a player back what they were carrying when they last played.
+    ///
+    /// Once the session is in the world, not during the handshake: the entity burst carries no
+    /// item entities, so the stacks have to be created and announced afterwards. See
+    /// [`Session::restore_items`].
+    fn restore_inventories(&mut self) {
+        let restores: Vec<(Guid, Vec<skysaga_state::StoredItem>)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.stage() == crate::Stage::Playing)
+            .filter(|(_, session)| !session.items_restored())
+            .filter_map(|(guid, session)| {
+                let account = session.account()?;
+
+                Some((*guid, self.state.inventory(account)))
+            })
+            .collect();
+
+        for (guid, items) in restores {
+            let Some(session) = self.sessions.get_mut(&guid) else {
+                continue;
+            };
+
+            for packet in session.restore_items(&items, &self.world) {
+                self.peer.send(guid, &packet);
+            }
+
+            session.mark_items_restored();
+        }
+    }
+
+    /// Write down what each player is carrying, when it changes.
+    ///
+    /// The comparison is the session's own, so a tick where nothing moved costs one walk of 45
+    /// squares and takes no lock at all. Only a real change reaches `AppState`, and from there
+    /// the background writer.
+    fn record_inventories(&mut self) {
+        let changed: Vec<(String, Vec<skysaga_state::StoredItem>)> = self
+            .sessions
+            .values_mut()
+            .filter_map(|session| {
+                let items = session.items_to_record()?;
+
+                Some((session.account()?.to_owned(), items))
+            })
+            .collect();
+
+        for (account, items) in changed {
+            self.state.set_inventory(&account, items);
+        }
     }
 
     fn drain(&mut self) {
