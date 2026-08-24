@@ -22,7 +22,7 @@
 use async_trait::async_trait;
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::customisation::CustomisationData;
-use skysaga_state::{AccountRecord, Character, Photo, StoredItem};
+use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredItem};
 use uuid::Uuid;
 
 mod persistence;
@@ -55,6 +55,8 @@ pub struct Snapshot {
     pub photos: Vec<(String, Photo)>,
     /// What each account was carrying when it last played, by lowercased account name.
     pub inventories: Vec<(String, Vec<StoredItem>)>,
+    /// Every block the players have changed.
+    pub blocks: Vec<StoredBlock>,
 }
 
 /// Durable storage for the things a player would be upset to lose.
@@ -85,6 +87,9 @@ pub trait Store: Send + Sync + 'static {
 
     /// Record what an account is carrying, replacing whatever was stored for it.
     async fn save_inventory(&self, account: &str, items: &[StoredItem]) -> Result<(), StoreError>;
+
+    /// Record one block a player changed, replacing whatever stood there.
+    async fn save_block(&self, block: &StoredBlock) -> Result<(), StoreError>;
 }
 
 /// Encode an appearance for storage.

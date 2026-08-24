@@ -140,6 +140,9 @@ pub fn world_from_capture() -> World {
 
         // A capture carries packets, not data tables.
         geodata: skysaga_world::geodata::GeoData::default(),
+
+        // Nothing has been dug in a capture: it is a recording of a world being handed over.
+        changes: Default::default(),
     }
 }
 

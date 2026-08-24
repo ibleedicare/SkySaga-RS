@@ -132,6 +132,12 @@ struct Inner {
     /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
     photos: HashMap<String, Photo>,
 
+    /// Every block the players have changed, by its place in the world.
+    ///
+    /// The world itself lives on the game thread; this is the copy that outlives it, kept here
+    /// so that a restart, which builds a fresh world, has something to put back.
+    blocks: HashMap<([u32; 3], [u32; 3]), StoredBlock>,
+
     /// What each account is carrying, by lowercased account name.
     ///
     /// Written by the game thread as it changes and read back when that account next joins.
@@ -181,6 +187,24 @@ pub enum Change {
         account: String,
         items: Vec<StoredItem>,
     },
+
+    /// One block, changed.
+    ///
+    /// Per block rather than per world, unlike a rucksack: a world holds thousands of edits and
+    /// a player digging a tunnel would rewrite all of them on every swing. A block that is dug
+    /// is stored as air rather than deleted, because "there is a hole here" is a fact about the
+    /// world and the terrain underneath would otherwise grow back.
+    Block(StoredBlock),
+}
+
+/// One voxel the players have changed, as it is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredBlock {
+    pub chunk: [u32; 3],
+    pub voxel: [u32; 3],
+    /// The `geodata.json` voxel index standing there now. 255 is air, which is what a dig
+    /// leaves behind.
+    pub material: u8,
 }
 
 /// A view of what the game server is doing right now.
@@ -411,6 +435,39 @@ impl AppState {
 
         inner.photos.extend(photos);
         inner.inventories.extend(inventories);
+    }
+
+    /// Load the world's changed blocks at startup. Silent, as the rest of `import` is.
+    pub fn import_blocks(&self, blocks: Vec<StoredBlock>) {
+        let mut inner = self.write();
+
+        for block in blocks {
+            inner.blocks.insert((block.chunk, block.voxel), block);
+        }
+    }
+
+    /// Every block the players have changed, for rebuilding a world at startup.
+    pub fn blocks(&self) -> Vec<StoredBlock> {
+        let mut blocks: Vec<StoredBlock> = self.read().blocks.values().copied().collect();
+
+        blocks.sort_by_key(|block| (block.chunk, block.voxel));
+
+        blocks
+    }
+
+    /// Record a block a player changed.
+    pub fn set_block(&self, block: StoredBlock) {
+        {
+            let mut inner = self.write();
+
+            if inner.blocks.get(&(block.chunk, block.voxel)) == Some(&block) {
+                return;
+            }
+
+            inner.blocks.insert((block.chunk, block.voxel), block);
+        }
+
+        self.record(Change::Block(block));
     }
 
     /// What `account` is carrying, as last recorded. Empty for an account that has never played.

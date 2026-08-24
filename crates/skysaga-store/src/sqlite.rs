@@ -8,7 +8,7 @@
 //! docs for why that is preferred to sqlx's `Any`.
 
 use async_trait::async_trait;
-use skysaga_state::{AccountRecord, Character, Photo, StoredItem};
+use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredItem};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS photos (
     id          TEXT PRIMARY KEY NOT NULL,
     bytes       BLOB NOT NULL,
     captured_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    chunk_x  INTEGER NOT NULL,
+    chunk_y  INTEGER NOT NULL,
+    chunk_z  INTEGER NOT NULL,
+    voxel_x  INTEGER NOT NULL,
+    voxel_y  INTEGER NOT NULL,
+    voxel_z  INTEGER NOT NULL,
+    material INTEGER NOT NULL,
+    PRIMARY KEY (chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z)
 );
 
 CREATE TABLE IF NOT EXISTS inventories (
@@ -134,6 +145,31 @@ impl Store for SqliteStore {
             });
         }
 
+        let blocks = sqlx::query(
+            "SELECT chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z, material
+             FROM blocks
+             ORDER BY chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            Ok(StoredBlock {
+                chunk: [
+                    row.try_get::<i64, _>("chunk_x")? as u32,
+                    row.try_get::<i64, _>("chunk_y")? as u32,
+                    row.try_get::<i64, _>("chunk_z")? as u32,
+                ],
+                voxel: [
+                    row.try_get::<i64, _>("voxel_x")? as u32,
+                    row.try_get::<i64, _>("voxel_y")? as u32,
+                    row.try_get::<i64, _>("voxel_z")? as u32,
+                ],
+                material: row.try_get::<i64, _>("material")? as u8,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+
         let mut inventories: Vec<(String, Vec<StoredItem>)> = Vec::new();
 
         for row in sqlx::query(
@@ -177,6 +213,7 @@ impl Store for SqliteStore {
             accounts,
             photos,
             inventories,
+            blocks,
         })
     }
 
@@ -257,6 +294,31 @@ impl Store for SqliteStore {
         }
 
         transaction.commit().await?;
+
+        Ok(())
+    }
+
+    /// Record one changed block, replacing whatever stood there.
+    ///
+    /// A single row per swing: a player digging a tunnel writes one row per block rather than
+    /// rewriting the whole world, which is why this change is per block and the rucksack's is
+    /// not.
+    async fn save_block(&self, block: &StoredBlock) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO blocks (chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z, material)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z)
+             DO UPDATE SET material = excluded.material",
+        )
+        .bind(block.chunk[0] as i64)
+        .bind(block.chunk[1] as i64)
+        .bind(block.chunk[2] as i64)
+        .bind(block.voxel[0] as i64)
+        .bind(block.voxel[1] as i64)
+        .bind(block.voxel[2] as i64)
+        .bind(block.material as i64)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

@@ -164,6 +164,7 @@ impl GameServer {
 
         self.restore_inventories();
         self.record_inventories();
+        self.record_blocks();
 
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
@@ -197,6 +198,21 @@ impl GameServer {
             }
 
             session.mark_items_restored();
+        }
+    }
+
+    /// Write down the blocks players have changed since the last tick.
+    ///
+    /// The world queues them rather than reaching the store itself: it is a value on this
+    /// thread and persistence lives at the edge, so the queue is drained here exactly as a
+    /// session's notifications are.
+    fn record_blocks(&mut self) {
+        for edit in self.world.take_unsaved_edits() {
+            self.state.set_block(skysaga_state::StoredBlock {
+                chunk: edit.chunk,
+                voxel: edit.voxel,
+                material: edit.material,
+            });
         }
     }
 

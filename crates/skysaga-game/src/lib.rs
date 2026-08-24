@@ -29,7 +29,7 @@ pub mod server;
 pub mod world;
 
 pub use server::{GameServer, GameServerConfig};
-pub use world::{World, WorldConfig};
+pub use world::{VoxelEdit, World, WorldConfig};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -627,12 +627,6 @@ pub struct Session {
     /// and closes it when that goes back to 0.
     using_entity: u32,
 
-    /// Voxels this player has changed: (chunk, voxel) to the new material.
-    ///
-    /// Held per connection, as containers are, so a block one player places is not in another
-    /// player's world. The same limitation, and it moves at the same time.
-    voxel_edits: std::collections::HashMap<([u32; 3], [u32; 3]), u8>,
-
     /// Containers spawned while this session runs, beside the ones the world seeded.
     ///
     /// Per session, as the seeded containers effectively are: a chest one player spawns is
@@ -790,7 +784,6 @@ impl Session {
             using_entity: 0,
             raise_lid_on_close: true,
             closed_lids: BTreeSet::new(),
-            voxel_edits: std::collections::HashMap::new(),
             dig_damage: std::collections::HashMap::new(),
             spawned: Vec::new(),
             creatures: Vec::new(),
@@ -1920,7 +1913,7 @@ impl Session {
         // the one that was hit.
         let voxel = packet.placement_voxel();
 
-        self.voxel_edits.insert((packet.chunk, voxel), material);
+        world.set_block(packet.chunk, voxel, material);
 
         debug!(?packet.chunk, ?voxel, material, "place");
 
@@ -2817,15 +2810,13 @@ impl Session {
         )
     }
 
-    /// What block stands at a voxel now: what the player has done to it, or the world as built.
+    /// What block stands at a voxel now: what players have done to it, or the world as built.
     ///
-    /// The session's own edits come first, so a block placed and then dug drops the thing that
-    /// was placed rather than the terrain that used to be underneath it.
+    /// The edits belong to the **world**, so a block one player places is a block every player
+    /// digs. They come first, so a block placed and then dug drops the thing that was placed
+    /// rather than the terrain that used to be underneath it.
     fn material_at(&self, chunk: [u32; 3], voxel: [u32; 3], world: &World) -> u8 {
-        self.voxel_edits
-            .get(&(chunk, voxel))
-            .copied()
-            .unwrap_or_else(|| world.material_at(chunk, voxel))
+        world.block_at(chunk, voxel)
     }
 
     /// One dig tick on a voxel. The block gives way once enough of them land, and leaves
@@ -2868,8 +2859,7 @@ impl Session {
 
         self.dig_damage.remove(&(chunk, voxel));
 
-        self.voxel_edits
-            .insert((chunk, voxel), PartialChunkEditsSync::AIR);
+        world.set_block(chunk, voxel, PartialChunkEditsSync::AIR);
 
         // The hole first, then what fell out of it. The other order puts the item inside a
         // block the client still believes is solid.
@@ -2930,11 +2920,6 @@ impl Session {
             }
             .encode(w)
         })
-    }
-
-    /// Every voxel this session has changed, for anything that has to rebuild the terrain.
-    pub fn voxel_edits(&self) -> &std::collections::HashMap<([u32; 3], [u32; 3]), u8> {
-        &self.voxel_edits
     }
 
     /// The entity this player has a container open on, or 0.

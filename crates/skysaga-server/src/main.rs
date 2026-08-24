@@ -85,12 +85,14 @@ async fn main() -> anyhow::Result<()> {
             characters = snapshot.accounts.iter().filter(|a| a.character.is_some()).count(),
             photos = snapshot.photos.len(),
             inventories = snapshot.inventories.len(),
+            blocks = snapshot.blocks.len(),
             "loaded stored state",
         );
 
         let state = AppState::new(policy).with_sink(Arc::new(Persistence::start(store)));
 
         state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
+        state.import_blocks(snapshot.blocks);
 
         state
     };
@@ -153,9 +155,24 @@ async fn main() -> anyhow::Result<()> {
 
     let world = World::home_island(&definitions, &WorldConfig::from_env());
 
+    // Put back what players have dug and built. The island is generated from a seed, so the
+    // terrain is the same every start; these are the changes on top of it.
+    let stored_blocks: Vec<skysaga_game::VoxelEdit> = state
+        .blocks()
+        .into_iter()
+        .map(|block| skysaga_game::VoxelEdit {
+            chunk: block.chunk,
+            voxel: block.voxel,
+            material: block.material,
+        })
+        .collect();
+
+    world.restore_block_edits(&stored_blocks);
+
     info!(
         chunks = world.chunks.len(),
         entities = world.entities.len(),
+        blocks = stored_blocks.len(),
         "built the home island",
     );
 

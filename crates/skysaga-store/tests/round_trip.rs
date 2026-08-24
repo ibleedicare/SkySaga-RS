@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
-use skysaga_state::{AppState, CredentialPolicy, StoredItem};
+use skysaga_state::{AppState, CredentialPolicy, StoredBlock, StoredItem};
 use skysaga_store::{Persistence, SqliteStore, Store};
 
 fn appearance() -> CustomisationData {
@@ -252,4 +252,57 @@ async fn emptying_a_square_is_stored_as_empty() {
         snapshot.inventories,
         vec![("alice".to_owned(), vec![StoredItem { slot: 9, item: 7, count: 3 }])],
     );
+}
+
+
+/// The headline: a hole stays dug and a wall stays built.
+#[tokio::test]
+async fn the_world_players_changed_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let dug = StoredBlock { chunk: [1, 0, 1], voxel: [4, 17, 4], material: 255 };
+    let built = StoredBlock { chunk: [1, 0, 1], voxel: [4, 21, 4], material: 0 };
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.set_block(dug);
+        state.set_block(built);
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(snapshot.blocks, vec![dug, built], "both changes came back");
+}
+
+/// A block changed twice is stored once, at its latest value.
+///
+/// Blocks are recorded per swing rather than as a whole world, so the write has to be an upsert
+/// or a player levelling the same square twice would collide on the primary key.
+#[tokio::test]
+async fn changing_a_block_twice_stores_the_latest() {
+    let (_guard, url) = database_url();
+
+    let place = StoredBlock { chunk: [0, 0, 0], voxel: [1, 2, 3], material: 7 };
+    let dig = StoredBlock { material: 255, ..place };
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.set_block(place);
+        state.set_block(dig);
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+
+    assert_eq!(store.load().await.expect("loads").blocks, vec![dig]);
 }
