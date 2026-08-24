@@ -29,7 +29,7 @@ pub mod server;
 pub mod world;
 
 pub use server::{GameServer, GameServerConfig};
-pub use world::{VoxelEdit, World, WorldConfig};
+pub use world::{Device, PlacedDevice, VoxelEdit, World, WorldConfig};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1141,6 +1141,15 @@ impl Session {
                     .chain(others.iter().map(|entity| encode(|w| entity.encode(w))))
                     .collect();
 
+                // Anything players have put down since the island was built. Part of the world
+                // rather than of the burst's frozen entity list, so a joiner is told about it
+                // here or never told at all.
+                for device in world.devices() {
+                    if let Some((built, definition)) = self.entity_now(device.id, world) {
+                        out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+                    }
+                }
+
                 out.push(encode(|w| ClientEntitiesSyncFinished.encode(w)));
 
                 out
@@ -1987,15 +1996,12 @@ impl Session {
             world::device_components(position, links, definition.max_crafting_slots()),
         );
 
-        self.spawned.push(world::Container {
+        // **On the world, not on this session.** An anvil one player puts down is an anvil
+        // everybody can use, and it has to still be there tomorrow. See [`world::Device`].
+        world.place_device(world::Device {
             id,
             name: name.to_owned(),
             entity: built,
-            definition,
-            // Not a container: a station's window is its crafting queue, and a device with an
-            // inventory would draw an empty rucksack over the top of it.
-            slots: 0,
-            is_loot_chest: false,
         });
 
         info!(entity = id, %name, ?voxel, ?position, "placed a device");
@@ -2006,7 +2012,14 @@ impl Session {
         let mut out = Vec::new();
 
         if let Some((built, definition)) = self.entity_now(id, world) {
-            out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+            let announcement = encode(|w| built.to_entity_add(definition).encode(w));
+
+            // Everyone already in the world is told as well. Without this the anvil appears
+            // for the other players only when they next log in, since the burst is the only
+            // other thing that mentions it.
+            self.broadcasts.push(announcement.clone());
+
+            out.push(announcement);
         }
 
         out.extend(self.apply(taken, world));
@@ -2591,10 +2604,18 @@ impl Session {
             return Some(HAND_CRAFTING.to_owned());
         }
 
-        let container = self.container(entity, world)?;
-
         // A placed device is named by the resource that placed it, and a recipe's station is
         // that same name -- `Anvil` the item, `Anvil` the entity, `Anvil` the input.
+        if let Some(device) = world.device(entity) {
+            return world
+                .definitions
+                .get(&device.name)
+                .and_then(|definition| definition.max_crafting_slots())
+                .map(|_| device.name);
+        }
+
+        let container = self.container(entity, world)?;
+
         container
             .definition
             .max_crafting_slots()
@@ -2618,6 +2639,10 @@ impl Session {
 
     /// Where a placed device stands, in the client's position units.
     pub fn device_position(&self, entity: u32, world: &World) -> Option<[u32; 3]> {
+        if let Some(position) = world.device_position(entity) {
+            return Some(position);
+        }
+
         let container = self.container(entity, world)?;
 
         container.entity.components.iter().find_map(|component| {
@@ -3047,10 +3072,33 @@ impl Session {
             return Some((built, &creature.definition));
         }
 
+        // A device a player placed. It lives on the world rather than on any session, so its
+        // definition is looked up by name instead of being carried alongside: the definition
+        // table outlives the lock the device comes out of.
+        if let Some(device) = world.device(entity) {
+            let definition = world.definitions.get(&device.name)?;
+
+            let mut built = device.entity.clone();
+
+            self.fill_container_components(entity, &mut built);
+
+            return Some((built, definition));
+        }
+
         let container = self.container(entity, world)?;
 
         let mut built = container.entity.clone();
 
+        self.fill_container_components(entity, &mut built);
+
+        Some((built, &container.definition))
+    }
+
+    /// Fill in the parts of a chest or a station that change while the server runs.
+    ///
+    /// The entity was built once, when the world seeded it or a player placed it; what is in
+    /// it, whether its lid has been lifted and what it is making are all this session's.
+    fn fill_container_components(&self, entity: u32, built: &mut Entity) {
         for component in &mut built.components {
             match component {
                 Component::Inventory(inventory) => {
@@ -3070,8 +3118,6 @@ impl Session {
                 _ => {}
             }
         }
-
-        Some((built, &container.definition))
     }
 
     // --- combat --------------------------------------------------------------------------

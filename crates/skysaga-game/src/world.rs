@@ -129,6 +129,42 @@ pub struct WorldChanges {
     /// it keeps a queue and the game loop drains it, the same shape as a session's
     /// notifications.
     unsaved: Vec<VoxelEdit>,
+
+    /// Anvils, chests and barrels players have put down, oldest first.
+    devices: Vec<Device>,
+
+    /// Placements nobody has written down yet. Drained like `unsaved`.
+    unsaved_devices: Vec<PlacedDevice>,
+}
+
+/// Something a player put in the world: a station, a decoration, a mailbox.
+///
+/// On the world rather than the session that placed it, for the same two reasons as a block:
+/// another player must be able to see it, and it must still be there tomorrow.
+///
+/// The **definition is not held here.** It is looked up from [`World::definitions`] by name,
+/// which lives as long as the world does, so a device can be handed out with a borrowed
+/// definition even though the device itself comes out of a lock.
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub id: u32,
+    pub name: String,
+
+    /// The entity as built, so it can be re-encoded with its queue filled in.
+    pub entity: Entity,
+}
+
+/// A device as it is written down: what it is, and where it stands.
+///
+/// Everything else is derived. The components come from `Entities.json` and the entity id is
+/// minted per run, so storing either would be storing a fact about this process rather than
+/// about the world.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedDevice {
+    pub name: String,
+
+    /// In the client's position units, 1/64 of a voxel.
+    pub position: [u32; 3],
 }
 
 /// One block, changed.
@@ -772,6 +808,14 @@ pub fn container_components(
 /// gets three and something that is not a station gets no crafting component at all. A
 /// parameter an entity does not declare is never sent, so the component costs nothing where it
 /// is not wanted -- but leaving it off entirely means a station whose queue can never be shown.
+/// Where an entity stands, out of its own transform.
+fn position_of(entity: &Entity) -> Option<[u32; 3]> {
+    entity.components.iter().find_map(|component| match component {
+        Component::Transform(transform) => Some(transform.position),
+        _ => None,
+    })
+}
+
 pub fn device_components(
     position: [u32; 3],
     links: Vec<VoxelLink>,
@@ -1108,6 +1152,115 @@ impl World {
     /// Drained by the game loop each tick, exactly as a session's notifications are.
     pub fn take_unsaved_edits(&self) -> Vec<VoxelEdit> {
         std::mem::take(&mut self.changes.lock().expect("world lock").unsaved)
+    }
+
+    // --- devices ---------------------------------------------------------------------------
+
+    /// Put a device in the world, for everybody, and queue it to be written down.
+    ///
+    /// The entity is built by the session that placed it, because building one needs the
+    /// geodata the placement already resolved. What the world adds is that it belongs to
+    /// everyone from here on.
+    pub fn place_device(&self, device: Device) {
+        let mut changes = self.changes.lock().expect("world lock");
+
+        if let Some(position) = position_of(&device.entity) {
+            changes.unsaved_devices.push(PlacedDevice {
+                name: device.name.clone(),
+                position,
+            });
+        }
+
+        changes.devices.push(device);
+    }
+
+    /// Every device standing in the world.
+    pub fn devices(&self) -> Vec<Device> {
+        self.changes.lock().expect("world lock").devices.clone()
+    }
+
+    /// One device, by entity id.
+    pub fn device(&self, id: u32) -> Option<Device> {
+        self.changes
+            .lock()
+            .expect("world lock")
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            .cloned()
+    }
+
+    /// Where a device stands, in the client's position units.
+    pub fn device_position(&self, id: u32) -> Option<[u32; 3]> {
+        self.device(id).and_then(|device| position_of(&device.entity))
+    }
+
+    /// Take the placements nobody has written down yet.
+    pub fn take_unsaved_devices(&self) -> Vec<PlacedDevice> {
+        std::mem::take(&mut self.changes.lock().expect("world lock").unsaved_devices)
+    }
+
+    /// Put back devices loaded from storage.
+    ///
+    /// Silent, as [`Self::restore_block_edits`] is: a restore is a load rather than a change,
+    /// and echoing it back would rewrite every row at every start.
+    ///
+    /// A name the data file no longer defines is skipped. The database outlives the code that
+    /// reads it, and one unknown row must not stop a server from starting.
+    pub fn restore_devices(&self, stored: &[PlacedDevice], definitions: &EntityDefinitions) {
+        let mut next = self.next_entity_id();
+
+        let mut changes = self.changes.lock().expect("world lock");
+
+        for placed in stored {
+            let Some(definition) = definitions.get(&placed.name) else {
+                warn!(name = %placed.name, "a stored device names no entity; skipped");
+
+                continue;
+            };
+
+            let links = definition
+                .default_voxel_links()
+                .into_iter()
+                .map(|(offset, voxel_index)| VoxelLink {
+                    x: offset[0],
+                    y: offset[1],
+                    z: offset[2],
+                    voxel_index,
+                })
+                .collect();
+
+            changes.devices.push(Device {
+                id: next,
+                name: definition.name().to_owned(),
+                entity: Entity::new(
+                    next,
+                    device_components(placed.position, links, definition.max_crafting_slots()),
+                ),
+            });
+
+            next += 1;
+        }
+    }
+
+    /// The first entity id nothing is using.
+    ///
+    /// Past the props the island was built with **and** past the devices restored on top of
+    /// them, so the game server's allocator cannot hand out an id a restored anvil holds.
+    pub fn next_entity_id(&self) -> u32 {
+        let props = self.entities.iter().map(|entity| entity.id).max().unwrap_or(0);
+
+        let devices = self
+            .changes
+            .lock()
+            .expect("world lock")
+            .devices
+            .iter()
+            .map(|device| device.id)
+            .max()
+            .unwrap_or(0);
+
+        props.max(devices) + 1
     }
 
     /// What the terrain generator produced, before anybody touched it.
