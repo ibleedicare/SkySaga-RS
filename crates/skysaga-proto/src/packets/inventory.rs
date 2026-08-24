@@ -241,6 +241,58 @@ impl RequestEquipInventoryItem {
     }
 }
 
+/// Taking something off.
+///
+/// ```text
+/// 94            id (ID_USER_PACKET_ENUM + 14)
+///               equip slot   4    which slot is being emptied
+///               trailing     4    `1000` in both captures; meaning unknown
+/// ```
+///
+/// **Two bytes in total**, which is what settles the layout: there is no room for an entity id,
+/// so the slot is the whole message and the server looks up what is in it. Captured from a live
+/// client on 2026-08-24 by logging the payload of unhandled packets: taking a tool out of one
+/// hand gave `94 08` and out of the other `94 18`, so the first four bits are the equip slot --
+/// 0 and 1 being the hands, the same numbering [`RequestEquipInventoryItem`] uses -- and the
+/// last four are a constant nobody has explained.
+///
+/// Only two of the sixteen slot values have been seen, both hands. Armour is expected to report
+/// 2 to 5, by symmetry with equipping, and nothing here depends on that being true: the slot is
+/// passed through to the inventory model, which refuses an empty one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestUnEquipInventoryItem {
+    /// Which equipment slot to empty. 0 and 1 are the hands.
+    pub equip_slot: u32,
+
+    /// The four bits after the slot, kept so the packet round-trips.
+    ///
+    /// `1000` in both captures. Preserved rather than dropped, so a capture that ever differs
+    /// shows up as a changed value instead of vanishing.
+    pub trailing: u32,
+}
+
+impl RequestUnEquipInventoryItem {
+    pub const ID: u16 = 14;
+
+    const SLOT_BITS: u32 = 4;
+    const TRAILING_BITS: u32 = 4;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+
+        writer.write_bits_le(self.equip_slot, Self::SLOT_BITS);
+        writer.write_bits_le(self.trailing, Self::TRAILING_BITS);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            equip_slot: reader.read_bits_le(Self::SLOT_BITS)?,
+            // Tolerated as absent: only two captures prove these bits are always sent.
+            trailing: reader.read_bits_le(Self::TRAILING_BITS).unwrap_or(0),
+        })
+    }
+}
+
 /// Binding an item to a hotbar square.
 ///
 /// The hotbar is **not storage**: `hotbarslotresources` holds item name *hashes*, so a bound

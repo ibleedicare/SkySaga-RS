@@ -60,6 +60,7 @@ use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVox
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
+    RequestUnEquipInventoryItem,
 };
 use skysaga_proto::packets::{
     BeginSync, EntityAdd, EntityRemoved, EntitySync, CharacterCreationResponse,
@@ -302,6 +303,7 @@ pub enum ClientPacket {
 
     /// 147 — equip something from the rucksack.
     RequestEquipInventoryItem(RequestEquipInventoryItem),
+    RequestUnEquipInventoryItem(RequestUnEquipInventoryItem),
 
     /// 149 — bind an item to a hotbar square.
     RequestUiSettingsSlotChange(RequestUiSettingsSlotChange),
@@ -491,6 +493,10 @@ impl ClientPacket {
 
             InventoryItemDestroy::ID => InventoryItemDestroy::decode(&mut reader)
                 .map(Self::InventoryItemDestroy)
+                .unwrap_or(Self::unknown(wire_id, bytes)),
+
+            RequestUnEquipInventoryItem::ID => RequestUnEquipInventoryItem::decode(&mut reader)
+                .map(Self::RequestUnEquipInventoryItem)
                 .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RequestEquipInventoryItem::ID => RequestEquipInventoryItem::decode(&mut reader)
@@ -1477,6 +1483,32 @@ impl Session {
                         self.hotbar.insert(self.active_slot, item);
                     }
                 }
+
+                self.apply(effects, world)
+            }
+
+            (ClientPacket::RequestUnEquipInventoryItem(packet), _) => {
+                // **The hands hold what the hotbar names**, so emptying one is not a move: the
+                // model reports no effects and what has to change is the binding. Anything else
+                // goes back into the first free rucksack square.
+                if packet.equip_slot < 2 {
+                    debug!(slot = packet.equip_slot, "emptied a hand");
+
+                    self.hotbar.remove(&self.active_slot);
+
+                    return self
+                        .sync_of(self.player_entity_id, &["hotbarslotresources"], world)
+                        .into_iter()
+                        .collect();
+                }
+
+                let effects = self.inventories.unequip(self.player_entity_id, packet.equip_slot);
+
+                debug!(
+                    slot = packet.equip_slot,
+                    moved = !effects.is_empty(),
+                    "took something off",
+                );
 
                 self.apply(effects, world)
             }
