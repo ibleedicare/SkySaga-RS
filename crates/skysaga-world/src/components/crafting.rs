@@ -44,25 +44,45 @@ const MAX_SLOTS: u8 = 12;
 /// One queued or finished craft.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CraftingSlot {
-    /// Name hash of the **output resource**, or `None` for an empty slot.
+    /// Name hash of the **recipe** this slot is making, or `None` for an empty slot.
     ///
-    /// This is what the client draws the slot's icon from, so it is the item's hash and not
-    /// the recipe's. The two are different numbers -- see [`recipe`](Self::recipe).
+    /// # Not the output resource, despite what `crafting.md` says
+    ///
+    /// The document calls `+0x00` "the slot's output resource". That is the same claim it made
+    /// about `QueueRecipeOnEntity.itemID`, which a live client disproved, and it is wrong here
+    /// for the same reason: the crafting subsystem speaks recipe ids throughout, and this is
+    /// the id `recipelist` and the queue packet both carry.
+    ///
+    /// It matters because the client *looks this hash up* before it will let a slot be
+    /// collected. `FUN_008a7fa0`, which returns a craft's progress, opens with
+    /// `FUN_0085b730(slot[0])` and returns `0.0` if that lookup misses -- and `FUN_0085b730` is
+    /// a hash-map find that yields 0 for an absent key. A slot carrying an unresolvable hash
+    /// therefore sits at 0% for ever: the client never offers it, never sends
+    /// `CollectCraftedItemInSlot`, and the queue wedges at "no free slot" on the next craft.
+    /// That is precisely what an output-resource hash produced.
+    pub recipe: Option<u32>,
+
+    /// Name hash of the output resource. **Not written to the wire.**
+    ///
+    /// Kept because collecting needs to know what to hand over and how many, and the record
+    /// the client reads names only the recipe.
     pub output: Option<u32>,
 
-    /// Name hash of the recipe that filled this slot. **Not written to the wire.**
+    /// When the craft **started**, in milliseconds since the Unix epoch.
     ///
-    /// The record the client reads carries only the output resource, which is not enough to
-    /// collect a craft: the quantity produced belongs to the recipe, and several recipes can
-    /// name the same output. Keeping the recipe id here is what lets `CollectCraftedItemInSlot`
-    /// -- which addresses a slot by index and carries nothing else -- find its way back.
-    pub recipe: u32,
-
-    /// The craft timer, written as sixty-four raw bits.
+    /// # It is a start time, not a countdown
     ///
-    /// Whether the client reads it as a double of seconds or as an int64 of ticks could not be
-    /// settled from the binary. Zero is unambiguous either way, and is what a finished job
-    /// wants; a running one is the open question.
+    /// `FUN_008a7fa0` returns a craft's progress as
+    /// `(now - slot.timer) / duration`, clamped to 1, and `0.0` when `timer >= now`. So the
+    /// field is when the job began and the client does the arithmetic; the duration comes from
+    /// the recipe, modified by the chosen materials, and is never sent.
+    ///
+    /// The unit is the client's own clock, `FUN_0089c6b0`: `GetSystemTimeAsFileTime` minus a
+    /// `FILETIME` built for year `0x7b2` (1970), divided by 10000 -- milliseconds since the
+    /// Unix epoch, the same unit as `TimeOfDayComponent::real_world_start_time`.
+    ///
+    /// Zero therefore means "started at the epoch", i.e. finished long ago, which is why a
+    /// craft used to complete the instant it was queued.
     pub timer: u64,
 
     /// What the player chose for each ingredient. Empty until material variants are modelled.
@@ -115,12 +135,15 @@ impl CraftingComponent {
 
 impl CraftingSlot {
     fn encode(&self, writer: &mut BitWriter) {
-        writer.write_optional_u32(self.output);
+        // The recipe, not the output: the client resolves this hash and abandons the slot if
+        // the lookup misses.
+        writer.write_optional_u32(self.recipe);
 
-        // Sixty-four raw bits. The client writes them with a plain bit copy rather than
-        // through any of its numeric helpers, which is why the type is undecided.
-        writer.write_u32(self.timer as u32);
-        writer.write_u32((self.timer >> 32) as u32);
+        // Little-endian, the same as `TimeOfDayComponent::real_world_start_time` -- both are
+        // 64-bit millisecond timestamps and the client reads them the same way. The two
+        // big-endian words this used to write were byte-identical while the value was zero,
+        // which is why the difference only surfaced once a real start time went out.
+        writer.write_u64_le(self.timer);
 
         // Three strings whose meanings are unknown. Empty is a valid string on this wire: one
         // "has data" bit, clear.

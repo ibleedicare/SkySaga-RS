@@ -228,14 +228,18 @@ fn a_session_over_the_island_emits_a_complete_handshake() {
         .collect();
 
     // ServerInfo, MapDefinition, BeginSync, 16 chunks, 11 entities, sync-finished,
-    // SetClientEntity, tutorial. The eleventh entity is the chest, without which there is
-    // nothing in the world to press E on.
-    assert_eq!(ids.len(), 3 + 16 + 11 + 3);
+    // SetClientEntity, TimeSync, tutorial. The eleventh entity is the chest, without which
+    // there is nothing in the world to press E on.
+    //
+    // 191 is TimeSync, which the C# never sent: un-synced, the client's clock counts
+    // milliseconds since it launched rather than since the epoch, so every real timestamp the
+    // server sends reads as far in its future and a crafting slot sits at 0% for ever.
+    assert_eq!(ids.len(), 3 + 16 + 11 + 4);
 
     assert_eq!(&ids[..3], &[192, 140, 141]);
     assert!(ids[3..19].iter().all(|&id| id == 142), "the chunks");
     assert!(ids[19..30].iter().all(|&id| id == 234), "the entities");
-    assert_eq!(&ids[30..], &[139, 238, 162]);
+    assert_eq!(&ids[30..], &[139, 238, 191, 162]);
 
     // Every packet re-parses -- nothing is truncated or misframed.
     for bytes in &emitted {

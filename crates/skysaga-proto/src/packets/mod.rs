@@ -50,5 +50,5 @@ pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, Per
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     EntityRemoved, EntitySync,
-    MapDefinition, ServerInfo, SetClientEntity, SyncData,
+    MapDefinition, ServerInfo, SetClientEntity, SyncData, TimeSync,
 };

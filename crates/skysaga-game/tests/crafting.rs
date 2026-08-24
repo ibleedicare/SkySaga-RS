@@ -22,8 +22,15 @@ fn world() -> World {
     )
 }
 
+/// Where the pinned clock starts. Any value does; a round one keeps failures readable.
+const START_MS: u64 = 1_000_000_000_000;
+
 fn playing(world: &World) -> Session {
     let mut session = Session::new(world.player_entity_id);
+
+    // Pinned, so a craft's three seconds are advanced rather than waited out. Left on the real
+    // clock these tests would either sleep or depend on how fast they run.
+    session.set_clock_ms(START_MS);
 
     session.handle(ClientPacket::ClientConnected, world);
     session.handle(ClientPacket::ClientReadyToSync, world);
@@ -32,6 +39,9 @@ fn playing(world: &World) -> Session {
 
     session
 }
+
+/// `Hand_Craft_Carved_Stone_Piece` takes three seconds, which is what the panel shows as 00:03.
+const CARVED_STONE_MS: u64 = 3_000;
 
 fn encode(write: impl FnOnce(&mut BitWriter)) -> Vec<u8> {
     let mut writer = BitWriter::new();
@@ -132,6 +142,10 @@ fn collecting_puts_the_output_in_the_rucksack() {
     session.give("Stone", 3).unwrap();
 
     craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    // The craft has to actually finish first; the client will not offer it before then either.
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+
     collect(&mut session, &world, 0);
 
     assert_eq!(
@@ -270,4 +284,233 @@ fn collecting_nothing_is_harmless() {
 
     assert!(collect(&mut session, &world, 0).is_empty());
     assert!(collect(&mut session, &world, 11).is_empty());
+}
+
+/// A queued craft is announced, or the player is never told it finished.
+///
+/// The craft completes the instant it is queued — the slot's timer is a *start* time and zero
+/// reads as long past, so the client's `FUN_008a7fa0` returns a progress of 1.0 — but nothing
+/// else points at the finished slot. `CraftingNotification` is what draws the "your item is
+/// ready" element, and without it a working craft looks like one that did nothing.
+#[test]
+fn a_queued_craft_announces_itself() {
+    use skysaga_proto::packets::crafting::CraftingNotification;
+
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    let burst = craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    assert!(
+        burst.iter().any(|bytes| {
+            BitReader::from_bytes(bytes).read_packet_id().ok() == Some(CraftingNotification::ID)
+        }),
+        "the craft finished in silence",
+    );
+}
+
+/// A refused craft announces nothing.
+#[test]
+fn a_refused_craft_does_not_announce() {
+    use skysaga_proto::packets::crafting::CraftingNotification;
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let burst = craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    assert!(refused(&burst));
+
+    assert!(
+        !burst.iter().any(|bytes| {
+            BitReader::from_bytes(bytes).read_packet_id().ok() == Some(CraftingNotification::ID)
+        }),
+        "announced an item it never made",
+    );
+}
+
+/// The queued slot carries the **recipe's** id, not its output's.
+///
+/// The client resolves this hash before it will let the slot be collected: `FUN_008a7fa0`,
+/// which returns a craft's progress, opens with `FUN_0085b730(slot[0])` and returns `0.0` when
+/// that lookup misses. `FUN_0085b730` is a hash-map find that yields 0 for an absent key, so a
+/// slot carrying an unresolvable hash sits at 0% for ever: the client never offers it, never
+/// sends `CollectCraftedItemInSlot`, and the next craft is refused with "no free slot".
+///
+/// An output-resource hash produced exactly that, which is how this was found.
+#[test]
+fn a_queued_slot_is_addressed_by_its_recipe() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    let slot = &session.crafting_slots()[0];
+
+    assert_eq!(
+        slot.recipe,
+        Some(skysaga_core::name_hash("Hand_Craft_Carved_Stone_Piece")),
+        "the wire field must be the recipe",
+    );
+
+    assert_ne!(
+        slot.recipe,
+        Some(skysaga_core::name_hash("Carved_Stone_Piece")),
+        "the output's hash is what the client cannot resolve",
+    );
+}
+
+/// The slot carries the moment the craft **started**, in milliseconds since the Unix epoch.
+///
+/// `FUN_008a7fa0` computes progress as `(now - slot.timer) / duration` and returns `0.0` when
+/// `timer >= now`, so the field is a start time and the client does the arithmetic. Zero means
+/// "started at the epoch", which is why every craft used to finish before the panel had drawn.
+///
+/// The unit comes from the client's own clock, `FUN_0089c6b0`: `GetSystemTimeAsFileTime` minus
+/// a `FILETIME` for 1970, divided by 10000.
+#[test]
+fn a_queued_slot_records_when_it_started() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    assert_eq!(
+        session.crafting_slots()[0].timer,
+        START_MS,
+        "a zero start time is one at the epoch, i.e. finished long ago",
+    );
+}
+
+/// Collecting before the recipe's time has run is refused, and silently.
+///
+/// The client gates the collect on its own progress reaching 1.0, so an early request means a
+/// modified client or a clock the two disagree about. Handing the item over anyway would make
+/// `ExecutionTimeInSeconds` advisory, which is the whole point of it.
+///
+/// Silent because there is no "not yet" packet: `CraftingFailed` unsticks the crafting panel,
+/// and sending one for a collect the player never consciously made would close a UI they are
+/// still using.
+#[test]
+fn collecting_early_is_refused_and_keeps_the_slot() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    // Comfortably inside the grace window, so this is a genuinely early collect and not the
+    // quarter-second of slack that absorbs the client's own timing.
+    session.set_clock_ms(START_MS + CARVED_STONE_MS - 1_000);
+
+    let burst = collect(&mut session, &world, 0);
+
+    assert!(burst.is_empty(), "answered a collect it refused");
+
+    assert_eq!(
+        carried(&session, &["Stone", "Carved_Stone_Piece"]),
+        Vec::new(),
+        "handed the item over early",
+    );
+
+    assert_eq!(session.crafting_slots().len(), 1, "and the slot is still busy");
+}
+
+/// One millisecond later, on the boundary, it is collectable.
+#[test]
+fn collecting_on_the_boundary_succeeds() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+
+    collect(&mut session, &world, 0);
+
+    assert_eq!(
+        carried(&session, &["Stone", "Carved_Stone_Piece"]),
+        vec![("Carved_Stone_Piece".to_owned(), 1)],
+    );
+
+    assert!(session.crafting_slots().is_empty());
+}
+
+/// The client is handed a clock, or a craft's start time is meaningless to it.
+///
+/// Un-synced, `FUN_0089c6b0` returns `local_ms_now - local_ms_at_startup` -- milliseconds since
+/// the client launched, because `FUN_00c40a60` sets that baseline at startup and leaves the
+/// server-time half at zero. Every real timestamp is then far in the client's future, and
+/// `FUN_008a7fa0` returns `0.0` whenever `timer >= now`, so a craft freezes at 0%.
+///
+/// `TimeSync` (57) is the only packet that reaches those globals: its handler `FUN_00739900`
+/// calls `FUN_0089c620`, which has no other caller.
+#[test]
+fn joining_hands_the_client_a_clock() {
+    use skysaga_proto::packets::TimeSync;
+
+    let world = world();
+    let mut session = Session::new(world.player_entity_id);
+
+    session.set_clock_ms(START_MS);
+
+    session.handle(ClientPacket::ClientConnected, &world);
+    session.handle(ClientPacket::ClientReadyToSync, &world);
+    session.handle(ClientPacket::ClientInitialSyncFinished, &world);
+
+    let burst = session.handle(ClientPacket::ClientReadyToPlay, &world);
+
+    let synced = burst
+        .iter()
+        .find(|bytes| BitReader::from_bytes(bytes).read_packet_id().ok() == Some(TimeSync::ID))
+        .expect("no clock was sent, so every craft would sit at 0%");
+
+    let mut reader = BitReader::from_bytes(synced);
+
+    reader.read_packet_id().unwrap();
+
+    assert_eq!(
+        TimeSync::decode(&mut reader).unwrap().now_ms,
+        START_MS,
+        "the clock must be the same one a slot's start time is written in",
+    );
+}
+
+/// The grace window: a client that is slightly ahead is honoured rather than made to poll.
+///
+/// The two clocks never agree exactly. The server times a craft by the recipe's
+/// `ExecutionTimeInSeconds`; the client divides by a duration `FUN_008ab190` derives from the
+/// recipe *and its materials*, against a clock rebased onto ours across a network hop.
+///
+/// A live client asked to collect a three-second craft at `elapsed_ms=2795`, was refused, and
+/// re-asked every thirty milliseconds until the server agreed -- seven round trips for a craft
+/// it considered finished.
+#[test]
+fn a_client_a_little_ahead_is_honoured() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    // 2795ms, the number the live client actually asked at.
+    session.set_clock_ms(START_MS + 2_795);
+
+    collect(&mut session, &world, 0);
+
+    assert_eq!(
+        carried(&session, &["Stone", "Carved_Stone_Piece"]),
+        vec![("Carved_Stone_Piece".to_owned(), 1)],
+        "refused a client that was inside the grace window",
+    );
 }

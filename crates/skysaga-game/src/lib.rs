@@ -21,7 +21,7 @@
 //! C->S ClientConnected            -> ServerInfo, MapDefinition
 //! C->S ClientReadyToSync          -> BeginSync(n), ChunkSync x n
 //! C->S ClientInitialSyncFinished  -> EntityAdd x n, ClientEntitiesSyncFinished
-//! C->S ClientReadyToPlay          -> SetClientEntity, DebugRequestFinishTutorial
+//! C->S ClientReadyToPlay          -> SetClientEntity, TimeSync, DebugRequestFinishTutorial
 //! ```
 
 pub mod combat;
@@ -49,7 +49,8 @@ use skysaga_proto::packets::mail::{
 };
 use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection, ANGLE_UNITS_PER_DEGREE};
 use skysaga_proto::packets::crafting::{
-    CollectCraftedItemInSlot, CraftingFailed, CraftingQueryQueue, QueueRecipeOnEntity,
+    CollectCraftedItemInSlot, CraftingFailed, CraftingNotification, CraftingQueryQueue,
+    QueueRecipeOnEntity,
 };
 use skysaga_proto::packets::todo_list::{
     TodoListTaskAdd, TodoListTaskRef, TodoTask, TASK_LIST_DEFAULT,
@@ -63,7 +64,7 @@ use skysaga_proto::packets::{
     BeginSync, EntityAdd, EntityRemoved, EntitySync, CharacterCreationResponse,
     ClientEntitiesSyncFinished, CreateHomeworld, DebugRequestFinishTutorial, NotifyPhotoCaptured,
     PhotoValidated, SaveCharacterName, SetCharacterCustomisationData, SetClientEntity,
-    TransferToServer,
+    TimeSync, TransferToServer,
 };
 use skysaga_world::geodata::EquippedAction;
 use skysaga_world::loot::Seeded;
@@ -90,6 +91,21 @@ const PICKUP: &str = "Pickup";
 /// The data models hand crafting as a station whose entity happens to be the player's own, so
 /// this is a name from `geodata.json` and not a special case in the protocol.
 const HAND_CRAFTING: &str = "Hand_Crafting";
+
+/// How far ahead of the server a client's craft timer may run and still be honoured.
+///
+/// **The two never agree exactly, and they are not supposed to.** The server times a craft by
+/// the recipe's `ExecutionTimeInSeconds`; the client divides by a duration `FUN_008ab190`
+/// derives from the recipe *and the materials chosen*, and the clock it compares against is
+/// its own, rebased onto ours by `TimeSync` across a network hop.
+///
+/// Observed against a live client: it asked to collect a three-second craft at
+/// `elapsed_ms=2795`, was refused, and re-asked every thirty milliseconds until the server
+/// came round -- seven wasted round trips for a craft that was, by the client's own reckoning,
+/// finished. A quarter of a second of slack absorbs that. It is far too little to be worth
+/// anything to someone shortening a craft on purpose, and it is the difference between one
+/// exchange and eight.
+const COLLECT_GRACE_MS: u64 = 250;
 
 /// A player's full health: `PhysicalProperties > player > Durability > Player > Health`.
 const PLAYER_HEALTH: u32 = 40;
@@ -618,6 +634,14 @@ pub struct Session {
     /// are placeable.
     crafting: Vec<skysaga_world::CraftingSlot>,
 
+    /// A fixed wall clock, in milliseconds since the Unix epoch, or `None` for the real one.
+    ///
+    /// Crafting is the first thing here that needs the time of day rather than a tick count:
+    /// a slot carries the moment its craft *started* and the client divides by the recipe's
+    /// duration to get a progress bar. Reading `SystemTime::now()` inline would make every
+    /// crafting test depend on how fast it runs, so the clock is a value the tests can pin.
+    clock_ms: Option<u64>,
+
     /// The quest log, one entry per row the client shows.
     ///
     /// On the session for the same reason as `crafting`: it lives on the player's own entity.
@@ -678,6 +702,7 @@ impl Session {
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
             crafting: Vec::new(),
+            clock_ms: None,
             todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
@@ -933,6 +958,18 @@ impl Session {
                     encode(|w| {
                         SetClientEntity {
                             entity_id: self.player_entity_id,
+                        }
+                        .encode(w)
+                    }),
+                    // **Give the client a clock.** Until this arrives its `now()` counts
+                    // milliseconds since the client launched, not since the epoch, so every
+                    // real timestamp the server sends is far in its future. A crafting slot's
+                    // start time is one of those, and the craft then sits at 0% for ever.
+                    // Nothing else sets it: the client's clock globals have exactly one writer
+                    // reachable from the network, and this is the packet that reaches it.
+                    encode(|w| {
+                        TimeSync {
+                            now_ms: self.now_ms(),
                         }
                         .encode(w)
                     }),
@@ -1790,10 +1827,14 @@ impl Session {
         // Finished the moment it is queued. The record's timer is sixty-four raw bits whose
         // type could not be settled from the binary, so a running craft cannot be expressed
         // honestly yet; zero is unambiguous under either reading.
+        // **The moment it started, not zero.** The client's progress is
+        // `(now - timer) / duration`, so a zero start time is one at the Unix epoch and every
+        // craft read as finished the instant it was queued -- the recipe's three seconds
+        // elapsed before the panel had drawn.
         self.crafting.push(skysaga_world::CraftingSlot {
+            recipe: Some(recipe.id()),
             output: Some(skysaga_core::name_hash(output)),
-            recipe: recipe.id(),
-            timer: 0,
+            timer: self.now_ms(),
             materials: Vec::new(),
         });
 
@@ -1801,26 +1842,61 @@ impl Session {
 
         out.extend(self.sync_of(self.player_entity_id, &["craftingslots"], world));
 
+        // "Your item is ready." The craft finishes the instant it is queued -- the slot's
+        // timer is a start time and zero reads as long past, so `FUN_008a7fa0` returns a
+        // progress of 1.0 -- and this is what tells the player so. It is a toast rather than a
+        // state change: without it the finished slot is still collectable, but nothing points
+        // at it, which looks exactly like a craft that silently did nothing.
+        out.push(encode(|w| {
+            CraftingNotification {
+                resource: Some(skysaga_core::name_hash(output)),
+                ..Default::default()
+            }
+            .encode(w)
+        }));
+
         out
     }
 
     /// Take a finished craft out of its slot and into the rucksack.
     fn collect_craft(&mut self, packet: CollectCraftedItemInSlot, world: &World) -> Vec<Vec<u8>> {
+        // Logged on arrival, not just on failure. Whether the client ever asks to collect is
+        // the first question when a craft "does nothing", and a handler that is silent on the
+        // happy path cannot answer it.
+        debug!(slot = packet.slot, "collect requested");
+
         let Some(slot) = self.crafting.get(packet.slot as usize).cloned() else {
             debug!(slot = packet.slot, "collecting an empty crafting slot");
 
             return Vec::new();
         };
 
-        if slot.output.is_none() {
-            return Vec::new();
-        }
-
-        // By the recipe the slot remembers, not by its output: the wire record carries only
-        // the output resource, and that does not name a recipe or its quantity.
-        let Some(recipe) = world.geodata.recipe_for_id(slot.recipe) else {
+        let Some(recipe) = slot.recipe.and_then(|id| world.geodata.recipe_for_id(id)) else {
             return Vec::new();
         };
+
+        // **The server decides when a craft is done, not the client.**
+        //
+        // The client already refuses to offer a slot below 100% -- `FUN_008a7fa0` gates the
+        // collect on its progress reaching 1.0 -- so an early request means either a modified
+        // client or a clock the two disagree about. Either way, handing the item over would
+        // make the recipe's `ExecutionTimeInSeconds` advisory, which is the whole point of it.
+        //
+        // Silent, because there is no "not yet" packet: `CraftingFailed` unsticks the crafting
+        // *panel*, and sending one for a collect the player never consciously made would take
+        // them out of a UI they are still using.
+        let elapsed_ms = self.now_ms().saturating_sub(slot.timer);
+        let full_ms = (recipe.execution_time_seconds.max(0.0) * 1000.0) as u64;
+        let required_ms = full_ms.saturating_sub(COLLECT_GRACE_MS);
+
+        if elapsed_ms < required_ms {
+            debug!(
+                slot = packet.slot,
+                elapsed_ms, required_ms, full_ms, "collecting a craft that is not finished",
+            );
+
+            return Vec::new();
+        }
 
         let (name, quantity) = recipe.output().unwrap_or(("", 1));
         let name = name.to_owned();
@@ -2350,6 +2426,29 @@ impl Session {
     /// The quest log's rows, in the order the client shows them.
     pub fn todo_tasks(&self) -> &[TodoTask] {
         &self.todo_tasks
+    }
+
+    /// Milliseconds since the Unix epoch, which is the clock the client reads.
+    ///
+    /// `FUN_0089c6b0` builds it from `GetSystemTimeAsFileTime` against a `FILETIME` for 1970,
+    /// so this is the same scale the crafting slot's start time is compared against.
+    fn now_ms(&self) -> u64 {
+        if let Some(fixed) = self.clock_ms {
+            return fixed;
+        }
+
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Pin the wall clock, so a test that crafts does not depend on how fast it runs.
+    ///
+    /// Craft timings are the only thing here that reads the time of day. Advance this rather
+    /// than sleeping: a three-second recipe would otherwise cost three seconds per test.
+    pub fn set_clock_ms(&mut self, now: u64) {
+        self.clock_ms = Some(now);
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.

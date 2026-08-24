@@ -228,6 +228,50 @@ impl CraftingQueryQueue {
     }
 }
 
+/// `CraftingNotification` (67) — "your item is ready".
+///
+/// Registration `FUN_00741f00`, deserializer `FUN_00743410`, handler `FUN_0073b210`. The
+/// handler builds a `0x70`-byte notification record and enqueues it into the UI
+/// (`FUN_007504f0`), which is what draws the `craftingNotice` /
+/// `ui_overhead_crafting_queue` element.
+///
+/// # It is a toast, not a state change
+///
+/// `FUN_0073b210` touches nothing but the notification queue, so this does **not** make a slot
+/// collectable — what does that is the slot's own timer, read as a start time by
+/// `FUN_008a7fa0`. Without this packet a finished craft is still collectable; the player is
+/// simply never told, so the item sits in the slot looking unfinished.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CraftingNotification {
+    /// What was made.
+    pub resource: Option<u32>,
+
+    /// Two specs whose roles were not established. The handler passes both to
+    /// `FUN_00790190` alongside the resource; empty ones are valid and are what the server
+    /// sends until a meaning is found for them.
+    pub item_spec_a: ItemSpec,
+    pub item_spec_b: ItemSpec,
+}
+
+impl CraftingNotification {
+    pub const ID: u16 = 67;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_optional_u32(self.resource);
+        self.item_spec_a.encode(writer);
+        self.item_spec_b.encode(writer);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            resource: reader.read_optional_u32()?,
+            item_spec_a: ItemSpec::decode(reader)?,
+            item_spec_b: ItemSpec::decode(reader)?,
+        })
+    }
+}
+
 /// `CraftingFailed` (42) — the refusal that unsticks the panel.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CraftingFailed {

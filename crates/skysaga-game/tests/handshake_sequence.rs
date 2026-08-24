@@ -31,6 +31,29 @@ fn drive(session: &mut Session, world: &World, packet: ClientPacket) -> Vec<Vec<
     session.handle(packet, world)
 }
 
+/// Everything the C# also sent, in order — this server's deliberate additions removed.
+///
+/// # Why the capture is not the whole spec
+///
+/// The capture is what the C# server sent, which is the best available record of what the
+/// client accepts. It is *not* a list of what the client needs: a packet the C# never sent is
+/// unrepresented here whether the client wanted it or not.
+///
+/// `TimeSync` (57) is exactly that case. Neither server ever sent it, so the client's clock
+/// stayed at its startup state — counting milliseconds since launch rather than since the
+/// epoch — and every real timestamp read as far in its future. That froze every craft at 0%.
+/// Sending it is a fix, so the parity tests record it as a known divergence rather than
+/// treating the C#'s omission as correct.
+fn without_deliberate_additions(packets: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    use skysaga_proto::packets::TimeSync;
+
+    packets
+        .iter()
+        .filter(|bytes| BitReader::from_bytes(bytes).read_packet_id().ok() != Some(TimeSync::ID))
+        .cloned()
+        .collect()
+}
+
 // --- the stages -------------------------------------------------------------------------------
 
 #[test]
@@ -111,7 +134,11 @@ fn ready_to_play_hands_over_the_player_entity() {
 
     let out = drive(&mut session, &world, ClientPacket::ClientReadyToPlay);
 
-    assert_eq!(wire_ids(&out), vec![238, 162]);
+    // 191 is TimeSync, which this server sends and the C# did not: see
+    // `without_deliberate_additions`.
+    assert_eq!(wire_ids(&out), vec![238, 191, 162]);
+
+    assert_eq!(wire_ids(&without_deliberate_additions(&out)), vec![238, 162]);
 
     let mut reader = BitReader::from_bytes(&out[0]);
     reader.read_packet_id().unwrap();
@@ -142,7 +169,7 @@ fn the_full_handshake_matches_the_csharp_sequence() {
     }
 
     assert_eq!(
-        wire_ids(&emitted),
+        wire_ids(&without_deliberate_additions(&emitted)),
         captured_sequence(),
         "the emitted packet sequence differs from the C# server's",
     );
@@ -164,6 +191,8 @@ fn the_full_handshake_matches_the_csharp_bytes() {
     ] {
         emitted.extend(drive(&mut session, &world, packet));
     }
+
+    let emitted = without_deliberate_additions(&emitted);
 
     let expected = world_from_capture::captured_packets();
 

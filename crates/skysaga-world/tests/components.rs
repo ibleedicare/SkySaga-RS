@@ -930,10 +930,10 @@ fn a_queued_craft_writes_its_record() {
 
     let component = Component::Crafting(CraftingComponent {
         slots: vec![CraftingSlot {
+            // The recipe is what goes on the wire; the output is server-side only, which is
+            // what the bit count below asserts.
+            recipe: Some(7),
             output: Some(42),
-            // Server-side only: the record on the wire has no recipe field, which is what the
-            // bit count below asserts.
-            recipe: 7,
             timer: 0,
             materials: Vec::new(),
         }],
