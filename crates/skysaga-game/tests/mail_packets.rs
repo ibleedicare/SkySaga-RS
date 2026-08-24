@@ -427,5 +427,5 @@ fn no_mail_packet_is_reported_as_unhandled() {
         session.handle(ClientPacket::parse(&packet), &world);
     }
 
-    assert_eq!(session.reported_unhandled(), Vec::<u16>::new());
+    assert!(session.reported_unhandled().is_empty());
 }

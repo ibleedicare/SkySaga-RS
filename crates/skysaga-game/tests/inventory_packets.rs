@@ -422,9 +422,9 @@ fn no_inventory_packet_is_reported_as_unhandled() {
         session.handle(ClientPacket::parse(packet), &world);
     }
 
-    assert_eq!(
+    assert!(
+        session.reported_unhandled().is_empty(),
+        "these ids are handled now: {:?}",
         session.reported_unhandled(),
-        Vec::<u16>::new(),
-        "these ids are handled now",
     );
 }

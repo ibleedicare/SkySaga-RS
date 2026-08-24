@@ -19,6 +19,12 @@ use skysaga_proto::packets::{TransferToServer,
 
 mod world_from_capture;
 
+/// The ids of what has been reported, dropping the payloads: these tests are about *which*
+/// packets were unhandled, not what they carried.
+fn ids(session: &Session) -> Vec<u16> {
+    session.reported_unhandled().into_iter().map(|(id, _)| id).collect()
+}
+
 fn world() -> World {
     world_from_capture::world_from_capture()
 }
@@ -298,10 +304,10 @@ fn a_repeated_unhandled_packet_is_reported_once() {
         assert!(out.is_empty(), "unhandled packets are not answered");
     }
 
-    assert_eq!(session.reported_unhandled(), &[236]);
+    assert_eq!(ids(&session), vec![236]);
 
     // A different id is still reported.
     session.handle(ClientPacket::from_wire_id(240), &world);
 
-    assert_eq!(session.reported_unhandled(), &[236, 240]);
+    assert_eq!(ids(&session), vec![236, 240]);
 }
