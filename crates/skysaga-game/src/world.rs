@@ -15,7 +15,7 @@ use skysaga_world::{
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
     TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLink, VoxelLinkComponent,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use tracing::warn;
@@ -135,6 +135,21 @@ pub struct WorldChanges {
 
     /// Placements nobody has written down yet. Drained like `unsaved`.
     unsaved_devices: Vec<PlacedDevice>,
+
+    /// Creatures that appeared while the server ran, beside the ones the island seeded.
+    creatures: Vec<Creature>,
+
+    /// Hit points taken off each creature, by entity id.
+    ///
+    /// Damage rather than remaining health, so a creature needs no mutable copy: what is left
+    /// is its own maximum minus this.
+    damage: HashMap<u32, u32>,
+
+    /// Creatures somebody has already killed.
+    ///
+    /// Kept rather than deleted, because "this one is dead" has to outlive the entity: a
+    /// joiner must not be sent it, and a second player must not be able to kill it again.
+    dead: HashSet<u32>,
 }
 
 /// Something a player put in the world: a station, a decoration, a mailbox.
@@ -1243,6 +1258,66 @@ impl World {
         }
     }
 
+    // --- creatures -------------------------------------------------------------------------
+
+    /// Put a creature in the world, for everybody.
+    pub fn spawn_creature(&self, creature: Creature) {
+        self.changes.lock().expect("world lock").creatures.push(creature);
+    }
+
+    /// A creature by id, whether the island seeded it or something spawned it since.
+    ///
+    /// Owned rather than borrowed: half of them live behind the lock. The definition is not
+    /// carried with it -- look it up from [`Self::definitions`] by name, which outlives the
+    /// lock, exactly as a device's is.
+    pub fn creature_now(&self, id: u32) -> Option<Creature> {
+        if let Some(creature) = self.creature(id) {
+            return Some(creature.clone());
+        }
+
+        self.changes
+            .lock()
+            .expect("world lock")
+            .creatures
+            .iter()
+            .find(|creature| creature.id == id)
+            .cloned()
+    }
+
+    /// Every creature that has appeared since the island was built.
+    pub fn spawned_creatures(&self) -> Vec<Creature> {
+        self.changes.lock().expect("world lock").creatures.clone()
+    }
+
+    /// How much has been taken off `id`, by everybody who has hit it.
+    pub fn damage_to(&self, id: u32) -> u32 {
+        self.changes
+            .lock()
+            .expect("world lock")
+            .damage
+            .get(&id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record the total damage done to `id`.
+    pub fn set_damage(&self, id: u32, damage: u32) {
+        self.changes.lock().expect("world lock").damage.insert(id, damage);
+    }
+
+    /// Whether somebody has already killed `id`.
+    pub fn is_dead(&self, id: u32) -> bool {
+        self.changes.lock().expect("world lock").dead.contains(&id)
+    }
+
+    /// Say that `id` is dead, and answer whether this is the first time.
+    ///
+    /// The answer is what stops a corpse being farmed: two players swinging at the same knight
+    /// both land a killing blow, and only the first is a kill.
+    pub fn mark_dead(&self, id: u32) -> bool {
+        self.changes.lock().expect("world lock").dead.insert(id)
+    }
+
     /// The first entity id nothing is using.
     ///
     /// Past the props the island was built with **and** past the devices restored on top of
@@ -1250,17 +1325,12 @@ impl World {
     pub fn next_entity_id(&self) -> u32 {
         let props = self.entities.iter().map(|entity| entity.id).max().unwrap_or(0);
 
-        let devices = self
-            .changes
-            .lock()
-            .expect("world lock")
-            .devices
-            .iter()
-            .map(|device| device.id)
-            .max()
-            .unwrap_or(0);
+        let changes = self.changes.lock().expect("world lock");
 
-        props.max(devices) + 1
+        let devices = changes.devices.iter().map(|device| device.id).max().unwrap_or(0);
+        let creatures = changes.creatures.iter().map(|creature| creature.id).max().unwrap_or(0);
+
+        props.max(devices).max(creatures) + 1
     }
 
     /// What the terrain generator produced, before anybody touched it.

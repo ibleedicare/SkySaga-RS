@@ -681,18 +681,6 @@ pub struct Session {
     /// probe and the capture tool connect without going through the conductor.
     account: Option<String>,
 
-    /// Creatures spawned while this session runs, beside the ones the world seeded.
-    ///
-    /// Per session, as containers are: a bandit one player spawns is not in another player's
-    /// world. The same limitation, and it moves at the same time.
-    creatures: Vec<world::Creature>,
-
-    /// Hit points taken off each creature, by entity id.
-    ///
-    /// Damage rather than remaining health, so the world's own creatures need no mutable
-    /// copy: what is left is the definition's maximum minus this.
-    damage: std::collections::HashMap<u32, u32>,
-
     /// Hit points taken off this player.
     player_damage: u32,
 
@@ -808,8 +796,6 @@ impl Session {
             closed_lids: BTreeSet::new(),
             dig_damage: std::collections::HashMap::new(),
             spawned: Vec::new(),
-            creatures: Vec::new(),
-            damage: std::collections::HashMap::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
@@ -1184,11 +1170,19 @@ impl Session {
                     .chain(others.iter().map(|entity| encode(|w| entity.encode(w))))
                     .collect();
 
-                // Anything players have put down since the island was built. Part of the world
-                // rather than of the burst's frozen entity list, so a joiner is told about it
-                // here or never told at all.
-                for device in world.devices() {
-                    if let Some((built, definition)) = self.entity_now(device.id, world) {
+                // Anything players have put down since the island was built, and anything that
+                // has wandered in. Part of the world rather than of the burst's frozen entity
+                // list, so a joiner is told about them here or never told at all.
+                let since: Vec<u32> = world
+                    .devices()
+                    .iter()
+                    .map(|device| device.id)
+                    .chain(world.spawned_creatures().iter().map(|creature| creature.id))
+                    .filter(|id| !world.is_dead(*id))
+                    .collect();
+
+                for id in since {
+                    if let Some((built, definition)) = self.entity_now(id, world) {
                         out.push(encode(|w| built.to_entity_add(definition).encode(w)));
                     }
                 }
@@ -3100,9 +3094,13 @@ impl Session {
             return Some((player, definition));
         }
 
-        // A creature, whose only mutable state is what is left of it.
-        if let Some(creature) = self.creature(entity, world) {
-            let health = creature.max_health.saturating_sub(self.damage_to(entity));
+        // A creature, whose only mutable state is what is left of it. Like a device, it lives
+        // behind the world's lock, so its definition is looked up by name from the table that
+        // outlives the lock rather than borrowed from the creature itself.
+        if let Some(creature) = world.creature_now(entity) {
+            let definition = world.definitions.get(&creature.name)?;
+
+            let health = creature.max_health.saturating_sub(world.damage_to(entity));
 
             let mut built = creature.entity.clone();
 
@@ -3112,7 +3110,7 @@ impl Session {
                 }
             }
 
-            return Some((built, &creature.definition));
+            return Some((built, definition));
         }
 
         // A device a player placed. It lives on the world rather than on any session, so its
@@ -3169,22 +3167,18 @@ impl Session {
     ///
     /// The session first, for the same reason as a container: the world is fixed once built,
     /// so anything created while the server runs lives here.
-    pub fn creature<'a>(&'a self, id: u32, world: &'a World) -> Option<&'a world::Creature> {
-        self.creatures
-            .iter()
-            .find(|creature| creature.id == id)
-            .or_else(|| world.creature(id))
+    pub fn creature(&self, id: u32, world: &World) -> Option<world::Creature> {
+        world.creature_now(id)
     }
 
     /// Hit points left on a creature, or `None` if that id is not one.
-    pub fn creature_health(&self, id: u32) -> Option<u32> {
-        let creature = self.creatures.iter().find(|creature| creature.id == id)?;
+    ///
+    /// Takes the world because that is where creatures live: what is left of one is a fact
+    /// about the world and not about whoever is asking.
+    pub fn creature_health(&self, id: u32, world: &World) -> Option<u32> {
+        let creature = world.creature_now(id)?;
 
-        Some(creature.max_health.saturating_sub(self.damage_to(id)))
-    }
-
-    fn damage_to(&self, id: u32) -> u32 {
-        self.damage.get(&id).copied().unwrap_or(0)
+        Some(creature.max_health.saturating_sub(world.damage_to(id)))
     }
 
     /// Hit points left on this player.
@@ -3302,7 +3296,10 @@ impl Session {
 
         info!(entity = id, %entity, max_health, ?position, "spawned a creature");
 
-        self.creatures.push(world::Creature {
+        // **On the world, not on this session.** One knight, one pool of hit points: a
+        // creature per connection let two players kill the same thing twice and collect its
+        // loot twice.
+        world.spawn_creature(world::Creature {
             id,
             name: entity.to_owned(),
             entity: built,
@@ -3310,6 +3307,9 @@ impl Session {
             position,
             max_health,
         });
+
+        // Everyone already in the world sees it appear. A joiner gets it from the burst.
+        self.broadcasts.extend(packets.iter().cloned());
 
         Some(Spawned {
             entity: id,
@@ -3397,14 +3397,14 @@ impl Session {
             return Vec::new();
         }
 
-        let Some(creature) = self.creature(packet.entity_id, world).cloned() else {
+        let Some(creature) = world.creature_now(packet.entity_id) else {
             // A chest, a tree, another player, or an id belonging to nothing.
             debug!(target = packet.entity_id, "hit something that is not a creature");
 
             return Vec::new();
         };
 
-        if creature.max_health <= self.damage_to(creature.id) {
+        if world.is_dead(creature.id) || creature.max_health <= world.damage_to(creature.id) {
             debug!(target = creature.id, "hit a corpse");
 
             return Vec::new();
@@ -3444,11 +3444,10 @@ impl Session {
     ) -> Vec<Vec<u8>> {
         let target = creature.id;
 
-        let before = creature.max_health.saturating_sub(self.damage_to(target));
+        let before = creature.max_health.saturating_sub(world.damage_to(target));
         let after = before.saturating_sub(action.attack_strength);
 
-        self.damage
-            .insert(target, creature.max_health.saturating_sub(after));
+        world.set_damage(target, creature.max_health.saturating_sub(after));
 
         info!(
             target,
@@ -3478,8 +3477,13 @@ impl Session {
             .encode(w)
         })];
 
-        // ...and the heart bar itself, which is an ordinary parameter sync.
-        out.extend(self.sync_health(target, world));
+        // ...and the heart bar itself, which is an ordinary parameter sync. Everyone sees it:
+        // the knight is one knight, so its hearts have to move on every screen.
+        let health_sync = self.sync_health(target, world);
+
+        self.broadcasts.extend(health_sync.iter().cloned());
+
+        out.extend(health_sync);
 
         if after > 0 {
             // Still alive, so it may still give something up: shearing. Only a sheep has a
@@ -3487,21 +3491,33 @@ impl Session {
             out.extend(self.award_hit_loot(&creature, world));
         }
 
-        if after == 0 {
-            out.push(encode(|w| {
+        // **Once.** Two players swinging at the same knight can both land what looks like a
+        // killing blow; the world decides which of them actually did, and the loser's swing
+        // rolls no loot and announces no kill.
+        if after == 0 && world.mark_dead(target) {
+            let kill = encode(|w| {
                 KillOccurred {
                     killer: self.player_entity_id,
                     victim: target,
                     weapon: None,
                 }
                 .encode(w)
-            }));
+            });
+
+            let removal = encode(|w| EntityRemoved { entity_id: target }.encode(w));
+
+            out.push(kill.clone());
 
             // Rolled on the killing blow and only then, so a corpse cannot be farmed.
             out.extend(self.award_loot(&creature, world));
 
             // Only after the kill: the client resolves the victim before it draws anything.
-            out.push(encode(|w| EntityRemoved { entity_id: target }.encode(w)));
+            out.push(removal.clone());
+
+            // The other players watch it die too, or it stands there at full health on their
+            // screens until they next log in.
+            self.broadcasts.push(kill);
+            self.broadcasts.push(removal);
         }
 
         out

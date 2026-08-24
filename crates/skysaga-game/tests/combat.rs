@@ -253,7 +253,7 @@ fn a_creature_is_announced_with_the_health_its_data_file_gives_it() {
     let knight = creature_in_front(&mut session, &world, "Knight");
 
     // `Knight` -> `creature_knight_2_standard` -> `Health_35`.
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn the_swing_packet_alone_hurts_nothing() {
 
     let replies = arm(&mut session, &world, "Basic_Diagonal");
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
     assert!(ids_of(&replies, EventEffect::ID).is_empty());
 }
 
@@ -312,7 +312,7 @@ fn a_landed_swing_takes_its_actions_damage_off_the_target() {
 
     let replies = swing_at(&mut session, &world, "Basic_Diagonal", knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(28));
+    assert_eq!(session.creature_health(knight, &world), Some(28));
 
     // The hit spark, and the heart bar.
     assert_eq!(ids_of(&replies, EventEffect::ID).len(), 1, "one hit effect");
@@ -329,7 +329,7 @@ fn a_heavy_swing_hits_for_what_its_own_row_says() {
 
     swing_at(&mut session, &world, "Heavy_Chop", knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35 - 14));
+    assert_eq!(session.creature_health(knight, &world), Some(35 - 14));
 }
 
 /// The action is remembered per equip slot, so one arming can land more than one blow.
@@ -349,7 +349,7 @@ fn one_arming_can_land_more_than_one_blow() {
     land(&mut session, &world, knight, in_front());
     land(&mut session, &world, knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35 - 14));
+    assert_eq!(session.creature_health(knight, &world), Some(35 - 14));
 }
 
 /// Letting go disarms the slot, so a stray hit afterwards is not a free swing.
@@ -369,7 +369,7 @@ fn releasing_the_button_disarms_the_slot() {
 
     land(&mut session, &world, knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
 }
 
 /// A hit with nothing armed is dropped rather than guessed at.
@@ -382,7 +382,7 @@ fn a_hit_with_no_swing_behind_it_is_dropped() {
 
     land(&mut session, &world, knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
 }
 
 /// A swing is not always an attack: placing a block goes out on the same packet.
@@ -395,7 +395,7 @@ fn a_swing_that_is_not_an_attack_hurts_nothing() {
 
     let replies = swing_at(&mut session, &world, "PlaceVoxel", knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
     assert!(ids_of(&replies, EventEffect::ID).is_empty());
 }
 
@@ -421,7 +421,7 @@ fn a_hit_far_out_of_reach_is_refused() {
 
     swing_at(&mut session, &world, "Basic_Diagonal", knight, far);
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
 }
 
 /// Behind is still a hit: the player turns, and the client decided this connected.
@@ -446,7 +446,7 @@ fn a_hit_behind_the_players_last_reported_facing_still_lands() {
 
     swing_at(&mut session, &world, "Basic_Diagonal", knight, behind);
 
-    assert_eq!(session.creature_health(knight), Some(28));
+    assert_eq!(session.creature_health(knight, &world), Some(28));
 }
 
 /// Hitting something that is not a creature does nothing, and does not panic.
@@ -488,7 +488,7 @@ fn a_swing_naming_an_unknown_action_is_dropped() {
 
     land(&mut session, &world, knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(35));
+    assert_eq!(session.creature_health(knight, &world), Some(35));
 }
 
 // --- killing ---------------------------------------------------------------------------------
@@ -504,7 +504,7 @@ fn killing_a_chicken_drops_three_feathers_on_the_floor() {
 
     let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
-    assert_eq!(session.creature_health(chicken), Some(0), "it died");
+    assert_eq!(session.creature_health(chicken, &world), Some(0), "it died");
 
     // **On the floor, not in the rucksack.** The player has to walk over it.
     assert!(carried(&session).is_empty(), "nothing was handed over");
@@ -631,7 +631,7 @@ fn a_sheep_hit_but_not_killed_drops_wool() {
 
     swing_at(&mut session, &world, "Basic_Stab", sheep, in_front());
 
-    assert_eq!(session.creature_health(sheep), Some(4), "it survived");
+    assert_eq!(session.creature_health(sheep, &world), Some(4), "it survived");
 
     let drops = session.floor_drops();
 
@@ -653,7 +653,7 @@ fn killing_the_sheep_rolls_the_kill_table_instead() {
     // Seven damage against six hit points: dead in one, so no hit-loot is rolled.
     swing_at(&mut session, &world, "Basic_Diagonal", sheep, in_front());
 
-    assert_eq!(session.creature_health(sheep), Some(0));
+    assert_eq!(session.creature_health(sheep, &world), Some(0));
 
     for (pickup, _) in session.floor_drops() {
         collect(&mut session, &world, pickup);
@@ -679,7 +679,7 @@ fn hitting_a_creature_with_no_hit_table_drops_nothing() {
 
     swing_at(&mut session, &world, "Basic_Stab", knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(33), "hurt, not dead");
+    assert_eq!(session.creature_health(knight, &world), Some(33), "hurt, not dead");
     assert!(session.floor_drops().is_empty(), "knights do not shear");
 }
 
@@ -705,7 +705,7 @@ fn killing_something_with_no_loot_table_drops_nothing() {
         swing_at(&mut session, &world, "Heavy_Chop", dino, in_front());
     }
 
-    assert_eq!(session.creature_health(dino), Some(0), "it died");
+    assert_eq!(session.creature_health(dino, &world), Some(0), "it died");
     assert!(session.floor_drops().is_empty(), "nothing dropped");
 }
 
@@ -736,7 +736,7 @@ fn one_swing_kills_a_sheep() {
 
     let replies = swing_at(&mut session, &world, "Basic_Diagonal", sheep, in_front());
 
-    assert_eq!(session.creature_health(sheep), Some(0));
+    assert_eq!(session.creature_health(sheep, &world), Some(0));
 
     assert_eq!(
         kills(&replies),
@@ -763,7 +763,7 @@ fn a_dead_creature_absorbs_no_more_swings() {
 
     let again = swing_at(&mut session, &world, "Basic_Diagonal", sheep, in_front());
 
-    assert_eq!(session.creature_health(sheep), Some(0));
+    assert_eq!(session.creature_health(sheep, &world), Some(0));
     assert!(kills(&again).is_empty(), "it is already dead");
     assert!(ids_of(&again, EventEffect::ID).is_empty());
 }
@@ -780,13 +780,13 @@ fn a_tougher_creature_takes_several_swings() {
     for expected in [21, 7] {
         let replies = swing_at(&mut session, &world, "Heavy_Chop", knight, in_front());
 
-        assert_eq!(session.creature_health(knight), Some(expected));
+        assert_eq!(session.creature_health(knight, &world), Some(expected));
         assert!(kills(&replies).is_empty(), "not dead at {expected}");
     }
 
     let last = swing_at(&mut session, &world, "Heavy_Chop", knight, in_front());
 
-    assert_eq!(session.creature_health(knight), Some(0));
+    assert_eq!(session.creature_health(knight, &world), Some(0));
     assert_eq!(kills(&last), vec![(session.player_entity_id(), knight)]);
 }
 
