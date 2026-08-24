@@ -216,6 +216,12 @@ pub const MAIL_ATTACHMENT_SLOTS: usize = 5;
 /// sessions were spent on the wire format before the layout turned out to be the problem.
 pub const MAIL_ATTACHMENT_BASE: usize = 9;
 
+/// How many distinct payloads of one unhandled id are worth reporting.
+///
+/// Enough to read a small field's range off the log, few enough that a packet carrying a
+/// timestamp cannot flood it.
+pub const UNHANDLED_SAMPLES: usize = 8;
+
 /// How much of an unhandled packet is kept for the log.
 ///
 /// Enough for a layout to be read off -- the client's packets are small -- and short enough
@@ -828,12 +834,15 @@ pub struct Session {
     /// move, and the swinger's own client discards it.
     broadcasts: Vec<Vec<u8>>,
 
-    /// Wire ids already reported as unhandled.
+    /// Unhandled packets already reported, as `(wire id, payload)`.
     ///
     /// EntityMoved alone arrives dozens of times a minute, so warning per packet buries every
-    /// other line. Each id is worth seeing once -- it names a gap in the implementation, and
-    /// the second occurrence says nothing the first did not.
-    reported: BTreeSet<u16>,
+    /// other line. But the payload is the reason to look at all: an id names a gap and the
+    /// bytes are what a layout is reconstructed from, and one sample is not a layout. So a
+    /// repeat of the *same* bytes is silent, a new payload for a known id is not, and after
+    /// [`UNHANDLED_SAMPLES`] distinct ones that id goes quiet for good -- a field that moves
+    /// every tick would otherwise report every tick.
+    reported: BTreeSet<(u16, Vec<u8>)>,
 }
 
 impl Session {
@@ -1112,9 +1121,9 @@ impl Session {
         }
     }
 
-    /// Wire ids reported as unhandled, in ascending order. Each is reported once.
-    pub fn reported_unhandled(&self) -> Vec<u16> {
-        self.reported.iter().copied().collect()
+    /// The unhandled packets reported so far, as `(wire id, payload)` in ascending order.
+    pub fn reported_unhandled(&self) -> Vec<(u16, Vec<u8>)> {
+        self.reported.iter().cloned().collect()
     }
 
     pub fn stage(&self) -> Stage {
@@ -1743,7 +1752,14 @@ impl Session {
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
                 // keyed by, and the bytes are what a layout is reconstructed from: an id on its
                 // own says a gap exists, the payload says what is in it.
-                if self.reported.insert(wire_id) {
+                let samples = self
+                    .reported
+                    .iter()
+                    .filter(|(seen, _)| *seen == wire_id)
+                    .count();
+
+                if samples < UNHANDLED_SAMPLES && self.reported.insert((wire_id, payload.clone()))
+                {
                     warn!(
                         wire_id,
                         ordinal = wire_id.saturating_sub(ID_USER_PACKET_ENUM),

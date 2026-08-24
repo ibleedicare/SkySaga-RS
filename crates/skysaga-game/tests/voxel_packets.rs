@@ -775,7 +775,7 @@ fn a_voxel_action_is_not_reported_as_unhandled() {
 
     swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
 
-    assert_eq!(session.reported_unhandled(), Vec::<u16>::new());
+    assert!(session.reported_unhandled().is_empty());
 }
 
 
@@ -875,4 +875,43 @@ fn a_long_payload_is_truncated() {
     };
 
     assert_eq!(payload.len(), skysaga_game::UNKNOWN_PAYLOAD_BYTES);
+}
+
+/// **An id is reported once per distinct payload, not once per id.**
+///
+/// The silencing exists so a client that repeats an unhandled packet every tick does not fill
+/// the log. But while a packet is being reversed the *payload* is the whole point, and one
+/// sample is not a layout: `RequestUnEquipInventoryItem` turned out to be two bytes, and
+/// reading the field meant varying the action and watching the byte change. Repeats of the same
+/// bytes stay quiet; a new payload for a known id is news.
+#[test]
+fn an_unhandled_id_is_reported_again_when_its_payload_differs() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // The same id three times: two identical payloads and one different.
+    session.handle(ClientPacket::parse(&[0x80, 0x11]), &world);
+    session.handle(ClientPacket::parse(&[0x80, 0x11]), &world);
+    session.handle(ClientPacket::parse(&[0x80, 0x22]), &world);
+
+    assert_eq!(
+        session.reported_unhandled().len(),
+        2,
+        "reported: {:?}",
+        session.reported_unhandled(),
+    );
+}
+
+/// ...but not for ever. A field that moves every tick would otherwise report every tick, which
+/// is the flooding the silencing exists to prevent.
+#[test]
+fn a_moving_payload_stops_being_reported() {
+    let world = world();
+    let mut session = playing(&world);
+
+    for byte in 0..64u8 {
+        session.handle(ClientPacket::parse(&[0x80, byte]), &world);
+    }
+
+    assert_eq!(session.reported_unhandled().len(), skysaga_game::UNHANDLED_SAMPLES);
 }
