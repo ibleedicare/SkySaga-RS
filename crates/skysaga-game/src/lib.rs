@@ -899,6 +899,47 @@ impl Session {
     }
 
     /// Read-only access to the model, for serialising an item entity.
+    /// The inventory model, for the few callers that change it directly.
+    ///
+    /// Public for tests and for the admin path; everything a *client* can do goes through a
+    /// packet handler instead, so the model and the packets cannot drift apart.
+    pub fn inventories_mut(&mut self) -> &mut Inventories {
+        &mut self.inventories
+    }
+
+    /// Empty every rucksack square, leaving equipment alone.
+    ///
+    /// **So a driven test can control its own preconditions.** An admin give takes the first
+    /// *free* square, which depends on everything the player did before; after this the next
+    /// give lands in the first square, every time. Equipment is squares 0 to 8 and is not
+    /// touched: a test that wanted an empty bag did not ask to be undressed.
+    pub fn clear_rucksack(&mut self) -> Vec<Effect> {
+        let owner = self.player_entity_id;
+
+        let held: Vec<u32> = self
+            .inventory()
+            .iter()
+            .enumerate()
+            .skip(skysaga_world::inventory::FIRST_RUCKSACK_SLOT as usize)
+            .filter(|(_, item)| **item != 0)
+            .map(|(slot, _)| slot as u32)
+            .collect();
+
+        let mut effects = Vec::new();
+
+        for slot in held {
+            if let Some((_, removed)) = self.inventories.detach(owner, slot) {
+                effects.extend(removed);
+            }
+        }
+
+        if !effects.is_empty() {
+            effects.push(Effect::SlotsChanged { owner });
+        }
+
+        effects
+    }
+
     pub fn inventories(&self) -> &Inventories {
         &self.inventories
     }
@@ -3958,6 +3999,15 @@ impl Session {
     /// panicking. The two ways that happens are a data file with no `BasicInventoryItem`, and
     /// an inventory belonging to something other than this player -- which is what a chest
     /// will be, and is the extension point when containers arrive.
+    /// Carry out effects produced outside a packet handler, and say what to send.
+    ///
+    /// The admin path needs this: [`Self::clear_rucksack`] answers with effects rather than
+    /// packets, because what it changed is the model's business and what to send is the
+    /// session's.
+    pub fn apply_effects(&mut self, effects: Vec<Effect>, world: &World) -> Vec<Vec<u8>> {
+        self.apply(effects, world)
+    }
+
     fn apply(&mut self, effects: Vec<Effect>, world: &World) -> Vec<Vec<u8>> {
         let out: Vec<Vec<u8>> = effects
             .into_iter()

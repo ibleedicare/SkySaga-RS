@@ -475,6 +475,8 @@ impl GameServer {
                 count,
             } => self.give(&account, &item, count),
 
+            AdminCommand::ClearInventory { account } => self.clear_inventory(&account),
+
             AdminCommand::Durability { bits, enabled } => {
                 // Both optional, so either can be changed without disturbing the other.
                 if let Some(bits) = bits {
@@ -622,6 +624,36 @@ impl GameServer {
                 position = ?spawned.position,
                 "spawned a creature",
             );
+        }
+    }
+
+    /// Empty a player's rucksack and tell their client.
+    fn clear_inventory(&mut self, account: &str) {
+        let Some(guid) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.account() == Some(account))
+            .map(|(guid, _)| *guid)
+        else {
+            warn!(%account, "cannot clear: that player is not connected");
+
+            return;
+        };
+
+        let Some(session) = self.sessions.get_mut(&guid) else {
+            return;
+        };
+
+        let effects = session.clear_rucksack();
+
+        if effects.is_empty() {
+            return;
+        }
+
+        info!(%account, "cleared the rucksack");
+
+        for packet in session.apply_effects(effects, &self.world) {
+            self.peer.send(guid, &packet);
         }
     }
 

@@ -39,6 +39,7 @@ pub fn router(token: Option<&str>) -> Router<Api> {
         .route("/admin/mail", post(mail))
         .route("/admin/durability", post(durability))
         .route("/admin/mob", post(mob))
+        .route("/admin/inventory/clear", post(clear_inventory))
 }
 
 /// Whether a request may use the admin API.
@@ -292,6 +293,38 @@ async fn durability(
         queued: true,
         bits: durability.bits,
         enabled: durability.enabled,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Clear {
+    account: String,
+}
+
+/// Empty a player's rucksack, leaving what they are wearing.
+///
+/// **A test fixture, not a feature.** A give takes the first free square, so a driven scenario
+/// that wants to drag the item it just gave has to work out which square that is from a slot
+/// number and a guess about the grid's pitch. Emptying first makes it the first square.
+async fn clear_inventory(
+    State(api): State<Api>,
+    headers: HeaderMap,
+    Json(clear): Json<Clear>,
+) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    api.state.push_command(AdminCommand::ClearInventory {
+        account: clear.account.clone(),
+    });
+
+    Json(Queued {
+        queued: true,
+        account: clear.account,
+        item: String::new(),
+        count: 0,
     })
     .into_response()
 }
