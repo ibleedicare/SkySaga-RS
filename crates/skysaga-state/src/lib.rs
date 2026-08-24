@@ -132,6 +132,12 @@ struct Inner {
     /// Uploaded photos, by the official uuid the game server issued in `PhotoValidated`.
     photos: HashMap<String, Photo>,
 
+    /// Every device the players have put down, by where it stands.
+    ///
+    /// Keyed by position because that is what a device *is* to the store: its entity id is
+    /// minted per run, and one square holds one device.
+    devices: HashMap<[u32; 3], StoredDevice>,
+
     /// Every block the players have changed, by its place in the world.
     ///
     /// The world itself lives on the game thread; this is the copy that outlives it, kept here
@@ -195,6 +201,26 @@ pub enum Change {
     /// is stored as air rather than deleted, because "there is a hole here" is a fact about the
     /// world and the terrain underneath would otherwise grow back.
     Block(StoredBlock),
+
+    /// One device, placed.
+    ///
+    /// Per device rather than per world, for the same reason as a block: a workshop is built
+    /// one anvil at a time and rewriting the lot on each placement would grow with the world.
+    Device(StoredDevice),
+}
+
+/// One device a player put down, as it is stored.
+///
+/// The name and the place, and nothing else. The components come from `Entities.json`, so
+/// storing them would be storing a copy of the data file; the entity id belongs to the run
+/// that minted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDevice {
+    /// An `Entities.json` name, which is also the resource that placed it.
+    pub name: String,
+
+    /// In the client's position units, 1/64 of a voxel.
+    pub position: [u32; 3],
 }
 
 /// One voxel the players have changed, as it is stored.
@@ -435,6 +461,40 @@ impl AppState {
 
         inner.photos.extend(photos);
         inner.inventories.extend(inventories);
+    }
+
+    /// Load the placed devices at startup. Silent, as the rest of `import` is.
+    pub fn import_devices(&self, devices: Vec<StoredDevice>) {
+        let mut inner = self.write();
+
+        for device in devices {
+            inner.devices.insert(device.position, device);
+        }
+    }
+
+    /// Every device the players have put down, for rebuilding a world at startup.
+    pub fn devices(&self) -> Vec<StoredDevice> {
+        let mut devices: Vec<StoredDevice> = self.read().devices.values().cloned().collect();
+
+        // Sorted so two servers holding the same world report it identically.
+        devices.sort_by_key(|device| device.position);
+
+        devices
+    }
+
+    /// Record a device a player placed.
+    pub fn set_device(&self, device: StoredDevice) {
+        {
+            let mut inner = self.write();
+
+            if inner.devices.get(&device.position) == Some(&device) {
+                return;
+            }
+
+            inner.devices.insert(device.position, device.clone());
+        }
+
+        self.record(Change::Device(device));
     }
 
     /// Load the world's changed blocks at startup. Silent, as the rest of `import` is.
