@@ -125,6 +125,7 @@ pub fn world_from_capture() -> World {
         player_template: None,
         item_definition: None,
         durable_item_definition: None,
+        mail_item_definition: None,
 
         // The C# world this capture came from seeds no container -- it reaches one through
         // its /spawn command, which was not used while capturing. An empty list is what that

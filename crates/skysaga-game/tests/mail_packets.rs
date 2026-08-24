@@ -19,7 +19,7 @@ use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::mail::{
     DeleteMail, MailCheck, MailGiftSelected, MailRead, RemoteMailSynced, TakeMailAttachment,
 };
-use skysaga_proto::packets::EntitySync;
+use skysaga_proto::packets::{EntityAdd, EntitySync};
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
 fn world() -> World {
@@ -428,4 +428,180 @@ fn no_mail_packet_is_reported_as_unhandled() {
     }
 
     assert!(session.reported_unhandled().is_empty());
+}
+
+// --- what the client is told about an attachment ------------------------------------------------
+
+/// **A restored inbox announces its attachments.**
+///
+/// The container's slot list names item entities, and a slot naming one the client has never
+/// been told about draws an empty square -- the same failure the rucksack restore exists to
+/// avoid. Reported from a live client: mail arrived with its text and no items.
+#[test]
+fn a_restored_message_announces_its_attachment_items() {
+    let world = world();
+
+    let stored = {
+        let mut session = playing(&world);
+
+        session.compose("A gift", "planks", &[("Wooden_Plank", 24)]);
+
+        session.stored_mail()
+    };
+
+    let mut next = playing(&world);
+
+    let burst = next.restore_mail(&stored, &world);
+
+    let announced: Vec<u32> = burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntityAdd::ID)
+                .then(|| EntityAdd::decode(&mut reader).ok())
+                .flatten()
+        })
+        .map(|entity| entity.id)
+        .collect();
+
+    let mail = next.mail(&stored[0].uuid).expect("the message").clone();
+
+    let items: Vec<u32> = next
+        .inventories()
+        .slots(mail.attachment_entity)
+        .iter()
+        .copied()
+        .filter(|item| *item != 0)
+        .collect();
+
+    assert_eq!(items.len(), 1, "the container came back empty");
+
+    for item in &items {
+        assert!(
+            announced.contains(item),
+            "the attachment {item} was never announced: {announced:?}",
+        );
+    }
+}
+
+/// And so does a freshly composed one, which is the admin `/mail` path.
+#[test]
+fn a_composed_message_can_have_its_attachments_announced() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("A gift", "planks", &[("Wooden_Plank", 24), ("Dirt", 8)]);
+
+    let mail = session.mail(&uuid).expect("the message").clone();
+
+    let items: Vec<u32> = session
+        .inventories()
+        .slots(mail.attachment_entity)
+        .iter()
+        .copied()
+        .filter(|item| *item != 0)
+        .collect();
+
+    assert_eq!(items.len(), 2, "both attachments should be in the container");
+
+    // Every one of them has to be a stack the session can describe, or the server has nothing
+    // to announce it with.
+    for item in items {
+        assert!(
+            session.inventories().item(item).is_some(),
+            "attachment {item} is not a stack",
+        );
+    }
+}
+
+/// **The container itself has to be announced, after the items it holds.**
+///
+/// `mailitemlist` names an attachment container by entity id, and the client resolves that id to
+/// an entity carrying an `InventoryComponent` to read the attachments out of. Announce the items
+/// alone and the id resolves to nothing: the message arrives with its text and no items, which
+/// is exactly what a live client showed. `documentations/mail.md` says it plainly -- the item
+/// entities are created *before* the `EntityAdd` that references them.
+#[test]
+fn the_attachment_container_is_announced_after_its_items() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("A gift", "planks", &[("Wooden_Plank", 24)]);
+
+    let burst = session.announce_attachments(&uuid, &world);
+
+    let added: Vec<u32> = burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntityAdd::ID)
+                .then(|| EntityAdd::decode(&mut reader).ok())
+                .flatten()
+        })
+        .map(|entity| entity.id)
+        .collect();
+
+    let container = session.mail(&uuid).expect("the message").attachment_entity;
+
+    assert!(
+        added.contains(&container),
+        "the container {container} was never announced: {added:?}",
+    );
+
+    let items: Vec<u32> = session
+        .inventories()
+        .slots(container)
+        .iter()
+        .copied()
+        .filter(|item| *item != 0)
+        .collect();
+
+    for item in &items {
+        let item_at = added.iter().position(|id| id == item).expect("the item");
+        let container_at = added.iter().position(|id| *id == container).expect("the container");
+
+        assert!(
+            item_at < container_at,
+            "the container was announced before the item it names",
+        );
+    }
+}
+
+/// A restored message announces its container too: it is a fresh entity either way.
+#[test]
+fn a_restored_message_announces_its_container() {
+    let world = world();
+
+    let stored = {
+        let mut session = playing(&world);
+
+        session.compose("A gift", "planks", &[("Wooden_Plank", 24)]);
+
+        session.stored_mail()
+    };
+
+    let mut next = playing(&world);
+
+    let burst = next.restore_mail(&stored, &world);
+
+    let container = next.mail(&stored[0].uuid).expect("the message").attachment_entity;
+
+    let added: Vec<u32> = burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntityAdd::ID)
+                .then(|| EntityAdd::decode(&mut reader).ok())
+                .flatten()
+        })
+        .map(|entity| entity.id)
+        .collect();
+
+    assert!(
+        added.contains(&container),
+        "a restored container was never announced: {added:?}",
+    );
 }
