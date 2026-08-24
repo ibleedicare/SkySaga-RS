@@ -218,6 +218,18 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         return unauthorised();
     }
 
+    // An item is a hash everywhere downstream, and the hash of a misspelling is a good number
+    // that resolves to nothing: the stack is minted, this endpoint says `queued`, and the client
+    // draws an empty square. Refusing is the only way that is distinguishable from a broken
+    // inventory sync. Nothing is refused while no catalogue has been published.
+    if !api.state.knows_item(&give.item) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(Error { error: "no such item" }),
+        )
+            .into_response();
+    }
+
     api.state.push_command(AdminCommand::Give {
         account: give.account.clone(),
         item: give.item.clone(),

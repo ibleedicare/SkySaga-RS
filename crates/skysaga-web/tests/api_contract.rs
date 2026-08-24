@@ -1051,6 +1051,58 @@ mod admin {
         }
     }
 
+    /// **A name the game does not define is refused here too.**
+    ///
+    /// The chat command refuses one and the game server refuses one, but this is the third door
+    /// into the same room: `skysagactl` and every test harness gives items through it. A hash of
+    /// a misspelling mints a stack the client cannot draw and reports success everywhere, so the
+    /// ask is turned away rather than queued.
+    #[tokio::test]
+    async fn give_refuses_an_item_the_game_does_not_define() {
+        let api = api();
+
+        api.state.set_item_catalogue(["dirt".to_owned()]);
+
+        let (status, body) = api
+            .send(
+                Request::post("/admin/give")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", TOKEN)
+                    .body(Body::from(
+                        json!({"account": "Alice", "item": "Wooden_Plnk"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "no such item");
+        assert!(api.state.take_commands().is_empty(), "nothing was queued");
+    }
+
+    #[tokio::test]
+    async fn give_queues_an_item_the_game_does_define() {
+        let api = api();
+
+        api.state.set_item_catalogue(["dirt".to_owned()]);
+
+        let (status, body) = api
+            .send(
+                Request::post("/admin/give")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", TOKEN)
+                    .body(Body::from(
+                        json!({"account": "Alice", "item": "Dirt", "count": 10}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["queued"], true);
+        assert_eq!(api.state.take_commands().len(), 1);
+    }
+
     /// With no token configured the admin API is not there at all. A server started normally
     /// has no admin surface, rather than one that anybody can call.
     #[tokio::test]

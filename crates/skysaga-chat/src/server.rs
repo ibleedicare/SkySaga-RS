@@ -201,12 +201,29 @@ fn notice(channel: &str, text: &str) -> String {
     format!(":SkySaga!server@{} PRIVMSG {channel} :{text}", crate::dialect::SESSION_SERVER)
 }
 
+/// The reply for an item name the game does not define, or `None` when the name is fine.
+///
+/// **The one thing a queued command can refuse without leaving this process.** A name is a hash
+/// everywhere downstream, and the hash of a misspelling is a perfectly good number that resolves
+/// to no resource: the stack is minted, the log and `/admin/inventory` both report success, and
+/// the client draws an empty square. Refusing here is what makes that impossible to mistake for
+/// a broken inventory sync.
+///
+/// The catalogue is published by whoever loaded `geodata.json`; while it is empty nothing is
+/// refused. See [`AppState::knows_item`].
+fn unknown_item(state: &AppState, name: &str) -> Option<String> {
+    (!state.knows_item(name)).then(|| format!("no such item: {name}"))
+}
+
 /// Carry out a slash command, and say what to tell the player.
 ///
 /// The commands are **queued**, not done here: the world belongs to the game server's thread.
 /// So the reply says what was asked for, not what happened -- claiming an item was given when
 /// the player might not even be connected would be worse than saying nothing.
-fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
+///
+/// Public so the commands can be tested without a socket: what a command replies and what it
+/// queues is the whole of its behaviour, and neither needs a connection to observe.
+pub fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
     let mut parts = text.trim_start_matches('/').split_whitespace();
 
     let Some(verb) = parts.next() else {
@@ -256,6 +273,16 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                 }
             }
 
+            // `Dirt` and `Dirt:10` both name an item; the entity after `@` is an
+            // `Entities.json` name and is not in this catalogue.
+            for word in &loot {
+                let item = word.split_once(':').map_or(word.as_str(), |(item, _)| item);
+
+                if let Some(refusal) = unknown_item(state, item) {
+                    return vec![refusal];
+                }
+            }
+
             state.push_command(AdminCommand::Chest {
                 account: nick.to_owned(),
                 entity: entity.clone(),
@@ -299,6 +326,10 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                 return vec!["usage: /give <item> [count]".to_owned()];
             };
 
+            if let Some(refusal) = unknown_item(state, item) {
+                return vec![refusal];
+            }
+
             let count = parts.next().and_then(|count| count.parse().ok()).unwrap_or(1);
 
             state.push_command(AdminCommand::Give {
@@ -334,6 +365,14 @@ fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                     }
 
                     _ => body.push(word),
+                }
+            }
+
+            // An attachment names an item too, and the same misspelling costs the same hour:
+            // the message arrives with a square the client cannot draw.
+            for (item, _) in &attachments {
+                if let Some(refusal) = unknown_item(state, item) {
+                    return vec![refusal];
                 }
             }
 

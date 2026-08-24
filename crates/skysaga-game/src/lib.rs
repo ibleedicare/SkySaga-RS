@@ -183,6 +183,28 @@ pub const MAIL_ATTACHMENT_BASE: usize = 9;
 /// the run, so the count is the server's to keep.
 pub const DIG_TICKS_TO_BREAK: u32 = 3;
 
+/// Why a request for an item was not granted.
+///
+/// The two are worth telling apart in what the player is told: one is a name the game has never
+/// heard of, and the other is a rucksack they filled themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveRefusal {
+    /// No `Resources` entry has this name. See [`Session::give_checked`].
+    UnknownItem,
+
+    /// Every rucksack square is taken.
+    RucksackFull,
+}
+
+impl std::fmt::Display for GiveRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownItem => write!(f, "no such item"),
+            Self::RucksackFull => write!(f, "the rucksack is full"),
+        }
+    }
+}
+
 /// A packet the client sends. Only the ones the server acts on are named.
 ///
 /// Wire id = ordinal + [`ID_USER_PACKET_ENUM`]; these ordinals come from the client's own
@@ -858,6 +880,27 @@ impl Session {
 
         self.inventories
             .give(self.player_entity_id, slot, skysaga_core::name_hash(item), count)
+    }
+
+    /// Create a stack of `item`, refusing a name the game does not define.
+    ///
+    /// [`Self::give`] hashes whatever it is handed, and the hash of a misspelling is a
+    /// perfectly good number that resolves to no resource: the stack is minted, every
+    /// server-side signal reports success, and the client draws an empty square. This is the
+    /// same thing with the one check that makes that impossible, and it is what the admin
+    /// commands go through. `give` stays unchecked for seeding and for tests, which name items
+    /// as literals.
+    pub fn give_checked(
+        &mut self,
+        item: &str,
+        count: u32,
+        world: &World,
+    ) -> Result<u32, GiveRefusal> {
+        if !world.geodata.knows_resource(item) {
+            return Err(GiveRefusal::UnknownItem);
+        }
+
+        self.give(item, count).ok_or(GiveRefusal::RucksackFull)
     }
 
     /// Whether this session has already been handed back what it was carrying.
