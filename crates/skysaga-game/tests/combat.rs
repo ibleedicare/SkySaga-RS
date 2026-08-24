@@ -509,7 +509,7 @@ fn killing_a_chicken_drops_three_feathers_on_the_floor() {
     // **On the floor, not in the rucksack.** The player has to walk over it.
     assert!(carried(&session).is_empty(), "nothing was handed over");
 
-    assert_eq!(session.floor_drops().len(), 1, "one pickup lying there");
+    assert_eq!(session.floor_drops_in(&world).len(), 1, "one pickup lying there");
 
     // Two entities announced: the stack, then the pickup that names it.
     assert_eq!(added(&replies).len(), 2, "a stack and a pickup");
@@ -529,7 +529,7 @@ fn the_stack_is_announced_before_the_pickup_that_names_it() {
     let replies = swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
     let announced = added(&replies);
-    let drop = session.floor_drops()[0];
+    let drop = session.floor_drops_in(&world)[0];
 
     let stack_at = announced.iter().position(|id| *id == drop.1).expect("the stack");
     let pickup_at = announced.iter().position(|id| *id == drop.0).expect("the pickup");
@@ -547,7 +547,7 @@ fn walking_over_a_drop_collects_it() {
 
     swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
-    let (pickup, _) = session.floor_drops()[0];
+    let (pickup, _) = session.floor_drops_in(&world)[0];
 
     let replies = collect(&mut session, &world, pickup);
 
@@ -557,7 +557,7 @@ fn walking_over_a_drop_collects_it() {
         "three feathers, once collected",
     );
 
-    assert!(session.floor_drops().is_empty(), "the pickup is gone");
+    assert!(session.floor_drops_in(&world).is_empty(), "the pickup is gone");
 
     // The stack was announced when it hit the floor, so this is a slot list and a removal --
     // not a second EntityAdd.
@@ -579,7 +579,7 @@ fn a_drop_can_only_be_collected_once() {
 
     swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
-    let (pickup, _) = session.floor_drops()[0];
+    let (pickup, _) = session.floor_drops_in(&world)[0];
 
     collect(&mut session, &world, pickup);
 
@@ -605,9 +605,9 @@ fn collecting_a_matching_stack_merges_it() {
         swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
     }
 
-    assert_eq!(session.floor_drops().len(), 2, "two piles");
+    assert_eq!(session.floor_drops_in(&world).len(), 2, "two piles");
 
-    for (pickup, _) in session.floor_drops() {
+    for (pickup, _) in session.floor_drops_in(&world) {
         collect(&mut session, &world, pickup);
     }
 
@@ -633,7 +633,7 @@ fn a_sheep_hit_but_not_killed_drops_wool() {
 
     assert_eq!(session.creature_health(sheep, &world), Some(4), "it survived");
 
-    let drops = session.floor_drops();
+    let drops = session.floor_drops_in(&world);
 
     assert_eq!(drops.len(), 1, "one pile of wool");
 
@@ -655,7 +655,7 @@ fn killing_the_sheep_rolls_the_kill_table_instead() {
 
     assert_eq!(session.creature_health(sheep, &world), Some(0));
 
-    for (pickup, _) in session.floor_drops() {
+    for (pickup, _) in session.floor_drops_in(&world) {
         collect(&mut session, &world, pickup);
     }
 
@@ -680,7 +680,7 @@ fn hitting_a_creature_with_no_hit_table_drops_nothing() {
     swing_at(&mut session, &world, "Basic_Stab", knight, in_front());
 
     assert_eq!(session.creature_health(knight, &world), Some(33), "hurt, not dead");
-    assert!(session.floor_drops().is_empty(), "knights do not shear");
+    assert!(session.floor_drops_in(&world).is_empty(), "knights do not shear");
 }
 
 /// An id that is not a pickup does nothing, and does not panic.
@@ -706,7 +706,7 @@ fn killing_something_with_no_loot_table_drops_nothing() {
     }
 
     assert_eq!(session.creature_health(dino, &world), Some(0), "it died");
-    assert!(session.floor_drops().is_empty(), "nothing dropped");
+    assert!(session.floor_drops_in(&world).is_empty(), "nothing dropped");
 }
 
 /// Loot is rolled once, on the blow that kills. Hitting the corpse again yields nothing.
@@ -719,12 +719,12 @@ fn a_corpse_cannot_be_farmed() {
 
     swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
-    let after_the_kill = session.floor_drops().len();
+    let after_the_kill = session.floor_drops_in(&world).len();
 
     swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
     swing_at(&mut session, &world, "Basic_Diagonal", chicken, in_front());
 
-    assert_eq!(session.floor_drops().len(), after_the_kill, "no second helping");
+    assert_eq!(session.floor_drops_in(&world).len(), after_the_kill, "no second helping");
 }
 
 #[test]

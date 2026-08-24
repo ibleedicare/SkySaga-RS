@@ -13,6 +13,7 @@ use skysaga_world::{
     Component, Entity, EntityDefinition, EntityDefinitions,
     HealthComponent, InteractionComponent,
     InventoryComponent, OwnerComponent, PhysicsComponent, PickupComponent, PlayerNameComponent,
+    ResourcePickupComponent,
     TerrainGenerator, TimeOfDayComponent, TransformComponent, VoxelLink, VoxelLinkComponent,
 };
 use std::collections::{HashMap, HashSet};
@@ -145,6 +146,9 @@ pub struct WorldChanges {
     /// is its own maximum minus this.
     damage: HashMap<u32, u32>,
 
+    /// Items lying on the floor, oldest first.
+    drops: Vec<FloorDrop>,
+
     /// Creatures somebody has already killed.
     ///
     /// Kept rather than deleted, because "this one is dead" has to outlive the entity: a
@@ -179,6 +183,28 @@ pub struct PlacedDevice {
     pub name: String,
 
     /// In the client's position units, 1/64 of a voxel.
+    pub position: [u32; 3],
+}
+
+/// An item lying on the floor, as the world knows it.
+///
+/// **Two entities and a fact.** The `Pickup` is what the client fires at and the stack is what
+/// ends up in a square; both ids belong to the world, because a drop one player makes has to be
+/// nameable by every other session. The item and count are kept beside them so a session that
+/// never saw the drop happen can build the stack itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloorDrop {
+    /// The `Pickup` entity the client fires `ResourcePickupAction` at.
+    pub pickup: u32,
+
+    /// The `BasicInventoryItem` it points at, which is what ends up in a slot.
+    pub stack: u32,
+
+    /// The item's name hash.
+    pub item: u32,
+    pub count: u32,
+
+    /// Where it is lying, in position units of 1/64 of a voxel.
     pub position: [u32; 3],
 }
 
@@ -823,6 +849,23 @@ pub fn container_components(
 /// gets three and something that is not a station gets no crafting component at all. A
 /// parameter an entity does not declare is never sent, so the component costs nothing where it
 /// is not wanted -- but leaving it off entirely means a station whose queue can never be shown.
+/// The components of an item lying on the floor.
+///
+/// Built in two places -- where a drop is made, and in the burst that tells a joiner about one
+/// made before they arrived -- and they have to agree, or the same pile is a different entity
+/// on two screens.
+pub fn pickup_components(stack: u32, at: [u32; 3]) -> Vec<Component> {
+    vec![
+        Component::ResourcePickup(ResourcePickupComponent::at(stack, at)),
+        // `size` is the only thing the transform contributes here, and an unset one is
+        // [0,0,0] -- present, collectable, and invisible.
+        Component::Transform(TransformComponent {
+            size: [1, 1, 1],
+            ..Default::default()
+        }),
+    ]
+}
+
 /// Where an entity stands, out of its own transform.
 fn position_of(entity: &Entity) -> Option<[u32; 3]> {
     entity.components.iter().find_map(|component| match component {
@@ -1318,6 +1361,30 @@ impl World {
         self.changes.lock().expect("world lock").dead.insert(id)
     }
 
+    // --- floor drops -----------------------------------------------------------------------
+
+    /// Put an item on the floor, for everybody.
+    pub fn drop_item(&self, drop: FloorDrop) {
+        self.changes.lock().expect("world lock").drops.push(drop);
+    }
+
+    /// Everything lying on the floor.
+    pub fn floor_drops(&self) -> Vec<FloorDrop> {
+        self.changes.lock().expect("world lock").drops.clone()
+    }
+
+    /// Take a drop off the floor, if it is still there.
+    ///
+    /// **The first caller wins.** Two players standing on the same pile both fire at it, and
+    /// the world is what decides that only one of them gets it.
+    pub fn take_floor_drop(&self, pickup: u32) -> Option<FloorDrop> {
+        let mut changes = self.changes.lock().expect("world lock");
+
+        let at = changes.drops.iter().position(|drop| drop.pickup == pickup)?;
+
+        Some(changes.drops.remove(at))
+    }
+
     /// The first entity id nothing is using.
     ///
     /// Past the props the island was built with **and** past the devices restored on top of
@@ -1330,7 +1397,14 @@ impl World {
         let devices = changes.devices.iter().map(|device| device.id).max().unwrap_or(0);
         let creatures = changes.creatures.iter().map(|creature| creature.id).max().unwrap_or(0);
 
-        props.max(devices).max(creatures) + 1
+        let drops = changes
+            .drops
+            .iter()
+            .map(|drop| drop.pickup.max(drop.stack))
+            .max()
+            .unwrap_or(0);
+
+        props.max(devices).max(creatures).max(drops) + 1
     }
 
     /// What the terrain generator produced, before anybody touched it.

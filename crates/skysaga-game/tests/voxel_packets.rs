@@ -209,7 +209,7 @@ fn carried(session: &Session) -> Vec<(String, u32)> {
 fn dig_and_collect(session: &mut Session, world: &World, voxel: [u32; 3]) -> Vec<(String, u32)> {
     dig_through(session, world, voxel);
 
-    for (pickup, _) in session.floor_drops() {
+    for (pickup, _) in session.floor_drops_in(&world) {
         collect(session, world, pickup);
     }
 
@@ -316,7 +316,7 @@ fn swinging_at_open_air_breaks_nothing() {
     let burst = dig_through(&mut session, &world, AIR);
 
     assert!(burst.is_empty(), "the sky gave way: {:?}", edits(&burst));
-    assert!(session.floor_drops().is_empty(), "and dropped something");
+    assert!(session.floor_drops_in(&world).is_empty(), "and dropped something");
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn a_dug_block_leaves_its_item_on_the_floor() {
 
     let burst = dig_through(&mut session, &world, SAND);
 
-    assert_eq!(session.floor_drops().len(), 1, "one pickup lying there");
+    assert_eq!(session.floor_drops_in(&world).len(), 1, "one pickup lying there");
 
     // **On the floor, not in the rucksack**, exactly as creature loot behaves. The player has
     // to walk over it, and the client fires the pickup action itself.
@@ -445,14 +445,14 @@ fn only_one_item_falls_out_however_many_ticks_it_took() {
 
     dig_through(&mut session, &world, SAND);
 
-    assert_eq!(session.floor_drops().len(), 1);
+    assert_eq!(session.floor_drops_in(&world).len(), 1);
 
     // Keep swinging at the hole that is now there. It is air, so nothing more comes out.
     for _ in 0..skysaga_game::DIG_TICKS_TO_BREAK * 2 {
         swing(&mut session, &world, SAND, [0, 1, 0]);
     }
 
-    assert_eq!(session.floor_drops().len(), 1, "the hole kept giving");
+    assert_eq!(session.floor_drops_in(&world).len(), 1, "the hole kept giving");
 }
 
 /// The drop lands in the middle of the hole.
@@ -472,9 +472,9 @@ fn the_drop_lands_in_the_middle_of_the_hole() {
 
     dig_through_hitting(&mut session, &world, SAND, [0, 0, 0]);
 
-    let (pickup, _) = session.floor_drops()[0];
+    let (pickup, _) = session.floor_drops_in(&world)[0];
 
-    assert_eq!(session.floor_drop_position(pickup), Some(centre));
+    assert_eq!(session.floor_drop_position(pickup, &world), Some(centre));
 }
 
 /// And it ignores `hit` entirely, whatever the client puts there.
@@ -494,13 +494,15 @@ fn where_the_tool_struck_does_not_move_the_drop() {
     dig_through_hitting(&mut first, &first_world, SAND, [0, 0, 0]);
     dig_through_hitting(&mut second, &second_world, SAND, [999, 999, 999]);
 
-    let at = |session: &Session| {
-        let (pickup, _) = session.floor_drops()[0];
+    // Each session has its own world here, which is the point: the two digs are the same dig
+    // in two universes, and the drop has to land in the same place in both.
+    let at = |session: &Session, world: &World| {
+        let (pickup, _) = session.floor_drops_in(world)[0];
 
-        session.floor_drop_position(pickup)
+        session.floor_drop_position(pickup, world)
     };
 
-    assert_eq!(at(&first), at(&second));
+    assert_eq!(at(&first, &first_world), at(&second, &second_world));
 }
 
 /// A block that breaks into nothing is a real case, not an error.
@@ -799,10 +801,19 @@ fn a_block_one_player_digs_is_gone_for_the_other() {
         "the world has the hole",
     );
 
+    // The floor is shared too, so what is lying there is the *first* player's block. What
+    // matters is that the second dig adds nothing to it.
+    let on_the_floor = first.floor_drops_in(&world).len();
+
     let burst = dig_through(&mut second, &world, SAND);
 
     assert!(burst.is_empty(), "the second player dug a hole that was already there");
-    assert!(second.floor_drops().is_empty(), "and got a second block out of it");
+
+    assert_eq!(
+        second.floor_drops_in(&world).len(),
+        on_the_floor,
+        "and got a second block out of it",
+    );
 }
 
 /// And a block one player places stands in the other's world too.
@@ -825,5 +836,5 @@ fn a_block_one_player_places_is_there_for_the_other() {
     let burst = dig_through(&mut digger, &world, [4, 21, 4]);
 
     assert!(!burst.is_empty(), "the other player could not dig the new block");
-    assert_eq!(digger.floor_drops().len(), 1, "and it dropped what it was made of");
+    assert_eq!(digger.floor_drops_in(&world).len(), 1, "and it dropped what it was made of");
 }

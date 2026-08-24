@@ -694,8 +694,6 @@ pub struct Session {
     /// swinging is dropped rather than credited to whatever was used last.
     armed: std::collections::HashMap<u32, EquippedAction>,
 
-    /// Items lying on the floor, waiting to be walked over.
-    pickups: Vec<FloorDrop>,
 
     /// What is queued or waiting to be collected, per station, one entry per occupied slot.
     ///
@@ -798,7 +796,6 @@ impl Session {
             spawned: Vec::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
-            pickups: Vec::new(),
             crafting: BTreeMap::new(),
             drop_slots: [0; DROP_SLOTS],
             seen_resources: BTreeSet::new(),
@@ -1184,6 +1181,33 @@ impl Session {
                 for id in since {
                     if let Some((built, definition)) = self.entity_now(id, world) {
                         out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+                    }
+                }
+
+                // ...and anything lying on the floor. Two entities each, **the stack before the
+                // pickup that names it**, and the stack has to exist in this session's own model
+                // before it can be encoded: it was minted in whichever session dropped it.
+                for drop in world.floor_drops() {
+                    self.ensure_stack(&drop);
+
+                    if let Some(stack) = self.inventories.item(drop.stack).cloned() {
+                        if let Some(definition) = world.item_definition() {
+                            let entity = Entity::new(
+                                drop.stack,
+                                vec![Component::InventoryItem(stack)],
+                            );
+
+                            out.push(encode(|w| entity.to_entity_add(definition).encode(w)));
+                        }
+                    }
+
+                    if let Some(definition) = world.definitions.get(PICKUP) {
+                        let entity = Entity::new(
+                            drop.pickup,
+                            world::pickup_components(drop.stack, drop.position),
+                        );
+
+                        out.push(encode(|w| entity.to_entity_add(definition).encode(w)));
                     }
                 }
 
@@ -3241,15 +3265,22 @@ impl Session {
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
-    pub fn floor_drops(&self) -> Vec<(u32, u32)> {
-        self.pickups.iter().map(|drop| (drop.id, drop.item)).collect()
+    ///
+    /// Takes the world because the floor is the world's: see [`World::floor_drops`].
+    pub fn floor_drops_in(&self, world: &World) -> Vec<(u32, u32)> {
+        world
+            .floor_drops()
+            .iter()
+            .map(|drop| (drop.pickup, drop.stack))
+            .collect()
     }
 
     /// Where a floor drop is lying, in position units of 1/64 of a voxel.
-    pub fn floor_drop_position(&self, pickup: u32) -> Option<[u32; 3]> {
-        self.pickups
+    pub fn floor_drop_position(&self, pickup: u32, world: &World) -> Option<[u32; 3]> {
+        world
+            .floor_drops()
             .iter()
-            .find(|drop| drop.id == pickup)
+            .find(|drop| drop.pickup == pickup)
             .map(|drop| drop.position)
     }
 
@@ -3637,29 +3668,50 @@ impl Session {
             return Vec::new();
         };
 
-        let built = Entity::new(
-            id,
-            vec![
-                Component::ResourcePickup(ResourcePickupComponent::at(stack, at)),
-                // `size` is the only thing the transform contributes here, and an unset one is
-                // [0,0,0] -- present, collectable, and invisible.
-                Component::Transform(TransformComponent {
-                    size: [1, 1, 1],
-                    ..Default::default()
-                }),
-            ],
-        );
+        let built = Entity::new(id, world::pickup_components(stack, at));
 
-        out.push(encode(|w| built.to_entity_add(&definition).encode(w)));
+        let announcement = encode(|w| built.to_entity_add(&definition).encode(w));
 
-        self.pickups.push(FloorDrop {
-            id,
-            item: stack,
-            definition,
+        out.push(announcement.clone());
+
+        // **On the world.** A pile of dirt on the ground is on everybody's ground: the other
+        // players have to see it, and whoever walks over it first gets it.
+        world.drop_item(world::FloorDrop {
+            pickup: id,
+            stack,
+            item: skysaga_core::name_hash(item),
+            count,
             position: at,
         });
 
+        // The stack first and the pickup second, to everyone else as well: a pickup naming an
+        // entity the client has not been told about draws nothing at all.
+        self.broadcasts.extend(out.iter().cloned());
+
         out
+    }
+
+    /// Put an item on the floor and answer the `Pickup` entity, for tests and for commands.
+    pub fn drop_item(
+        &mut self,
+        item: &str,
+        count: u32,
+        at: [u32; 3],
+        world: &World,
+    ) -> Option<u32> {
+        self.drop_pickup(item, count, at, world);
+
+        world.floor_drops().last().map(|drop| drop.pickup)
+    }
+
+    /// Make sure this session's model holds the stack a floor drop points at.
+    ///
+    /// A drop another player made was minted in *their* inventory model. The ids belong to the
+    /// world, so the same stack is recreated here under the same id rather than allocated
+    /// afresh; see [`skysaga_world::Inventories::create_loose_with_id`].
+    fn ensure_stack(&mut self, drop: &world::FloorDrop) {
+        self.inventories
+            .create_loose_with_id(drop.stack, drop.item, drop.count);
     }
 
     /// Collect a floor drop into the rucksack.
@@ -3672,12 +3724,17 @@ impl Session {
     /// `EntityAdd`. That is the whole difference between collecting a drop and being given an
     /// item.
     fn collect_pickup(&mut self, pickup: u32, world: &World) -> Vec<Vec<u8>> {
-        let Some(position) = self.pickups.iter().position(|drop| drop.id == pickup) else {
+        // Taken off the floor first, so that two players standing on the same pile cannot both
+        // be handed it: whoever gets here first has it, and the other finds nothing.
+        let Some(drop) = world.take_floor_drop(pickup) else {
             // Not a pickup, or already taken.
             return Vec::new();
         };
 
-        let stack = self.pickups[position].item;
+        // It may be another player's drop, in which case this session has never held the stack.
+        self.ensure_stack(&drop);
+
+        let stack = drop.stack;
 
         let effects = self.inventories.collect(self.player_entity_id, stack);
 
@@ -3685,10 +3742,10 @@ impl Session {
             warn!(pickup, "cannot collect: the rucksack is full");
 
             // Left on the floor deliberately: destroying it would lose the item.
+            world.drop_item(drop);
+
             return Vec::new();
         }
-
-        self.pickups.remove(position);
 
         info!(pickup, stack, "collected");
 
@@ -3977,23 +4034,3 @@ pub struct Spawned {
     pub packets: Vec<Vec<u8>>,
 }
 
-/// An item lying on the floor: the `Pickup` entity, and the stack it names.
-///
-/// Held per session for the same reason as spawned containers and creatures -- the world is
-/// built once, so anything created while the server runs lives here, and a drop one player
-/// makes is not in another player's world.
-#[derive(Debug, Clone)]
-struct FloorDrop {
-    /// The `Pickup` entity the client fires `ResourcePickupAction` at.
-    id: u32,
-
-    /// The `BasicInventoryItem` it points at, which is what ends up in a slot.
-    item: u32,
-
-    /// Kept so the pickup can be re-encoded without looking it up again.
-    #[allow(dead_code)]
-    definition: skysaga_world::EntityDefinition,
-
-    /// Where it is lying, in position units of 1/64 of a voxel.
-    position: [u32; 3],
-}
