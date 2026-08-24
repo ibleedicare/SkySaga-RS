@@ -895,7 +895,7 @@ async fn ratings_and_reports_are_acknowledged() {
 mod admin {
     use super::*;
 
-    use skysaga_state::{PlayerSummary, ServerSnapshot, WorldSummary};
+    use skysaga_state::{AdminCommand, PlayerSummary, ServerSnapshot, WorldSummary};
 
     const TOKEN: &str = "s3cret";
 
@@ -1037,6 +1037,8 @@ mod admin {
         for (path, body) in [
             ("/admin/give", json!({"account": "Alice", "item": "Dirt"})),
             ("/admin/mail", json!({"account": "Alice", "subject": "hi"})),
+            ("/admin/mob", json!({"account": "Alice", "entity": "Knight"})),
+            ("/admin/durability", json!({"bits": 32})),
         ] {
             let (status, _) = api
                 .send(
@@ -1101,6 +1103,68 @@ mod admin {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["queued"], true);
         assert_eq!(api.state.take_commands().len(), 1);
+    }
+
+    /// **Spawning something to fight is the one admin action with no HTTP route**, so combat
+    /// could only be exercised by typing in the chat window -- which cannot be driven, because
+    /// the client takes the typing and refuses the click that sends it.
+    #[tokio::test]
+    async fn mob_queues_a_creature() {
+        let api = api();
+
+        let (status, body) = api
+            .send(
+                Request::post("/admin/mob")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", TOKEN)
+                    .body(Body::from(
+                        json!({"account": "Alice", "entity": "Knight", "count": 2}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["queued"], true);
+
+        assert_eq!(
+            api.state.take_commands(),
+            vec![AdminCommand::Mob {
+                account: "Alice".to_owned(),
+                entity: "Knight".to_owned(),
+                count: 2,
+            }],
+        );
+    }
+
+    /// One by default, and capped: each is an entity nothing removes, so a mistyped count is a
+    /// world full of knights until the server restarts. The same cap the chat command uses.
+    #[tokio::test]
+    async fn mob_defaults_to_one_and_is_capped() {
+        for (asked, expected) in [(None, 1), (Some(0), 1), (Some(50), 10)] {
+            let api = api();
+
+            let mut body = json!({"account": "Alice", "entity": "Knight"});
+
+            if let Some(count) = asked {
+                body["count"] = json!(count);
+            }
+
+            api.send(
+                Request::post("/admin/mob")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", TOKEN)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await;
+
+            let AdminCommand::Mob { count, .. } = api.state.take_commands().remove(0) else {
+                panic!("not a mob command");
+            };
+
+            assert_eq!(count, expected, "asked for {asked:?}");
+        }
     }
 
     /// With no token configured the admin API is not there at all. A server started normally
