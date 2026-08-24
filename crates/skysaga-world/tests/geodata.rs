@@ -340,3 +340,63 @@ fn a_resource_is_known_whatever_its_case() {
     assert!(geo.knows_resource("dirt"));
     assert!(geo.knows_resource("WOODEN_PLANK"));
 }
+
+// --- durability ------------------------------------------------------------------------------
+
+/// **Which items have a durability bar, and it is not the obvious field.**
+///
+/// `PhysicalProperties` is the wrong place: a sword's `Tool_Sword` resolves its `Durability` to
+/// `Tool_Default`, whose health is *zero*. The number lives in `StatTemplates`, reached through
+/// the resource's `StatTemplateName`.
+#[test]
+fn a_tool_carries_the_durability_of_its_stat_template() {
+    let Some(geo) = geodata() else { return };
+
+    // `Sword` 600, `Pick` 1500, `Bow` 500 in build 10414.
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Metal_Sword")), Some(600));
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Metal_Pickaxe")), Some(1500));
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Bow")), Some(500));
+}
+
+/// Armour wears out as well, and is the other half of what the repair square accepts.
+#[test]
+fn armour_is_durable_too() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("MetalArmourHead")), Some(100));
+}
+
+/// **A stack of dirt has no durability bar**, and this is the trap: `Dirt` names the `Voxel`
+/// template, which has a `BaseDurability` of 100 like everything else. Naming a template is not
+/// the test; being a tool or a piece of armour is.
+#[test]
+fn a_material_is_not_durable_even_though_it_names_a_template() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Dirt")), None);
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Wooden_Plank")), None);
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Anvil")), None);
+}
+
+/// A torch is a tool by category and has no template at all, so it falls out on the other test.
+#[test]
+fn an_item_with_no_template_is_not_durable() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Torch")), None);
+    assert_eq!(geo.durability_of(skysaga_core::name_hash("Nothing_At_All")), None);
+}
+
+/// Enough of them to be worth the table, and not so many that the rule has gone wrong.
+#[test]
+fn the_durable_items_are_tools_and_armour() {
+    let Some(geo) = geodata() else { return };
+
+    let durable = geo.durable_items();
+
+    assert!(
+        (40..=120).contains(&durable.len()),
+        "{} durable items, which is not a plausible count for tools and armour",
+        durable.len(),
+    );
+}

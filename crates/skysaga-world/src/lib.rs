@@ -13,7 +13,7 @@ pub mod terrain;
 
 pub use components::{
     CharacterCustomisationComponent, Component, CraftingComponent, CraftingDropSlotsComponent,
-    CraftingSlot, Currency,
+    CraftingSlot, Currency, DurabilityComponent,
     FeatureUnlockComponent, HealthComponent, InteractionComponent, InventoryComponent,
     InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, OwnerComponent, PhysicsComponent,
     PickupComponent, PlayerAspectsComponent, PlayerNameComponent, RecipeBookComponent,
