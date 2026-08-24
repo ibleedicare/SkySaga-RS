@@ -19,7 +19,7 @@
 //! place. [`GeoData::voxel_for_item`] prefers the placeable entry, as the C# does; taking the
 //! first match instead picks a decorative or terrain-only variant.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -124,6 +124,13 @@ pub struct GeoData {
 
     /// Name hash to stack limit, for the items that override the default.
     stack_overrides: HashMap<u32, u32>,
+
+    /// Every `Resources` name, lower-cased: the set of things a player may ask for by name.
+    ///
+    /// A name is hashed everywhere else, and a hash of a misspelling is a perfectly good number
+    /// that resolves to no resource. This is the only place a name can be refused before that
+    /// happens. Sorted rather than hashed so a listing is stable.
+    resource_names: BTreeSet<String>,
 
     /// Name hash to the entity that item places, for the resources that place one.
     ///
@@ -314,6 +321,12 @@ impl GeoData {
             .map(|(position, voxel)| (voxel.index, position))
             .collect();
 
+        let resource_names: BTreeSet<String> = file
+            .resources
+            .iter()
+            .map(|resource| resource.name.to_ascii_lowercase())
+            .collect();
+
         let stack_overrides = file
             .resources
             .iter()
@@ -431,6 +444,7 @@ impl GeoData {
             placeable,
             by_index,
             stack_overrides,
+            resource_names,
             places,
             actions,
             physical,
@@ -456,6 +470,19 @@ impl GeoData {
             by_id,
             jobs: file.jobs.into_iter().map(|job| job.name).collect(),
         })
+    }
+
+    /// Every resource name the game defines, lower-cased and sorted.
+    pub fn resource_names(&self) -> &BTreeSet<String> {
+        &self.resource_names
+    }
+
+    /// Whether `name` is a resource this game knows, ignoring case.
+    ///
+    /// Case is ignored because [`skysaga_core::name_hash`] lower-cases before it hashes, so
+    /// `dirt` and `Dirt` are the same item to everything downstream of here.
+    pub fn knows_resource(&self, name: &str) -> bool {
+        self.resource_names.contains(&name.to_ascii_lowercase())
     }
 
     /// Every job the game defines, by name.

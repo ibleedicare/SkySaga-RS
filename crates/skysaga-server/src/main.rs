@@ -169,6 +169,11 @@ async fn main() -> anyhow::Result<()> {
 
     world.restore_block_edits(&stored_blocks);
 
+    // The names a player may ask for. The chat server reads no data files of its own and has
+    // been listening since before the world existed, so the catalogue is handed to it here;
+    // without it `/give Wooden_Plnk` mints a stack the client cannot draw and says it worked.
+    state.set_item_catalogue(world.geodata.resource_names().iter().cloned());
+
     info!(
         chunks = world.chunks.len(),
         entities = world.entities.len(),

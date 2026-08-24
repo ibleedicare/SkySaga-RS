@@ -1051,3 +1051,42 @@ mod commands {
         assert!(state.take_commands().is_empty());
     }
 }
+
+// --- the item catalogue -----------------------------------------------------------------------
+
+/// The chat server has no data files of its own, and the world is built after it starts. So the
+/// names a player may ask for are published here by whoever loaded them, and read back by the
+/// slash commands.
+mod catalogue {
+    use super::*;
+
+    #[test]
+    fn a_published_name_is_known() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.set_item_catalogue(["Dirt".to_owned(), "Wooden_Plank".to_owned()]);
+
+        assert!(state.knows_item("Dirt"));
+        assert!(state.knows_item("wooden_plank"), "case is not part of the name");
+    }
+
+    #[test]
+    fn a_name_that_was_not_published_is_not_known() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        state.set_item_catalogue(["Dirt".to_owned()]);
+
+        assert!(!state.knows_item("Wooden_Plnk"));
+    }
+
+    /// **An empty catalogue knows everything.** Nothing may publish one: `geodata.json` belongs
+    /// to the game and is not in this repository, and a checkout without it must still be able
+    /// to give items rather than refusing every name as unknown.
+    #[test]
+    fn nothing_is_refused_while_the_catalogue_is_empty() {
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+        assert!(state.knows_item("Wooden_Plnk"));
+        assert!(state.knows_item("anything at all"));
+    }
+}
