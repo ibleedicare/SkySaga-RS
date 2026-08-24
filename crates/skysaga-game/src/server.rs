@@ -475,6 +475,22 @@ impl GameServer {
                 count,
             } => self.give(&account, &item, count),
 
+            AdminCommand::Durability { bits, enabled } => {
+                // Both optional, so either can be changed without disturbing the other.
+                if let Some(bits) = bits {
+                    skysaga_world::components::durability::set_bits(bits);
+                }
+
+                if let Some(enabled) = enabled {
+                    crate::set_durable_items(enabled);
+                }
+
+                info!(
+                    bits = skysaga_world::components::durability::bits(),
+                    "durability encoding changed",
+                );
+            }
+
             AdminCommand::Mail {
                 account,
                 subject,

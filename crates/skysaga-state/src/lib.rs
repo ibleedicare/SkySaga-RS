@@ -325,6 +325,19 @@ pub enum AdminCommand {
         attachments: Vec<(String, u32)>,
     },
 
+    /// Change how durable items are written, while the server runs.
+    ///
+    /// **A measuring instrument, not a setting.** The bit widths of `durability` and
+    /// `durabilitymax` are not known: nothing has ever written one, so they have to be swept
+    /// against a live client, and a restart between attempts costs a minute of loading screen.
+    /// Both fields are optional so either can be changed alone.
+    Durability {
+        /// How many bits each of the two numbers is written with.
+        bits: Option<u32>,
+        /// Whether tools are minted as `DurableInventoryItem` at all.
+        enabled: Option<bool>,
+    },
+
     /// Turn the `hasbeenopened` raise on a container close on or off.
     ///
     /// A diagnostic lever rather than a feature: the flag is documented as the close signal,

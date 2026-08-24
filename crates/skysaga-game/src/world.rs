@@ -64,6 +64,13 @@ pub struct World {
     /// `BasicInventoryItem`, for stacks created while the server runs.
     pub item_definition: Option<EntityDefinition>,
 
+    /// `DurableInventoryItem`, for the ones that wear out.
+    ///
+    /// A tool is a different entity from a stack of dirt: it carries a
+    /// `clientdurabilitycomponent`, and the repair square's own test is whether the item it is
+    /// handed resolves one. See [`crate::durable_items_enabled`].
+    pub durable_item_definition: Option<EntityDefinition>,
+
     /// The game's own tables: which block an item places, what a broken one drops, how large
     /// a stack may be.
     ///
@@ -272,6 +279,11 @@ impl World {
     /// one needs its definition to know which parameters to write.
     pub fn item_definition(&self) -> Option<&EntityDefinition> {
         self.item_definition.as_ref()
+    }
+
+    /// The definition for a stack that wears out, if the data file has one.
+    pub fn durable_item_definition(&self) -> Option<&EntityDefinition> {
+        self.durable_item_definition.as_ref()
     }
 
     /// The container with this entity id, if it is one.
@@ -742,6 +754,7 @@ impl World {
             transfer_port: config.game_port,
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
+            durable_item_definition: definitions.get("DurableInventoryItem").cloned(),
             geodata,
             definitions: definitions.clone(),
             changes: Arc::new(Mutex::new(WorldChanges::default())),

@@ -141,6 +141,45 @@ fn craft_notification_enabled() -> bool {
     std::env::var("SKYSAGA_CRAFT_NOTIFICATION").as_deref() != Ok("0")
 }
 
+/// Whether tools and armour are minted as `DurableInventoryItem`.
+///
+/// **Off by default, and the reason is the wire format rather than the feature.** The widths of
+/// `durability` and `durabilitymax` are not known: no capture carries one and the C# oracle
+/// never wrote one. They are sync indices 1 and 2 against `inventoryslotdata`'s 5, so a wrong
+/// width shifts the slot data and every rucksack square draws wrong. Turn it on with
+/// `SKYSAGA_DURABLE_ITEMS=1` to sweep the width in front of a client; see
+/// `skysaga_world::components::durability`.
+fn durable_items_enabled() -> bool {
+    match DURABLE_ITEMS.load(std::sync::atomic::Ordering::Relaxed) {
+        UNSET => {
+            let from_env = std::env::var("SKYSAGA_DURABLE_ITEMS").as_deref() == Ok("1");
+
+            set_durable_items(from_env);
+
+            from_env
+        }
+
+        state => state == ON,
+    }
+}
+
+/// Turn durable items on or off while the server is running.
+///
+/// Runtime rather than start-up, because the point is to *sweep*: the width has to be tried,
+/// looked at in the client, and tried again, and a restart between each costs a minute of
+/// loading screen. Pairs with `skysaga_world::components::durability::set_bits`.
+pub fn set_durable_items(on: bool) {
+    DURABLE_ITEMS.store(if on { ON } else { OFF }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Three states, because "not asked yet" has to be told apart from "asked, and off": the
+/// environment is read once, on the first question, and a later call may still override it.
+const UNSET: u8 = 0;
+const ON: u8 = 1;
+const OFF: u8 = 2;
+
+static DURABLE_ITEMS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNSET);
+
 /// Whether to send `NewResourceEncountered` (43), the discovery popup. See above.
 fn discovery_toasts_enabled() -> bool {
     std::env::var("SKYSAGA_DISCOVERY_TOASTS").as_deref() != Ok("0")
@@ -3945,18 +3984,77 @@ impl Session {
         entity: u32,
         world: &'a World,
     ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
+        let component = self.inventories.item(entity)?;
+
+        // A tool is a different *entity* from a stack of dirt: it carries a durability
+        // component, and the repair square refuses anything that does not resolve one.
+        if let Some(durability) = self.durability_of(entity, world) {
+            if let Some(definition) = world.durable_item_definition() {
+                return Some((
+                    Entity::new(
+                        entity,
+                        vec![
+                            Component::Durability(durability),
+                            Component::InventoryItem(component.clone()),
+                        ],
+                    ),
+                    definition,
+                ));
+            }
+        }
+
         let definition = world.item_definition().or_else(|| {
             warn!("BasicInventoryItem is not defined; cannot serialise a stack");
 
             None
         })?;
 
-        let component = self.inventories.item(entity)?;
-
         Some((
             Entity::new(entity, vec![Component::InventoryItem(component.clone())]),
             definition,
         ))
+    }
+
+    /// How worn the stack in `entity` is, or `None` if it is not the kind of thing that wears.
+    ///
+    /// A stack is a fresh item every time one is minted, so the numbers come straight from the
+    /// data: a sword is a sword. Wear that a player has *done* is not modelled yet, which is
+    /// the next thing repair needs.
+    pub fn durability_of(
+        &self,
+        entity: u32,
+        world: &World,
+    ) -> Option<skysaga_world::DurabilityComponent> {
+        if !durable_items_enabled() {
+            return None;
+        }
+
+        let name = self.inventories.name(entity)?;
+
+        world
+            .geodata
+            .durability_of(name)
+            .map(skysaga_world::DurabilityComponent::new)
+    }
+
+    /// Create a stack and say what the client must be told, for tests and for probes.
+    ///
+    /// `give` alone changes the model and sends nothing; this is the pair, which is what the
+    /// admin path does.
+    pub fn give_announced(&mut self, item: &str, count: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(entity) = self.give(item, count) else {
+            return Vec::new();
+        };
+
+        self.apply(
+            vec![
+                Effect::ItemCreated { entity },
+                Effect::SlotsChanged {
+                    owner: self.player_entity_id,
+                },
+            ],
+            world,
+        )
     }
 }
 

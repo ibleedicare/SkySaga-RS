@@ -37,6 +37,7 @@ pub fn router(token: Option<&str>) -> Router<Api> {
         .route("/admin/inventory/{account}", get(inventory))
         .route("/admin/give", post(give))
         .route("/admin/mail", post(mail))
+        .route("/admin/durability", post(durability))
 }
 
 /// Whether a request may use the admin API.
@@ -241,6 +242,55 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         account: give.account,
         item: give.item,
         count: give.count,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Durability {
+    /// How many bits `durability` and `durabilitymax` are written with, 1 to 32.
+    bits: Option<u32>,
+    /// Whether tools are minted as `DurableInventoryItem` at all.
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct DurabilityQueued {
+    queued: bool,
+    bits: Option<u32>,
+    enabled: Option<bool>,
+}
+
+/// Change how durable items are written, without restarting.
+///
+/// **This is a measuring instrument.** The widths of the two durability numbers were never
+/// captured from a real server, and they sit at sync indices 1 and 2 with `inventoryslotdata`
+/// at 5, so a wrong width shifts the slot data and the rucksack square draws wrong. That makes
+/// the square itself the oracle: set a width, give a sword, look. A restart between attempts
+/// would cost a minute of loading screen each time.
+///
+/// ```text
+/// curl -X POST -H 'x-admin-token: drive' -H 'content-type: application/json' \
+///      -d '{"enabled":true,"bits":17}' http://127.0.0.1:5164/admin/durability
+/// ```
+async fn durability(
+    State(api): State<Api>,
+    headers: HeaderMap,
+    Json(durability): Json<Durability>,
+) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    api.state.push_command(AdminCommand::Durability {
+        bits: durability.bits,
+        enabled: durability.enabled,
+    });
+
+    Json(DurabilityQueued {
+        queued: true,
+        bits: durability.bits,
+        enabled: durability.enabled,
     })
     .into_response()
 }
