@@ -8,7 +8,9 @@
 //! docs for why that is preferred to sqlx's `Any`.
 
 use async_trait::async_trait;
-use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem};
+use skysaga_state::{
+    AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem, StoredMail,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -62,6 +64,26 @@ CREATE TABLE IF NOT EXISTS devices (
     z    INTEGER NOT NULL,
     name TEXT NOT NULL,
     PRIMARY KEY (x, y, z)
+);
+
+CREATE TABLE IF NOT EXISTS mail (
+    account  TEXT NOT NULL
+             REFERENCES accounts(key) ON DELETE CASCADE,
+    uuid     TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    body     TEXT NOT NULL,
+    flags    INTEGER NOT NULL,
+    ordinal  INTEGER NOT NULL,
+    PRIMARY KEY (account, uuid)
+);
+
+CREATE TABLE IF NOT EXISTS mail_attachments (
+    account  TEXT NOT NULL,
+    uuid     TEXT NOT NULL,
+    slot     INTEGER NOT NULL,
+    item     INTEGER NOT NULL,
+    count    INTEGER NOT NULL,
+    PRIMARY KEY (account, uuid, slot)
 );
 
 CREATE TABLE IF NOT EXISTS inventories (
@@ -194,6 +216,55 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
+        // The inbox, and then what is attached to each message. Two queries rather than a join:
+        // a message with no attachments is ordinary, and a join would have to describe that.
+        let mut mail: Vec<(String, Vec<StoredMail>)> = Vec::new();
+
+        for row in sqlx::query(
+            "SELECT account, uuid, subject, body, flags FROM mail ORDER BY account, ordinal",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let account: String = row.try_get("account")?;
+
+            let message = StoredMail {
+                uuid: row.try_get("uuid")?,
+                subject: row.try_get("subject")?,
+                body: row.try_get("body")?,
+                flags: row.try_get::<i64, _>("flags")? as u8,
+                attachments: Vec::new(),
+            };
+
+            match mail.last_mut() {
+                Some((held, messages)) if *held == account => messages.push(message),
+                _ => mail.push((account, vec![message])),
+            }
+        }
+
+        for row in sqlx::query(
+            "SELECT account, uuid, slot, item, count FROM mail_attachments
+             ORDER BY account, uuid, slot",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let account: String = row.try_get("account")?;
+            let uuid: String = row.try_get("uuid")?;
+
+            let attachment = StoredItem {
+                slot: row.try_get::<i64, _>("slot")? as u32,
+                item: row.try_get::<i64, _>("item")? as u32,
+                count: row.try_get::<i64, _>("count")? as u32,
+            };
+
+            if let Some((_, messages)) = mail.iter_mut().find(|(held, _)| *held == account) {
+                if let Some(message) = messages.iter_mut().find(|message| message.uuid == uuid) {
+                    message.attachments.push(attachment);
+                }
+            }
+        }
+
         let mut inventories: Vec<(String, Vec<StoredItem>)> = Vec::new();
 
         for row in sqlx::query(
@@ -239,6 +310,7 @@ impl Store for SqliteStore {
             inventories,
             blocks,
             devices,
+            mail,
         })
     }
 
@@ -344,6 +416,55 @@ impl Store for SqliteStore {
         .bind(block.material as i64)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    async fn save_mail(&self, account: &str, mail: &[StoredMail]) -> Result<(), StoreError> {
+        // Delete then insert, in one transaction, for the same reason as an inventory: a
+        // message deleted has to disappear, and an upsert cannot express that.
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM mail WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        sqlx::query("DELETE FROM mail_attachments WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for (ordinal, message) in mail.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO mail (account, uuid, subject, body, flags, ordinal)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(account)
+            .bind(&message.uuid)
+            .bind(&message.subject)
+            .bind(&message.body)
+            .bind(message.flags as i64)
+            .bind(ordinal as i64)
+            .execute(&mut *transaction)
+            .await?;
+
+            for attachment in &message.attachments {
+                sqlx::query(
+                    "INSERT INTO mail_attachments (account, uuid, slot, item, count)
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(account)
+                .bind(&message.uuid)
+                .bind(attachment.slot as i64)
+                .bind(attachment.item as i64)
+                .bind(attachment.count as i64)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+
+        transaction.commit().await?;
 
         Ok(())
     }

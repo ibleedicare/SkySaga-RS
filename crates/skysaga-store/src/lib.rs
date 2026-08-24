@@ -22,7 +22,9 @@
 use async_trait::async_trait;
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::customisation::CustomisationData;
-use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem};
+use skysaga_state::{
+    AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem, StoredMail,
+};
 use uuid::Uuid;
 
 mod persistence;
@@ -59,6 +61,8 @@ pub struct Snapshot {
     pub blocks: Vec<StoredBlock>,
     /// Every device the players have put down.
     pub devices: Vec<StoredDevice>,
+    /// What each account had in its inbox, by lowercased account name.
+    pub mail: Vec<(String, Vec<StoredMail>)>,
 }
 
 /// Durable storage for the things a player would be upset to lose.
@@ -95,6 +99,9 @@ pub trait Store: Send + Sync + 'static {
 
     /// Record one device a player placed, replacing whatever stood in that place.
     async fn save_device(&self, device: &StoredDevice) -> Result<(), StoreError>;
+
+    /// Record an account's whole inbox, replacing whatever was stored for it.
+    async fn save_mail(&self, account: &str, mail: &[StoredMail]) -> Result<(), StoreError>;
 }
 
 /// Encode an appearance for storage.

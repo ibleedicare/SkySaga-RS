@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
-use skysaga_state::{AppState, CredentialPolicy, StoredBlock, StoredDevice, StoredItem};
+use skysaga_state::{
+    AppState, CredentialPolicy, StoredBlock, StoredDevice, StoredItem, StoredMail,
+};
 use skysaga_store::{Persistence, SqliteStore, Store};
 
 fn appearance() -> CustomisationData {
@@ -359,4 +361,97 @@ async fn a_device_replaced_in_the_same_place_is_stored_once() {
         store.load().await.expect("loads").devices,
         vec![StoredDevice { name: "Workbench".to_owned(), position }],
     );
+}
+
+/// A message with an attachment survives a restart.
+///
+/// The attachment is stored by **name and count**, not by entity: a message's container and the
+/// stacks inside it are minted per run, exactly as a rucksack's are.
+#[tokio::test]
+async fn an_inbox_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let inbox = vec![
+        StoredMail {
+            uuid: "one".to_owned(),
+            subject: "Welcome".to_owned(),
+            body: "Have some planks".to_owned(),
+            flags: 1,
+            attachments: vec![StoredItem { slot: 9, item: 7, count: 12 }],
+        },
+        StoredMail {
+            uuid: "two".to_owned(),
+            subject: "Nothing attached".to_owned(),
+            body: String::new(),
+            flags: 0,
+            attachments: Vec::new(),
+        },
+    ];
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").expect("signs in");
+
+        settle().await;
+
+        state.set_mail("Alice", inbox.clone());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+
+    assert_eq!(
+        store.load().await.expect("loads").mail,
+        vec![("alice".to_owned(), inbox)],
+    );
+}
+
+/// Deleting a message makes it gone, which an upsert could not express.
+#[tokio::test]
+async fn a_deleted_message_stays_deleted() {
+    let (_guard, url) = database_url();
+
+    let two = vec![
+        StoredMail {
+            uuid: "one".to_owned(),
+            subject: "One".to_owned(),
+            body: String::new(),
+            flags: 0,
+            attachments: vec![StoredItem { slot: 9, item: 7, count: 1 }],
+        },
+        StoredMail {
+            uuid: "two".to_owned(),
+            subject: "Two".to_owned(),
+            body: String::new(),
+            flags: 0,
+            attachments: Vec::new(),
+        },
+    ];
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").expect("signs in");
+
+        settle().await;
+
+        state.set_mail("Alice", two.clone());
+
+        settle().await;
+
+        state.set_mail("Alice", two[1..].to_vec());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let loaded = store.load().await.expect("loads").mail;
+
+    assert_eq!(loaded, vec![("alice".to_owned(), two[1..].to_vec())]);
 }

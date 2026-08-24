@@ -14,7 +14,7 @@
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::BitReader;
 use skysaga_proto::packets::{EntityAdd, EntitySync};
-use skysaga_state::StoredItem;
+use skysaga_state::{StoredItem, StoredMail};
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
 fn world() -> World {
@@ -150,4 +150,139 @@ fn a_rucksack_survives_being_written_down_and_read_back() {
     next.restore_items(&carried, &world);
 
     assert_eq!(next.carried_items(), carried);
+}
+
+// --- the mailbox -------------------------------------------------------------------------------
+
+/// Mail is the last thing a player would expect to lose, and the awkward one to store.
+///
+/// A message is mostly text, but its **attachments are item entities inside a container
+/// entity**, exactly as a chest's loot is. Neither id means anything tomorrow, so what is
+/// written down is the message and what the container holds, and the next session builds both
+/// again.
+#[test]
+fn what_is_in_the_inbox_is_reported() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("Welcome", "Have some planks", &[("Wooden_Plank", 12)]);
+
+    let stored = session.stored_mail();
+
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].uuid, uuid);
+    assert_eq!(stored[0].subject, "Welcome");
+    assert_eq!(stored[0].body, "Have some planks");
+
+    assert_eq!(
+        stored[0].attachments,
+        vec![StoredItem {
+            slot: skysaga_game::MAIL_ATTACHMENT_BASE as u32,
+            item: skysaga_core::name_hash("Wooden_Plank"),
+            count: 12,
+        }],
+        "the attachment is stored by name and count, not by entity",
+    );
+}
+
+#[test]
+fn an_empty_inbox_reports_nothing() {
+    let world = world();
+    let session = playing(&world);
+
+    assert!(session.stored_mail().is_empty());
+}
+
+/// A message that has been read stays read, which is the flag the client draws the envelope
+/// from.
+#[test]
+fn whether_a_message_was_read_is_kept() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("Hello", "there", &[]);
+
+    session.mark_mail_read(&uuid);
+
+    assert_ne!(session.stored_mail()[0].flags, 0, "the read flag was lost");
+}
+
+/// The round trip: what one session reports is what the next one holds.
+#[test]
+fn a_mailbox_survives_being_written_down_and_read_back() {
+    let world = world();
+
+    let stored = {
+        let mut session = playing(&world);
+
+        session.compose("One", "first", &[("Dirt", 5)]);
+        session.compose("Two", "second", &[]);
+
+        session.stored_mail()
+    };
+
+    let mut next = playing(&world);
+
+    next.restore_mail(&stored, &world);
+
+    assert_eq!(next.stored_mail(), stored);
+}
+
+/// **The attachments have to be real again.** A restored message whose container holds nothing
+/// draws an empty attachment row, and taking one hands the player nothing.
+#[test]
+fn a_restored_attachment_can_still_be_taken() {
+    let world = world();
+
+    let stored = {
+        let mut session = playing(&world);
+
+        session.compose("Gift", "for you", &[("Wooden_Plank", 12)]);
+
+        session.stored_mail()
+    };
+
+    let mut next = playing(&world);
+
+    next.restore_mail(&stored, &world);
+
+    let mail = next.mail(&stored[0].uuid).expect("the message came back").clone();
+
+    let held: Vec<u32> = next
+        .inventories()
+        .slots(mail.attachment_entity)
+        .iter()
+        .copied()
+        .filter(|item| *item != 0)
+        .collect();
+
+    assert_eq!(held.len(), 1, "the container came back empty");
+
+    assert_eq!(
+        next.inventories().count(held[0]),
+        Some(12),
+        "the attachment lost its count",
+    );
+}
+
+/// Restoring into a mailbox that already holds something does nothing: the join path cannot be
+/// sure it runs once, and a second restore would double every message.
+#[test]
+fn restoring_mail_twice_does_not_duplicate() {
+    let world = world();
+
+    let stored = {
+        let mut session = playing(&world);
+
+        session.compose("One", "first", &[]);
+
+        session.stored_mail()
+    };
+
+    let mut next = playing(&world);
+
+    next.restore_mail(&stored, &world);
+    next.restore_mail(&stored, &world);
+
+    assert_eq!(next.stored_mail().len(), 1);
 }

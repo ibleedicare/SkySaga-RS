@@ -144,6 +144,9 @@ struct Inner {
     /// so that a restart, which builds a fresh world, has something to put back.
     blocks: HashMap<([u32; 3], [u32; 3]), StoredBlock>,
 
+    /// Each account's inbox, by lowercased account name.
+    mail: HashMap<String, Vec<StoredMail>>,
+
     /// What each account is carrying, by lowercased account name.
     ///
     /// Written by the game thread as it changes and read back when that account next joins.
@@ -188,6 +191,16 @@ pub enum Change {
     Character { account: String, character: Character },
     DeleteCharacter { account: String },
     Photo { id: String, photo: Photo },
+
+    /// A whole inbox, for one account.
+    ///
+    /// The whole thing rather than the message that changed, for the same reason as a rucksack:
+    /// reading one and deleting another are both ordinary, and a per-message change would have
+    /// to describe deletions. An inbox is a handful of rows.
+    Mail {
+        account: String,
+        mail: Vec<StoredMail>,
+    },
 
     /// What an account is carrying, in full.
     ///
@@ -236,6 +249,25 @@ pub struct StoredBlock {
     /// The `geodata.json` voxel index standing there now. 255 is air, which is what a dig
     /// leaves behind.
     pub material: u8,
+}
+
+/// One message in a player's inbox, as it is stored.
+///
+/// The text, the flags, and **what the attachments are** rather than which entities they were:
+/// a message's attachment container and the item entities inside it are minted per run, exactly
+/// as a rucksack's stacks are, so what survives is the name and the count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMail {
+    /// The uuid the client knows the message by. Stable across restarts, unlike the entities.
+    pub uuid: String,
+    pub subject: String,
+    pub body: String,
+
+    /// Read, gift offered, gift chosen. See `skysaga_game::Mail`.
+    pub flags: u8,
+
+    /// What is attached, by square. The squares are the container's, which start at 9.
+    pub attachments: Vec<StoredItem>,
 }
 
 /// A view of what the game server is doing right now.
@@ -486,6 +518,37 @@ impl AppState {
 
         inner.photos.extend(photos);
         inner.inventories.extend(inventories);
+    }
+
+    /// Load the stored inboxes at startup. Silent, as the rest of `import` is.
+    pub fn import_mail(&self, mail: Vec<(String, Vec<StoredMail>)>) {
+        self.write().mail.extend(mail);
+    }
+
+    /// What an account had in its inbox when it last played.
+    pub fn mail(&self, account: &str) -> Vec<StoredMail> {
+        self.read()
+            .mail
+            .get(&account.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record an account's inbox.
+    pub fn set_mail(&self, account: &str, mail: Vec<StoredMail>) {
+        let key = account.trim().to_ascii_lowercase();
+
+        {
+            let mut inner = self.write();
+
+            if inner.mail.get(&key).is_some_and(|held| *held == mail) {
+                return;
+            }
+
+            inner.mail.insert(key.clone(), mail.clone());
+        }
+
+        self.record(Change::Mail { account: key, mail });
     }
 
     /// Load the placed devices at startup. Silent, as the rest of `import` is.
