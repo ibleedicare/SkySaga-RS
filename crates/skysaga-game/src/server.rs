@@ -112,13 +112,10 @@ impl GameServer {
             "game server listening",
         );
 
-        let next_entity_id = world
-            .entities
-            .iter()
-            .map(|entity| entity.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        // Past the props *and* past anything restored on top of them: a restored anvil holds
+        // an id, and handing it out again would have the client destroy the anvil and build
+        // something else under the same number.
+        let next_entity_id = world.next_entity_id();
 
         Ok(Self {
             peer,
@@ -165,6 +162,7 @@ impl GameServer {
         self.restore_inventories();
         self.record_inventories();
         self.record_blocks();
+        self.record_devices();
 
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
@@ -212,6 +210,19 @@ impl GameServer {
                 chunk: edit.chunk,
                 voxel: edit.voxel,
                 material: edit.material,
+            });
+        }
+    }
+
+    /// Write down the devices players have put down since the last tick.
+    ///
+    /// The same shape as [`Self::record_blocks`], and drained from the world for the same
+    /// reason: the world is a value on this thread and persistence lives at the edge.
+    fn record_devices(&mut self) {
+        for device in self.world.take_unsaved_devices() {
+            self.state.set_device(skysaga_state::StoredDevice {
+                name: device.name,
+                position: device.position,
             });
         }
     }

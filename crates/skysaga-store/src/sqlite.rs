@@ -8,7 +8,7 @@
 //! docs for why that is preferred to sqlx's `Any`.
 
 use async_trait::async_trait;
-use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredItem};
+use skysaga_state::{AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS blocks (
     voxel_z  INTEGER NOT NULL,
     material INTEGER NOT NULL,
     PRIMARY KEY (chunk_x, chunk_y, chunk_z, voxel_x, voxel_y, voxel_z)
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+    x    INTEGER NOT NULL,
+    y    INTEGER NOT NULL,
+    z    INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (x, y, z)
 );
 
 CREATE TABLE IF NOT EXISTS inventories (
@@ -170,6 +178,22 @@ impl Store for SqliteStore {
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
 
+        let devices = sqlx::query("SELECT x, y, z, name FROM devices ORDER BY x, y, z")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok(StoredDevice {
+                    name: row.try_get("name")?,
+                    position: [
+                        row.try_get::<i64, _>("x")? as u32,
+                        row.try_get::<i64, _>("y")? as u32,
+                        row.try_get::<i64, _>("z")? as u32,
+                    ],
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+
         let mut inventories: Vec<(String, Vec<StoredItem>)> = Vec::new();
 
         for row in sqlx::query(
@@ -214,6 +238,7 @@ impl Store for SqliteStore {
             photos,
             inventories,
             blocks,
+            devices,
         })
     }
 
@@ -317,6 +342,21 @@ impl Store for SqliteStore {
         .bind(block.voxel[1] as i64)
         .bind(block.voxel[2] as i64)
         .bind(block.material as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn save_device(&self, device: &StoredDevice) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO devices (x, y, z, name) VALUES (?, ?, ?, ?)
+             ON CONFLICT(x, y, z) DO UPDATE SET name = excluded.name",
+        )
+        .bind(device.position[0] as i64)
+        .bind(device.position[1] as i64)
+        .bind(device.position[2] as i64)
+        .bind(&device.name)
         .execute(&self.pool)
         .await?;
 

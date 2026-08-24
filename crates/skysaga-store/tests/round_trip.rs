@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
-use skysaga_state::{AppState, CredentialPolicy, StoredBlock, StoredItem};
+use skysaga_state::{AppState, CredentialPolicy, StoredBlock, StoredDevice, StoredItem};
 use skysaga_store::{Persistence, SqliteStore, Store};
 
 fn appearance() -> CustomisationData {
@@ -305,4 +305,58 @@ async fn changing_a_block_twice_stores_the_latest() {
     let store = open(&url).await;
 
     assert_eq!(store.load().await.expect("loads").blocks, vec![dig]);
+}
+
+/// A workshop is still standing tomorrow.
+///
+/// Devices are stored by **where they stand**, not by entity id: an id is minted per run and
+/// means nothing at the next start, while a position is the fact worth keeping. One device per
+/// position, so putting another anvil on the same square replaces it rather than colliding.
+#[tokio::test]
+async fn a_placed_device_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let anvil = StoredDevice { name: "Anvil".to_owned(), position: [4096, 1152, 4096] };
+    let barrel = StoredDevice { name: "Barrel_A".to_owned(), position: [4160, 1152, 4096] };
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.set_device(anvil.clone());
+        state.set_device(barrel.clone());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(snapshot.devices, vec![anvil, barrel]);
+}
+
+#[tokio::test]
+async fn a_device_replaced_in_the_same_place_is_stored_once() {
+    let (_guard, url) = database_url();
+
+    let position = [4096, 1152, 4096];
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.set_device(StoredDevice { name: "Anvil".to_owned(), position });
+        state.set_device(StoredDevice { name: "Workbench".to_owned(), position });
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+
+    assert_eq!(
+        store.load().await.expect("loads").devices,
+        vec![StoredDevice { name: "Workbench".to_owned(), position }],
+    );
 }

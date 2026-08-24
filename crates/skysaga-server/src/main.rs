@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
             photos = snapshot.photos.len(),
             inventories = snapshot.inventories.len(),
             blocks = snapshot.blocks.len(),
+            devices = snapshot.devices.len(),
             "loaded stored state",
         );
 
@@ -93,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
 
         state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
         state.import_blocks(snapshot.blocks);
+        state.import_devices(snapshot.devices);
 
         state
     };
@@ -169,6 +171,19 @@ async fn main() -> anyhow::Result<()> {
 
     world.restore_block_edits(&stored_blocks);
 
+    // ...and the workshops they built. Rebuilt from `Entities.json` by name, since a device's
+    // components are the data file's and its entity id belonged to the run that minted it.
+    let stored_devices: Vec<skysaga_game::PlacedDevice> = state
+        .devices()
+        .into_iter()
+        .map(|device| skysaga_game::PlacedDevice {
+            name: device.name,
+            position: device.position,
+        })
+        .collect();
+
+    world.restore_devices(&stored_devices, &definitions);
+
     // The names a player may ask for. The chat server reads no data files of its own and has
     // been listening since before the world existed, so the catalogue is handed to it here;
     // without it `/give Wooden_Plnk` mints a stack the client cannot draw and says it worked.
@@ -178,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
         chunks = world.chunks.len(),
         entities = world.entities.len(),
         blocks = stored_blocks.len(),
+        devices = stored_devices.len(),
         "built the home island",
     );
 
