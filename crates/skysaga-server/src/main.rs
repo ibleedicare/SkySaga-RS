@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
             inventories = snapshot.inventories.len(),
             blocks = snapshot.blocks.len(),
             devices = snapshot.devices.len(),
+            inboxes = snapshot.mail.len(),
             "loaded stored state",
         );
 
@@ -95,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
         state.import_blocks(snapshot.blocks);
         state.import_devices(snapshot.devices);
+        state.import_mail(snapshot.mail);
 
         state
     };

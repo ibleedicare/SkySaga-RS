@@ -17,7 +17,7 @@
 //! client settles it, `SKYSAGA_DURABLE_ITEMS=1` turns this on and the default is unchanged.
 
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
-use skysaga_proto::bitstream::{BitReader, BitWriter};
+use skysaga_proto::bitstream::BitReader;
 use skysaga_proto::packets::EntityAdd;
 use skysaga_world::{default_entities_path, EntityDefinitions};
 

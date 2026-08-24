@@ -160,7 +160,9 @@ impl GameServer {
         }
 
         self.restore_inventories();
+        self.restore_mailboxes();
         self.record_inventories();
+        self.record_mailboxes();
         self.record_blocks();
         self.record_devices();
 
@@ -196,6 +198,59 @@ impl GameServer {
             }
 
             session.mark_items_restored();
+        }
+    }
+
+    /// Give a player back the inbox they had when they last played.
+    ///
+    /// After the handshake, exactly as the rucksack is: a restored message's attachments are
+    /// fresh item entities and the client has to be told about them, which cannot happen inside
+    /// the entity burst.
+    fn restore_mailboxes(&mut self) {
+        let restores: Vec<(Guid, Vec<skysaga_state::StoredMail>)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.stage() == crate::Stage::Playing)
+            .filter(|(_, session)| !session.mail_restored())
+            .filter_map(|(guid, session)| {
+                let account = session.account()?;
+
+                Some((*guid, self.state.mail(account)))
+            })
+            .collect();
+
+        for (guid, mail) in restores {
+            let Some(session) = self.sessions.get_mut(&guid) else {
+                continue;
+            };
+
+            session.reserve_ids_from(self.next_entity_id);
+
+            for packet in session.restore_mail(&mail, &self.world) {
+                self.peer.send(guid, &packet);
+            }
+
+            self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
+
+            session.mark_mail_restored();
+        }
+    }
+
+    /// Write down each player's inbox, when it changes.
+    fn record_mailboxes(&mut self) {
+        let changed: Vec<(String, Vec<skysaga_state::StoredMail>)> = self
+            .sessions
+            .values_mut()
+            .filter_map(|session| {
+                let mail = session.mail_to_record()?;
+                let account = session.account()?.to_owned();
+
+                Some((account, mail))
+            })
+            .collect();
+
+        for (account, mail) in changed {
+            self.state.set_mail(&account, mail);
         }
     }
 

@@ -72,7 +72,7 @@ use skysaga_world::geodata::EquippedAction;
 use skysaga_world::loot::Seeded;
 use skysaga_world::inventory::{Effect, Inventories, StackLimits};
 use skysaga_world::{
-    Component, Entity, HealthComponent, ResourcePickupComponent, TransformComponent,
+    Component, Entity, HealthComponent,
 };
 use tracing::{debug, info, warn};
 
@@ -736,6 +736,12 @@ pub struct Session {
     /// This player's inbox.
     mailbox: Vec<Mail>,
 
+    /// Whether the stored inbox has been handed back yet. See [`Session::restore_mail`].
+    mail_restored: bool,
+
+    /// The inbox as last written down, so a quiet tick reports nothing.
+    recorded_mail: Option<Vec<skysaga_state::StoredMail>>,
+
     /// Packets to send that no client packet asked for -- the mail doorbell, so far.
     notifications: Vec<Vec<u8>>,
 
@@ -887,6 +893,8 @@ impl Session {
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
+            mail_restored: false,
+            recorded_mail: None,
             notifications: Vec::new(),
             account: None,
             reported: BTreeSet::new(),
@@ -2012,15 +2020,26 @@ impl Session {
     /// restored, because the client reacts to a *change* and would ignore being told the same
     /// id twice.
     fn open_container(&mut self, target: u32, world: &World) -> Vec<Vec<u8>> {
-        let Some(container) = self.container(target, world).cloned() else {
-            debug!(target, "not a container; nothing to open");
+        // A chest the world seeded, a chest a command spawned, **or a device a player put
+        // down** -- the last of which lives on the world rather than on this session, and was
+        // missed here when devices moved: every placed anvil and mailbox answered "not a
+        // container" and refused to open. Reported from a live client, on a mailbox.
+        let is_loot_chest = match self.container(target, world) {
+            Some(container) => container.is_loot_chest,
 
-            return Vec::new();
+            // A device has an X button, so it is re-opened rather than toggled; see below.
+            None if world.device(target).is_some() => false,
+
+            None => {
+                debug!(target, "not a container; nothing to open");
+
+                return Vec::new();
+            }
         };
 
         let opening = self.using_entity != target;
 
-        if !opening && !container.is_loot_chest {
+        if !opening && !is_loot_chest {
             // Re-open. Two syncs rather than one: the client ignores being told the id it
             // already holds, so it has to see 0 and then the id again.
             //
@@ -2959,6 +2978,136 @@ impl Session {
         }));
 
         uuid
+    }
+
+    /// Mark a message read, for tests and for anything that is not the client saying so.
+    pub fn mark_mail_read(&mut self, uuid: &str) {
+        if let Some(mail) = self.mail_mut(uuid) {
+            mail.set_read();
+        }
+    }
+
+    /// This player's inbox, as it is written down.
+    ///
+    /// The text and the flags, plus **what** each attachment is rather than which entity it
+    /// was: the container and the stacks inside it are minted per run, exactly as a rucksack's
+    /// are. See [`skysaga_state::StoredMail`].
+    pub fn stored_mail(&self) -> Vec<skysaga_state::StoredMail> {
+        self.mailbox
+            .iter()
+            .map(|mail| skysaga_state::StoredMail {
+                uuid: mail.uuid.clone(),
+                subject: mail.subject.clone(),
+                body: mail.body.clone(),
+                flags: mail.flags,
+                attachments: self
+                    .inventories
+                    .slots(mail.attachment_entity)
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| **item != 0)
+                    .filter_map(|(slot, item)| {
+                        let stack = self.inventories.item(*item)?;
+
+                        Some(skysaga_state::StoredItem {
+                            slot: slot as u32,
+                            item: stack.slot_data.name?,
+                            count: stack.slot_data.count,
+                        })
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Put a stored inbox back, and say what the client must be told.
+    ///
+    /// Each message gets a **fresh** container and fresh item entities, because the stored ones
+    /// belonged to the run that made them. The uuid is kept: that is what the client names a
+    /// message by, and what its "take this attachment" packet refers to.
+    ///
+    /// Does nothing when the inbox already holds something, since the join path cannot be sure
+    /// it runs exactly once and a second restore would double every message.
+    pub fn restore_mail(
+        &mut self,
+        stored: &[skysaga_state::StoredMail],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        if stored.is_empty() || !self.mailbox.is_empty() {
+            return Vec::new();
+        }
+
+        let mut effects = Vec::new();
+
+        for message in stored {
+            let container = self.inventories.next_entity_id();
+            self.inventories.reserve_ids_from(container + 1);
+
+            self.inventories
+                .open(container, MAIL_ATTACHMENT_SLOTS + MAIL_ATTACHMENT_BASE);
+
+            for attachment in &message.attachments {
+                if let Some(entity) = self.inventories.give(
+                    container,
+                    attachment.slot,
+                    attachment.item,
+                    attachment.count,
+                ) {
+                    self.inventories.reserve_ids_from(self.inventories.next_entity_id());
+
+                    // The client is told about the stack itself, or the container's slot list
+                    // names an entity it has never heard of and the row draws empty.
+                    effects.push(Effect::ItemCreated { entity });
+                }
+            }
+
+            self.mailbox.push(Mail {
+                uuid: message.uuid.clone(),
+                subject: message.subject.clone(),
+                body: message.body.clone(),
+                attachment_entity: container,
+                flags: message.flags,
+            });
+        }
+
+        info!(messages = stored.len(), "restored the inbox");
+
+        let mut out = self.apply(effects, world);
+
+        // ...and the inbox itself, which is what draws the rows.
+        out.extend(self.sync_mailbox(world));
+
+        out
+    }
+
+    /// Whether this session has already been handed back its inbox.
+    pub fn mail_restored(&self) -> bool {
+        self.mail_restored
+    }
+
+    /// Say that it has, so a later tick does not do it again.
+    pub fn mark_mail_restored(&mut self) {
+        self.mail_restored = true;
+    }
+
+    /// The inbox to write down, or `None` when nothing has changed since the last time.
+    ///
+    /// The same shape as [`Self::items_to_record`], and for the same reason: a quiet tick costs
+    /// one walk of a handful of messages and takes no lock.
+    pub fn mail_to_record(&mut self) -> Option<Vec<skysaga_state::StoredMail>> {
+        if !self.mail_restored {
+            return None;
+        }
+
+        let mail = self.stored_mail();
+
+        if self.recorded_mail.as_ref() == Some(&mail) {
+            return None;
+        }
+
+        self.recorded_mail = Some(mail.clone());
+
+        Some(mail)
     }
 
     /// Packets the server should send that no client packet asked for.

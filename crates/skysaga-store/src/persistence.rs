@@ -79,5 +79,7 @@ async fn apply(store: &dyn Store, change: &Change) -> Result<(), crate::StoreErr
         Change::Block(block) => store.save_block(block).await,
 
         Change::Device(device) => store.save_device(device).await,
+
+        Change::Mail { account, mail } => store.save_mail(account, mail).await,
     }
 }
