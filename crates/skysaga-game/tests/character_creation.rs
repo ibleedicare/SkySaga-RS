@@ -293,7 +293,7 @@ fn a_repeated_unhandled_packet_is_reported_once() {
 
     // 236 = EntityMoved, which we do not implement yet.
     for _ in 0..50 {
-        let out = session.handle(ClientPacket::Unknown(236), &world);
+        let out = session.handle(ClientPacket::from_wire_id(236), &world);
 
         assert!(out.is_empty(), "unhandled packets are not answered");
     }
@@ -301,7 +301,7 @@ fn a_repeated_unhandled_packet_is_reported_once() {
     assert_eq!(session.reported_unhandled(), &[236]);
 
     // A different id is still reported.
-    session.handle(ClientPacket::Unknown(240), &world);
+    session.handle(ClientPacket::from_wire_id(240), &world);
 
     assert_eq!(session.reported_unhandled(), &[236, 240]);
 }

@@ -216,6 +216,12 @@ pub const MAIL_ATTACHMENT_SLOTS: usize = 5;
 /// sessions were spent on the wire format before the layout turned out to be the problem.
 pub const MAIL_ATTACHMENT_BASE: usize = 9;
 
+/// How much of an unhandled packet is kept for the log.
+///
+/// Enough for a layout to be read off -- the client's packets are small -- and short enough
+/// that one line stays one line.
+pub const UNKNOWN_PAYLOAD_BYTES: usize = 24;
+
 /// How many dig ticks break a block.
 ///
 /// From the C#. The client streams one packet per tick and every field is identical across
@@ -415,7 +421,12 @@ pub enum ClientPacket {
     TakeMailAttachment(TakeMailAttachment),
 
     /// Anything else, by wire id.
-    Unknown(u16),
+    /// A packet this server does not handle, with the bytes it arrived as.
+    ///
+    /// The payload is kept because an unhandled id is a reversing lead and the id alone is not
+    /// enough: the layout is reconstructed from what the client actually sent. Truncated to
+    /// [`UNKNOWN_PAYLOAD_BYTES`], since this exists to be read in a log line.
+    Unknown { wire_id: u16, payload: Vec<u8> },
 }
 
 impl ClientPacket {
@@ -426,11 +437,19 @@ impl ClientPacket {
     ///
     /// A body that fails to decode falls back to `Unknown` rather than panicking -- these are
     /// bytes from an untrusted peer.
+    /// An unhandled packet, keeping the first [`UNKNOWN_PAYLOAD_BYTES`] of it.
+    fn unknown(wire_id: u16, bytes: &[u8]) -> Self {
+        Self::Unknown {
+            wire_id,
+            payload: bytes.iter().take(UNKNOWN_PAYLOAD_BYTES).copied().collect(),
+        }
+    }
+
     pub fn parse(bytes: &[u8]) -> Self {
         let mut reader = BitReader::from_bytes(bytes);
 
         let Ok(id) = reader.read_packet_id() else {
-            return Self::Unknown(0);
+            return Self::unknown(0, bytes);
         };
 
         let wire_id = id + ID_USER_PACKET_ENUM;
@@ -438,162 +457,170 @@ impl ClientPacket {
         match id {
             SaveCharacterName::ID => SaveCharacterName::decode(&mut reader)
                 .map(Self::SaveCharacterName)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             CreateHomeworld::ID => CreateHomeworld::decode(&mut reader)
                 .map(Self::CreateHomeworld)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             SetCharacterCustomisationData::ID => SetCharacterCustomisationData::decode(&mut reader)
                 .map(Self::SetCharacterCustomisation)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             NotifyPhotoCaptured::ID => NotifyPhotoCaptured::decode(&mut reader)
                 .map(Self::NotifyPhotoCaptured)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             InventoryItemTransferToSlot::ID => InventoryItemTransferToSlot::decode(&mut reader)
                 .map(Self::InventoryItemTransferToSlot)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             InventoryItemSwap::ID => InventoryItemSwap::decode(&mut reader)
                 .map(Self::InventoryItemSwap)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             InventoryItemTransferAll::ID => InventoryItemTransferAll::decode(&mut reader)
                 .map(Self::InventoryItemTransferAll)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             InventoryItemDestroy::ID => InventoryItemDestroy::decode(&mut reader)
                 .map(Self::InventoryItemDestroy)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RequestEquipInventoryItem::ID => RequestEquipInventoryItem::decode(&mut reader)
                 .map(Self::RequestEquipInventoryItem)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RequestUiSettingsSlotChange::ID => RequestUiSettingsSlotChange::decode(&mut reader)
                 .map(Self::RequestUiSettingsSlotChange)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RequestUiSettingsSetActiveSlot::ID => {
                 RequestUiSettingsSetActiveSlot::decode(&mut reader)
                     .map(Self::RequestUiSettingsSetActiveSlot)
-                    .unwrap_or(Self::Unknown(wire_id))
+                    .unwrap_or(Self::unknown(wire_id, bytes))
             }
 
             EntityMoved::ID => EntityMoved::decode(&mut reader)
                 .map(Self::EntityMoved)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             SetLookAtDirection::ID => SetLookAtDirection::decode(&mut reader)
                 .map(Self::SetLookAtDirection)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             ExecuteEntityAction::ID => ExecuteEntityAction::decode(&mut reader)
                 .map(Self::ExecuteEntityAction)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             InteractWithEntity::ID => InteractWithEntity::decode(&mut reader)
                 .map(Self::InteractWithEntity)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
                 .map(Self::PerformVoxelActions)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             QueueRecipeOnEntity::ID => QueueRecipeOnEntity::decode(&mut reader)
                 .map(Self::QueueRecipeOnEntity)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             CollectCraftedItemInSlot::ID => CollectCraftedItemInSlot::decode(&mut reader)
                 .map(Self::CollectCraftedItemInSlot)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             CraftingQueryQueue::ID => CraftingQueryQueue::decode(&mut reader)
                 .map(Self::CraftingQueryQueue)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             MoveItemToCraftingDropSlot::ID => MoveItemToCraftingDropSlot::decode(&mut reader)
                 .map(Self::MoveItemToCraftingDropSlot)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RemoveItemFromCraftingDropSlot::ID => {
                 RemoveItemFromCraftingDropSlot::decode(&mut reader)
                     .map(Self::RemoveItemFromCraftingDropSlot)
-                    .unwrap_or(Self::Unknown(wire_id))
+                    .unwrap_or(Self::unknown(wire_id, bytes))
             }
 
             PerformCraftingDropSlotAction::ID => PerformCraftingDropSlotAction::decode(&mut reader)
                 .map(Self::PerformCraftingDropSlotAction)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             TodoListTaskAdd::ID => TodoListTaskAdd::decode(&mut reader)
                 .map(Self::TodoListTaskAdd)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             TodoListTaskRef::ERASE => TodoListTaskRef::decode(&mut reader)
                 .map(Self::TodoListTaskErase)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             TodoListTaskRef::REMOVE => TodoListTaskRef::decode(&mut reader)
                 .map(Self::TodoListTaskRemove)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             TodoListTaskRef::READD => TodoListTaskRef::decode(&mut reader)
                 .map(Self::TodoListTaskReAdd)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             EquippedItemUsed::ID => EquippedItemUsed::decode(&mut reader)
                 .map(Self::EquippedItemUsed)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             PerformEntityActions::ID => PerformEntityActions::decode(&mut reader)
                 .map(Self::PerformEntityActions)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             StopUsingEquippedItem::ID => StopUsingEquippedItem::decode(&mut reader)
                 .map(Self::StopUsingEquippedItem)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             SetPlayerState::ID => SetPlayerState::decode(&mut reader)
                 .map(Self::SetPlayerState)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             PlayerDodged::ID => PlayerDodged::decode(&mut reader)
                 .map(Self::PlayerDodged)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             MailCheck::ID => MailCheck::decode(&mut reader)
                 .map(Self::MailCheck)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             MailRead::ID => MailRead::decode(&mut reader)
                 .map(Self::MailRead)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             MailGiftSelected::ID => MailGiftSelected::decode(&mut reader)
                 .map(Self::MailGiftSelected)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             DeleteMail::ID => DeleteMail::decode(&mut reader)
                 .map(Self::DeleteMail)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             RequestChatChannelData::ID => RequestChatChannelData::decode(&mut reader)
                 .map(Self::RequestChatChannelData)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
             TakeMailAttachment::ID => TakeMailAttachment::decode(&mut reader)
                 .map(Self::TakeMailAttachment)
-                .unwrap_or(Self::Unknown(wire_id)),
+                .unwrap_or(Self::unknown(wire_id, bytes)),
 
-            _ => Self::from_wire_id(wire_id),
+            _ => Self::from_wire_id_with(wire_id, bytes),
         }
     }
 
     /// Classify by *wire* id alone, for the body-less handshake packets.
+    ///
+    /// The payload-carrying form is [`Self::from_wire_id_with`]; this one is for callers that
+    /// have an id and no bytes, which is every test that names a handshake step.
     pub fn from_wire_id(wire_id: u16) -> Self {
+        Self::from_wire_id_with(wire_id, &[])
+    }
+
+    /// The same, keeping the bytes when the packet turns out to be one nothing handles.
+    pub fn from_wire_id_with(wire_id: u16, bytes: &[u8]) -> Self {
         match wire_id {
             135 => Self::ClientConnected,
             136 => Self::ClientReadyToSync,
@@ -607,7 +634,7 @@ impl ClientPacket {
             }
             id if id == RequestRespawn::ID + ID_USER_PACKET_ENUM => Self::RequestRespawn,
 
-            other => Self::Unknown(other),
+            other => Self::unknown(other, bytes),
         }
     }
 }
@@ -1711,14 +1738,16 @@ impl Session {
                 self.claim_attachment(&packet.message_uuid, &packet.item_uuid, world)
             }
 
-            (ClientPacket::Unknown(wire_id), _) => {
+            (ClientPacket::Unknown { wire_id, payload }, _) => {
                 // An unimplemented packet is the usual reason a client stalls, so it is worth
                 // seeing -- but only once per id. Ordinal is what the documentation tables are
-                // keyed by.
+                // keyed by, and the bytes are what a layout is reconstructed from: an id on its
+                // own says a gap exists, the payload says what is in it.
                 if self.reported.insert(wire_id) {
                     warn!(
                         wire_id,
                         ordinal = wire_id.saturating_sub(ID_USER_PACKET_ENUM),
+                        bytes = %payload.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
                         "unhandled client packet (further occurrences silenced)",
                     );
                 }

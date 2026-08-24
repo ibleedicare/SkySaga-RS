@@ -838,3 +838,41 @@ fn a_block_one_player_places_is_there_for_the_other() {
     assert!(!burst.is_empty(), "the other player could not dig the new block");
     assert_eq!(digger.floor_drops_in(&world).len(), 1, "and it dropped what it was made of");
 }
+
+// --- unhandled packets carry their bytes -----------------------------------------------------
+
+/// **An unhandled packet is a reversing lead, and the id alone is not enough.**
+///
+/// The id says which row of the documentation to read; the payload says what the client
+/// actually sent, which is what a layout is reconstructed from. `RequestUnEquipInventoryItem`
+/// was found this way: the e2e run reported wire 148 and nothing else, and reading its bytes is
+/// the difference between "there is a gap" and "here is the packet".
+#[test]
+fn an_unhandled_packet_keeps_its_payload() {
+    // A first byte nothing claims, whatever follows it.
+    let bytes = vec![0x80, 0x11, 0x22, 0x33, 0x44];
+
+    let ClientPacket::Unknown { wire_id, payload } = ClientPacket::parse(&bytes) else {
+        panic!("0xf0 is not a packet this server handles");
+    };
+
+    assert!(wire_id > 0, "the id is still reported: {wire_id}");
+    assert_eq!(payload, bytes, "the bytes are kept as they arrived, id included");
+}
+
+/// A payload is truncated rather than kept whole: this exists to be read in a log line, and a
+/// chunk sync would drown it.
+#[test]
+fn a_long_payload_is_truncated() {
+    // The same leading bytes as the test above, so it is the same unhandled id, then filler.
+    let bytes: Vec<u8> = vec![0x80, 0x11, 0x22, 0x33, 0x44]
+        .into_iter()
+        .chain(std::iter::repeat(0xaa).take(200))
+        .collect();
+
+    let ClientPacket::Unknown { payload, .. } = ClientPacket::parse(&bytes) else {
+        panic!("unhandled");
+    };
+
+    assert_eq!(payload.len(), skysaga_game::UNKNOWN_PAYLOAD_BYTES);
+}
