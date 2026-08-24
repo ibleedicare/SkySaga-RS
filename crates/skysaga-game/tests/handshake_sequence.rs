@@ -31,7 +31,7 @@ fn drive(session: &mut Session, world: &World, packet: ClientPacket) -> Vec<Vec<
     session.handle(packet, world)
 }
 
-/// Everything the C# also sent, in order — this server's deliberate additions removed.
+/// Everything the C# also sent, in order, this server's deliberate additions removed.
 ///
 /// # Why the capture is not the whole spec
 ///
@@ -40,8 +40,8 @@ fn drive(session: &mut Session, world: &World, packet: ClientPacket) -> Vec<Vec<
 /// unrepresented here whether the client wanted it or not.
 ///
 /// `TimeSync` (57) is exactly that case. Neither server ever sent it, so the client's clock
-/// stayed at its startup state — counting milliseconds since launch rather than since the
-/// epoch — and every real timestamp read as far in its future. That froze every craft at 0%.
+/// stayed at its startup state, counting milliseconds since launch rather than since the
+/// epoch, and every real timestamp read as far in its future. That froze every craft at 0%.
 /// Sending it is a fix, so the parity tests record it as a known divergence rather than
 /// treating the C#'s omission as correct.
 fn without_deliberate_additions(packets: &[Vec<u8>]) -> Vec<Vec<u8>> {

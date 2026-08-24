@@ -269,6 +269,48 @@ impl Inventories {
         vec![Effect::SlotsChanged { owner }]
     }
 
+    /// Take the stack in `slot` out of the inventory, leaving the entity itself alive.
+    ///
+    /// The inverse of [`Self::collect`], and the move a crafting drop slot needs: the item
+    /// leaves the rucksack but the client must go on knowing the entity, because the drop-slot
+    /// parameter names it by id. Destroying and re-creating it instead would announce a second
+    /// entity for the same object, which is the shape that faults the client's recompute.
+    ///
+    /// `None` when the square is empty or there is no such square.
+    pub fn detach(&mut self, owner: u32, slot: u32) -> Option<(u32, Vec<Effect>)> {
+        let entity = self.slot(owner, slot).filter(|item| *item != 0)?;
+
+        self.slots.get_mut(&owner)?[slot as usize] = 0;
+
+        Some((entity, vec![Effect::SlotsChanged { owner }]))
+    }
+
+    /// Take `count` off a loose stack, destroying it when nothing is left.
+    ///
+    /// For consuming something that is not in anybody's rucksack -- the item on a dismantle
+    /// square. Empty when the stack does not exist or is too small, and **nothing is taken** in
+    /// that case: a partial consumption would leave the player having paid for a dismantle that
+    /// did not happen.
+    pub fn consume_loose(&mut self, entity: u32, count: u32) -> Vec<Effect> {
+        let Some(stack) = self.items.get_mut(&entity) else {
+            return Vec::new();
+        };
+
+        if stack.slot_data.count < count {
+            return Vec::new();
+        }
+
+        stack.slot_data.count -= count;
+
+        if stack.slot_data.count == 0 {
+            self.items.remove(&entity);
+
+            return vec![Effect::ItemRemoved { entity }];
+        }
+
+        vec![Effect::ItemChanged { entity }]
+    }
+
     pub fn first_free_rucksack_slot(&self, owner: u32) -> Option<u32> {
         self.slots
             .get(&owner)?

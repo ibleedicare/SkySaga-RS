@@ -142,6 +142,26 @@ impl GameServer {
             self.apply(command);
         }
 
+        // **Every tick, not only after a packet arrives.**
+        //
+        // A session queues packets nobody asked for -- the mail doorbell, and a craft
+        // announcing that its timer has run out -- and draining them only inside `drain` ties
+        // them to the client saying something first. A player standing still with a crafting
+        // panel open sends *nothing*: no movement, no state, no query. Their craft finished,
+        // the announcement sat in the queue, and the panel waited for a packet that could only
+        // be sent once the panel let go. Observed live, on a camp fire.
+        for (guid, packets) in self
+            .sessions
+            .iter_mut()
+            .map(|(guid, session)| (*guid, session.take_notifications()))
+            .filter(|(_, packets)| !packets.is_empty())
+            .collect::<Vec<_>>()
+        {
+            for packet in packets {
+                self.peer.send(guid, &packet);
+            }
+        }
+
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
     }

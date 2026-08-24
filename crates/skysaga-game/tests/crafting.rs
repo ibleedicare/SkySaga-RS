@@ -88,6 +88,15 @@ fn collect(session: &mut Session, world: &World, slot: u32) -> Vec<Vec<u8>> {
     )
 }
 
+/// Whether the burst says an item is ready.
+fn announced(burst: &[Vec<u8>]) -> bool {
+    use skysaga_proto::packets::crafting::CraftingNotification;
+
+    burst.iter().any(|bytes| {
+        BitReader::from_bytes(bytes).read_packet_id().ok() == Some(CraftingNotification::ID)
+    })
+}
+
 /// Whether the burst refuses the craft.
 fn refused(burst: &[Vec<u8>]) -> bool {
     burst
@@ -286,16 +295,17 @@ fn collecting_nothing_is_harmless() {
     assert!(collect(&mut session, &world, 11).is_empty());
 }
 
-/// A queued craft is announced, or the player is never told it finished.
+/// A finished craft is announced, and **not before it finishes**.
 ///
-/// The craft completes the instant it is queued — the slot's timer is a *start* time and zero
-/// reads as long past, so the client's `FUN_008a7fa0` returns a progress of 1.0 — but nothing
-/// else points at the finished slot. `CraftingNotification` is what draws the "your item is
-/// ready" element, and without it a working craft looks like one that did nothing.
+/// `CraftingNotification` is what draws the "your item is ready" element. It is a toast rather
+/// than a state change -- the client decides for itself when a slot is collectable, from the
+/// slot's start time -- so without it a working craft looks like one that did nothing, and with
+/// it too early the player is told their item is ready a full recipe's duration before it is.
+///
+/// This server did announce at queue time, which was right only while every craft still
+/// completed instantly.
 #[test]
-fn a_queued_craft_announces_itself() {
-    use skysaga_proto::packets::crafting::CraftingNotification;
-
+fn a_craft_announces_itself_when_it_finishes() {
     let world = world();
     let mut session = playing(&world);
 
@@ -303,12 +313,35 @@ fn a_queued_craft_announces_itself() {
 
     let burst = craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
 
+    assert!(!announced(&burst), "announced before it was made");
+
     assert!(
-        burst.iter().any(|bytes| {
-            BitReader::from_bytes(bytes).read_packet_id().ok() == Some(CraftingNotification::ID)
-        }),
+        !announced(&session.take_notifications()),
+        "announced a second into a three-second craft",
+    );
+
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+
+    assert!(
+        announced(&session.take_notifications()),
         "the craft finished in silence",
     );
+}
+
+/// And once only, or the toast reappears on every packet the player sends.
+#[test]
+fn a_finished_craft_is_announced_once() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+
+    assert!(announced(&session.take_notifications()));
+    assert!(!announced(&session.take_notifications()), "announced twice");
 }
 
 /// A refused craft announces nothing.
@@ -665,9 +698,14 @@ fn an_anvil_recipe_cannot_be_made_by_hand() {
     assert!(refused(&burst), "an anvil recipe was hand-crafted");
 }
 
-/// ...and neither is the reverse: an anvil will not do the work of a pair of hands.
+/// A hand recipe **is** served at a station, because that is what the client asks for.
+///
+/// Observed live: with an anvil's window open, the client queued `Hand_Craft_Torch` against the
+/// *anvil's* entity id. The hand-crafting panel addresses whichever station is open rather than
+/// the player's own entity, so insisting the two agree refuses every hand recipe the moment the
+/// player stands at an anvil. A pair of hands is available at an anvil as much as anywhere.
 #[test]
-fn a_hand_recipe_cannot_be_made_at_an_anvil() {
+fn a_hand_recipe_is_served_at_a_station_too() {
     let world = world();
     let mut session = playing(&world);
 
@@ -677,7 +715,43 @@ fn a_hand_recipe_cannot_be_made_at_an_anvil() {
 
     let burst = craft_at(&mut session, &world, anvil, "Hand_Craft_Carved_Stone_Piece");
 
-    assert!(refused(&burst), "the anvil crafted by hand");
+    assert!(!refused(&burst), "a torch at an anvil was refused");
+
+    // Queued where the client asked, or its panel watches a queue that never fills.
+    assert_eq!(session.crafting_queue(anvil).len(), 1);
+}
+
+/// A refusal names **what could not be made**, not the recipe that would have made it.
+///
+/// The client's handler resolves the field through the resource table before it clears the
+/// crafting state, and a recipe id resolves to nothing -- so the wrong hash here leaves the
+/// panel spinning for ever. Seen live, and the reason a refused torch wedged the window.
+#[test]
+fn a_refusal_names_the_item_rather_than_the_recipe() {
+    use skysaga_proto::packets::crafting::CraftingFailed;
+
+    let world = world();
+    let mut session = playing(&world);
+
+    // No materials, so this is refused.
+    let burst = craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+
+    let failure = burst
+        .iter()
+        .find_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == CraftingFailed::ID)
+                .then(|| CraftingFailed::decode(&mut reader).ok())
+                .flatten()
+        })
+        .expect("a refusal");
+
+    assert_eq!(
+        failure.resource,
+        Some(skysaga_core::name_hash("Carved_Stone_Piece")),
+        "the refusal carried the recipe id, which resolves to no resource",
+    );
 }
 
 /// A station takes three at once where a pair of hands takes one, and the number is the
@@ -720,4 +794,92 @@ fn a_craft_queued_against_a_sheep_is_refused() {
     let burst = craft_at(&mut session, &world, 1, "Hand_Craft_Carved_Stone_Piece");
 
     assert!(refused(&burst), "the airship took a crafting order");
+}
+
+// --- discoveries ---------------------------------------------------------------------------
+
+/// Whether the burst says the player has found something new.
+fn discovered(burst: &[Vec<u8>]) -> Vec<u32> {
+    use skysaga_proto::packets::crafting::NewResourceEncountered;
+
+    burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == NewResourceEncountered::ID)
+                .then(|| NewResourceEncountered::decode(&mut reader).ok())
+                .flatten()
+        })
+        .filter_map(|packet| packet.item_spec.resource)
+        .collect()
+}
+
+/// The first of something raises the discovery toast, and the second does not.
+#[test]
+fn a_crafted_item_is_announced_the_first_time() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 6).unwrap();
+
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+    collect(&mut session, &world, 0);
+
+    assert!(
+        discovered(&session.take_notifications())
+            .contains(&skysaga_core::name_hash("Carved_Stone_Piece")),
+        "the first carving went unremarked",
+    );
+
+    session.set_clock_ms(START_MS + CARVED_STONE_MS);
+    craft(&mut session, &world, "Hand_Craft_Carved_Stone_Piece");
+    session.set_clock_ms(START_MS + 2 * CARVED_STONE_MS);
+    collect(&mut session, &world, 0);
+
+    assert!(
+        !discovered(&session.take_notifications())
+            .contains(&skysaga_core::name_hash("Carved_Stone_Piece")),
+        "the second one was announced as a discovery too",
+    );
+}
+
+/// The camp fire, which wedged a live client's panel.
+///
+/// It is the first recipe tried with **two** non-expendable inputs -- `Hand_Crafting` and a
+/// `Torch` -- and the first queued against the player while a station stood beside them.
+#[test]
+fn a_camp_fire_queues_and_answers_with_a_sync() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Wooden_Plank", 34).unwrap();
+    session.give("Stone", 14).unwrap();
+    session.give("Torch", 12).unwrap();
+
+    let burst = craft(&mut session, &world, "Hand_Craft_Camp_Fire");
+
+    assert!(!refused(&burst), "refused");
+
+    assert_eq!(session.crafting_slots().len(), 1, "queued");
+
+    let me = session.player_entity_id();
+
+    let syncs: Vec<u32> = burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == skysaga_proto::packets::EntitySync::ID)
+                .then(|| skysaga_proto::packets::EntitySync::decode(&mut reader).ok())
+                .flatten()
+        })
+        .map(|sync| sync.id)
+        .collect();
+
+    assert!(
+        syncs.contains(&me),
+        "the player's queue was never synced back: {syncs:?}",
+    );
 }

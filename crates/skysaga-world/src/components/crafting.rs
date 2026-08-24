@@ -1,4 +1,4 @@
-//! `CraftingComponent` — a station's queue, and the player's own.
+//! `CraftingComponent`, a station's queue, and the player's own.
 //!
 //! | parameter | bits | |
 //! |---|---:|---|
@@ -84,6 +84,22 @@ pub struct CraftingSlot {
     /// Zero therefore means "started at the epoch", i.e. finished long ago, which is why a
     /// craft used to complete the instant it was queued.
     pub timer: u64,
+
+    /// When the craft is **due**, in the same milliseconds as [`Self::timer`]. Not on the wire.
+    ///
+    /// The client works this out for itself from the recipe and the materials chosen, so it is
+    /// never sent. The server keeps it so that "is it done yet" is a comparison rather than a
+    /// recipe lookup -- which is what lets a finished craft be announced from a place that has
+    /// no data tables in scope.
+    pub ready_ms: u64,
+
+    /// Whether the player has been told this one is ready. Not on the wire.
+    ///
+    /// `CraftingNotification` is a toast: it announces a finished craft rather than causing
+    /// one, so it must fire once, when the timer runs out. Announcing at queue time -- which
+    /// this server did while every craft still completed instantly -- tells the player their
+    /// item is ready a full minute before it is.
+    pub announced: bool,
 
     /// What the player chose for each ingredient. Empty until material variants are modelled.
     pub materials: Vec<ItemSpec>,

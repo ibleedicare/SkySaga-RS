@@ -33,11 +33,11 @@ impl UseEntityComponent {
 /// # The player sits exactly on the boundary
 ///
 /// The player is seeded with two slots, which is the default, so this is the one list in the
-/// entity that actually exercises the `count == default` case — and it was writing the escape
+/// entity that actually exercises the `count == default` case, and it was writing the escape
 /// bit **set**, followed by a 32-bit count, where the client writes a single clear bit (see
 /// [`write_count`]). Those 33 bits where 1 was expected shifted every parameter after sync
 /// index 17, which is `craftingslots` (18), `joblist` (45), `maxcraftingslots` (51),
-/// `numberofrecipescrollsused` (58) and `recipelist` (67) — the entire crafting and
+/// `numberofrecipescrollsused` (58) and `recipelist` (67), the entire crafting and
 /// progression surface. The visible symptom was the client insisting every recipe was locked
 /// behind the tutorial however high the job ranks it was sent.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

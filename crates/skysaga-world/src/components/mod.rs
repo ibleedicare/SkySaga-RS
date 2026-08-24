@@ -80,8 +80,8 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 
 /// The protocol's usual count-optimised list header.
 ///
-/// `min(count, default)` in a ranged field, then — only when that clamped value hit the
-/// default — an escape bit saying whether the real count is larger:
+/// `min(count, default)` in a ranged field, then, only when that clamped value hit the
+/// default, an escape bit saying whether the real count is larger:
 ///
 /// ```text
 /// count      ranged, bitlength(default) bits, clamped to the default
@@ -95,7 +95,7 @@ pub(crate) const fn ranged_bits(max: u32) -> u32 {
 /// the clamped value already said everything. Only a list genuinely longer than the default
 /// sets the bit and follows it with the real length.
 ///
-/// The client is unambiguous about this and says it three times — `JobList` (`FUN_008ae810`,
+/// The client is unambiguous about this and says it three times, `JobList` (`FUN_008ae810`,
 /// `count == 0x40`), `CompletedJobChallengeList` (`FUN_008adb40`, `count == 0x4000`) and
 /// `FeatureIsLockedStatusList` (`FUN_008b9160`, `count == 0x1e`) all take the `Write0` branch
 /// when the count equals the cap.

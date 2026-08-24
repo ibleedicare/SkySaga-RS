@@ -565,7 +565,7 @@ impl ChunkSync {
     }
 }
 
-/// `TimeSync` (57) — hand the client the server's clock.
+/// `TimeSync` (57), hand the client the server's clock.
 ///
 /// # This is the only thing that sets the client's clock
 ///
@@ -584,7 +584,7 @@ impl ChunkSync {
 /// server time at **zero**.
 ///
 /// That startup state is the trap. Un-synced, `now()` is
-/// `local_ms_now - local_ms_at_startup`, i.e. *milliseconds since the client launched* — a
+/// `local_ms_now - local_ms_at_startup`, i.e. *milliseconds since the client launched*, a
 /// number in the thousands. Anything the server sends as a real timestamp is then astronomically
 /// larger than the client's clock, and every comparison against it reads as "in the future".
 ///

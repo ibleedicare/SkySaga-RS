@@ -1,7 +1,7 @@
 //! The quest log, through a session.
 //!
 //! The client drives this entirely: it sends `TodoListTaskAdd` and the server stores the row
-//! and syncs `tasklist` back. There is no reply packet — the sync *is* the reply.
+//! and syncs `tasklist` back. There is no reply packet, the sync *is* the reply.
 
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};

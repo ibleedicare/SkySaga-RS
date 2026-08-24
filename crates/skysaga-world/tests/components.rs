@@ -513,7 +513,7 @@ fn a_parameter_that_writes_no_bits_is_still_flagged() {
 /// The player is seeded with two drop slots, which is the default, so this is the boundary
 /// case the entity actually hits. Writing the bit set and a 32-bit count instead costs 33 bits
 /// where the client reads 1, and every parameter after sync index 17 then reads from the wrong
-/// offset — which is what made the client insist every recipe was tutorial-locked.
+/// offset, which is what made the client insist every recipe was tutorial-locked.
 ///
 /// The client's own writers take the `Write0` branch on `count == max`: `FUN_008ae810`
 /// (`JobList`, 0x40), `FUN_008adb40` (`CompletedJobChallengeList`, 0x4000) and `FUN_008b9160`
@@ -935,6 +935,10 @@ fn a_queued_craft_writes_its_record() {
             recipe: Some(7),
             output: Some(42),
             timer: 0,
+            // Server-side only, like the output: when the craft is due, and whether the
+            // player has been told. Neither is on the wire, which the bit count below asserts.
+            ready_ms: 3_000,
+            announced: false,
             materials: Vec::new(),
         }],
         max_slots: 1,
@@ -1025,7 +1029,7 @@ fn an_empty_job_list_is_seven_bits() {
 /// Sixty-four jobs is the `joblist` cap. At the cap the client writes the clamped count and a
 /// single clear bit; it does not repeat the length as a 32-bit word. `geodata.json` ships
 /// twenty jobs so this cannot happen in practice, but the helper is shared with every other
-/// list in the entity and one of those — `craftingdropslots` — does sit on its default.
+/// list in the entity and one of those, `craftingdropslots`, does sit on its default.
 #[test]
 fn a_job_list_at_the_cap_adds_one_clear_bit_rather_than_a_count() {
     use skysaga_proto::bitstream::BitWriter;

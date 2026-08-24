@@ -1,11 +1,11 @@
-//! `TodoListComponent` — the quest log's contents.
+//! `TodoListComponent`, the quest log's contents.
 //!
 //! | parameter | bits | |
 //! |---|---:|---|
 //! | `tasklist` | 6 + a record each | count-optimised, default 32 |
 //!
 //! One parameter, bound on `Player` as `todotasklist` at sync index 82. The component is
-//! declared on exactly three entities — `Player`, `ArtTestPlayer`, `TestPlayer` — which is the
+//! declared on exactly three entities, `Player`, `ArtTestPlayer`, `TestPlayer`, which is the
 //! same set that carries `clientjobrankcomponent` and `clientfeatureunlockcomponent`.
 //!
 //! # Why an empty list still has to go out

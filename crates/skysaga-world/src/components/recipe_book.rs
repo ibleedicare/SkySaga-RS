@@ -1,4 +1,4 @@
-//! `RecipeBookComponent` — which recipes the player knows.
+//! `RecipeBookComponent`, which recipes the player knows.
 //!
 //! | parameter | bits | |
 //! |---|---:|---|

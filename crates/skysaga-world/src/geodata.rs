@@ -479,8 +479,8 @@ impl GeoData {
     /// The recipe whose own name hashes to `id`.
     ///
     /// **This is the lookup `QueueRecipeOnEntity` needs, and its field names the recipe.**
-    /// `crafting.md` says the opposite — that the field is the hash of the output resource,
-    /// "the same hash used for hotbar bindings and `InventorySlotData.Name`" — and that is
+    /// `crafting.md` says the opposite, that the field is the hash of the output resource,
+    /// "the same hash used for hotbar bindings and `InventorySlotData.Name`", and that is
     /// wrong. A live client queuing `Hand_Craft_Carved_Stone_Piece` sends `2767626641`, which
     /// is `name_hash` of the **recipe's** name; the output is `Carved_Stone_Piece` and hashes
     /// to something else entirely.

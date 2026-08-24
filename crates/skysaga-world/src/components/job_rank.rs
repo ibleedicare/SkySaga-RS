@@ -1,4 +1,4 @@
-//! `JobRankComponent` — what the player has ranked up, which is what unlocks recipes.
+//! `JobRankComponent`, what the player has ranked up, which is what unlocks recipes.
 //!
 //! | parameter | bits | |
 //! |---|---:|---|

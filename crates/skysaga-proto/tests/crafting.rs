@@ -180,3 +180,116 @@ fn a_failure_round_trips() {
         assert_eq!(CraftingFailed::decode(&mut reader(&bytes)).unwrap(), packet);
     }
 }
+
+// --- the drop slots ------------------------------------------------------------------------
+
+/// Two bits for the drop square and six for the inventory square, in that order.
+///
+/// The widths are `NumBitsRequired` of the **counts** the client clamps to -- two drop slots
+/// and 45 inventory slots -- not of the largest index. Getting either wrong reads the drop as
+/// happening somewhere else entirely.
+#[test]
+fn a_drop_is_two_bits_of_square_and_six_of_slot() {
+    use skysaga_proto::packets::crafting::MoveItemToCraftingDropSlot;
+
+    for slot_type in 0..2 {
+        for slot in [0, 9, 44] {
+            let packet = MoveItemToCraftingDropSlot { slot_type, slot };
+
+            let bytes = encode(|w| packet.encode(w));
+
+            assert_eq!(
+                MoveItemToCraftingDropSlot::decode(&mut reader(&bytes)).unwrap(),
+                packet,
+            );
+        }
+    }
+
+    let mut writer = BitWriter::new();
+
+    MoveItemToCraftingDropSlot::default().encode(&mut writer);
+
+    let mut only_id = BitWriter::new();
+    only_id.write_packet_id(MoveItemToCraftingDropSlot::ID);
+
+    assert_eq!(writer.bits_used() - only_id.bits_used(), 2 + 6);
+}
+
+/// Taking an item back out, and pressing the button, are two bits each and nothing more.
+#[test]
+fn the_other_two_drop_packets_are_a_square_each() {
+    use skysaga_proto::packets::crafting::{
+        PerformCraftingDropSlotAction, RemoveItemFromCraftingDropSlot,
+    };
+
+    for slot_type in 0..2 {
+        let remove = RemoveItemFromCraftingDropSlot { slot_type };
+        let bytes = encode(|w| remove.encode(w));
+
+        assert_eq!(
+            RemoveItemFromCraftingDropSlot::decode(&mut reader(&bytes)).unwrap(),
+            remove,
+        );
+
+        let perform = PerformCraftingDropSlotAction { slot_type };
+        let bytes = encode(|w| perform.encode(w));
+
+        assert_eq!(
+            PerformCraftingDropSlotAction::decode(&mut reader(&bytes)).unwrap(),
+            perform,
+        );
+    }
+
+    let mut writer = BitWriter::new();
+    PerformCraftingDropSlotAction::default().encode(&mut writer);
+
+    let mut only_id = BitWriter::new();
+    only_id.write_packet_id(PerformCraftingDropSlotAction::ID);
+
+    assert_eq!(writer.bits_used() - only_id.bits_used(), 2);
+}
+
+/// The three drop packets carry ids above 120, which go on the wire in the extended form.
+///
+/// Worth asserting rather than assuming: an id written in the short form is a packet the client
+/// reads as something else entirely.
+#[test]
+fn the_drop_packets_use_the_extended_id_form() {
+    use skysaga_proto::packets::crafting::{
+        MoveItemToCraftingDropSlot, PerformCraftingDropSlotAction, RemoveItemFromCraftingDropSlot,
+    };
+
+    for id in [
+        MoveItemToCraftingDropSlot::ID,
+        RemoveItemFromCraftingDropSlot::ID,
+        PerformCraftingDropSlotAction::ID,
+    ] {
+        let mut writer = BitWriter::new();
+        writer.write_packet_id(id);
+
+        let bytes = writer.into_bytes();
+
+        assert_eq!(BitReader::from_bytes(&bytes).read_packet_id().unwrap(), id);
+    }
+}
+
+/// A discovery names the player and the item, as an `ItemSpec`.
+#[test]
+fn a_new_resource_round_trips() {
+    use skysaga_proto::packets::crafting::NewResourceEncountered;
+
+    let packet = NewResourceEncountered {
+        entity_id: 12,
+        item_spec: ItemSpec {
+            resource: Some(77),
+            ..Default::default()
+        },
+    };
+
+    let bytes = encode(|w| packet.encode(w));
+
+    assert_eq!(
+        NewResourceEncountered::decode(&mut reader(&bytes)).unwrap(),
+        packet,
+    );
+}

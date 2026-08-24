@@ -5,7 +5,7 @@
 //! The server sends the whole list as `TodoListComponent.tasklist` (Player sync index 82); the
 //! client asks for changes with four small packets. The row in the list and the body of
 //! [`TodoListTaskAdd`] are **the same 48-byte record**, written by the same primitives in the
-//! same order — `FUN_008a9e30` (the list) and `FUN_0084b570` (the packet) agree field for
+//! same order, `FUN_008a9e30` (the list) and `FUN_0084b570` (the packet) agree field for
 //! field. [`TodoTask`] is therefore shared by both.
 //!
 //! ```text
@@ -71,7 +71,7 @@ pub struct ItemObjective {
 /// An objective counted in something other than items, carrying a flat 32-bit value.
 ///
 /// Objective C. Structurally the same as [`ItemObjective`] but for the value, which is a full
-/// word rather than the 7/17 form — a difference the client is explicit about
+/// word rather than the 7/17 form, a difference the client is explicit about
 /// (`FUN_0084b1c0` calls `FUN_00778da0`, not `FUN_00794dc0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueObjective {
@@ -102,7 +102,7 @@ pub struct TodoTask {
 
 /// `min(count, max)`, then at the cap a bit saying whether a real 32-bit count follows.
 ///
-/// At the cap *exactly* that bit is clear. See `skysaga_world::components::write_count` — the
+/// At the cap *exactly* that bit is clear. See `skysaga_world::components::write_count`, the
 /// same rule, and getting its polarity backwards shifts everything downstream.
 fn write_list_count(writer: &mut BitWriter, count: u32, max: u32) {
     writer.write_bits_le(count.min(max), ranged_bits(max));
@@ -243,7 +243,7 @@ impl TodoTask {
     }
 }
 
-/// `TodoListTaskAdd` (146, `FF 19`) — the player put an objective on the list.
+/// `TodoListTaskAdd` (146, `FF 19`), the player put an objective on the list.
 ///
 /// `FUN_0084b570`. The body is a [`TodoTask`] plus one bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

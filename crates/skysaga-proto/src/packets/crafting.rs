@@ -11,7 +11,7 @@
 //! being spelled `itemID`. A live client queuing `Hand_Craft_Carved_Stone_Piece` sends
 //! `2767626641`, which is that name's hash; its output, `Carved_Stone_Piece`, hashes elsewhere.
 //!
-//! `crafting.md` says the opposite — that the field is the hash of the output resource — and
+//! `crafting.md` says the opposite, that the field is the hash of the output resource, and
 //! that is wrong. It matters because it is the *same* id the recipe book's `recipelist`
 //! carries, so the book and the queue speak one scheme rather than two, and a server that
 //! keyed its lookup on outputs refuses every craft the client asks for.
@@ -120,7 +120,7 @@ impl ItemSpec {
     }
 }
 
-/// `QueueRecipeOnEntity` (39) — craft this, here.
+/// `QueueRecipeOnEntity` (39), craft this, here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct QueueRecipeOnEntity {
     /// The crafting station. The player's own entity for hand crafting.
@@ -175,7 +175,7 @@ impl QueueRecipeOnEntity {
     }
 }
 
-/// `CollectCraftedItemInSlot` (40) — take what a finished slot holds.
+/// `CollectCraftedItemInSlot` (40), take what a finished slot holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CollectCraftedItemInSlot {
     pub entity_id: u32,
@@ -204,7 +204,7 @@ impl CollectCraftedItemInSlot {
     }
 }
 
-/// `CraftingQueryQueue` (41) — "what is in this station's queue?"
+/// `CraftingQueryQueue` (41), "what is in this station's queue?"
 ///
 /// There is no dedicated reply. The answer is an `EntitySync` of the station's own
 /// `craftingslots`.
@@ -228,7 +228,139 @@ impl CraftingQueryQueue {
     }
 }
 
-/// `CraftingNotification` (67) — "your item is ready".
+// --- the drop slots: repair and dismantle --------------------------------------------------
+
+/// How many drop slots there are, which is what sets `slotType`'s width.
+///
+/// **Two, and the width is `NumBitsRequired(2)` rather than of the largest index**, so the
+/// field is two bits wide and only ever carries 0 or 1.
+const DROP_SLOTS: u32 = 2;
+
+/// The inventory slot ids `MoveItemToCraftingDropSlot` addresses, the same 45 as everywhere.
+const MAX_INVENTORY_SLOT: u32 = 45;
+
+/// `MoveItemToCraftingDropSlot` (153), drag an item onto a drop square.
+///
+/// # `slotType` is an index, not a verb
+///
+/// It indexes the two-element `CraftingDropSlots` array: `FUN_008d7210` reads
+/// `slotType * 0x20 + *(component + 0x24)`, the same array the component serialises. Which one
+/// is which comes from the client's own preconditions:
+///
+/// - **0 is repair.** `FUN_008d72a0` refuses the drop when `slotType == 0` and the item has no
+///   `DurabilityComponent`, so only damageable things go in it.
+/// - **1 is dismantle.** `FUN_007fd290` refuses when the held stack is smaller than the recipe's
+///   output quantity.
+///
+/// Both refusals happen in the client, so a server never sees those drops.
+///
+/// # The client does not move the item itself
+///
+/// It sends this and waits. If the server does not move the item and sync **both**
+/// `inventoryentitylist` and `craftingdropslots`, the square stays empty and the item stays in
+/// the bag -- the same "the UI looks frozen" failure as an unanswered `InventoryItemSwap`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MoveItemToCraftingDropSlot {
+    /// Which drop square: 0 to repair, 1 to dismantle.
+    pub slot_type: u32,
+
+    /// Which inventory square the item came out of.
+    pub slot: u32,
+}
+
+impl MoveItemToCraftingDropSlot {
+    pub const ID: u16 = 153;
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            slot_type: reader.read_bits_le(ranged_bits(DROP_SLOTS))?,
+            slot: reader.read_bits_le(ranged_bits(MAX_INVENTORY_SLOT))?,
+        })
+    }
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_bits_le(self.slot_type, ranged_bits(DROP_SLOTS));
+        writer.write_bits_le(self.slot, ranged_bits(MAX_INVENTORY_SLOT));
+    }
+}
+
+/// `RemoveItemFromCraftingDropSlot` (154), take the item back out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RemoveItemFromCraftingDropSlot {
+    pub slot_type: u32,
+}
+
+impl RemoveItemFromCraftingDropSlot {
+    pub const ID: u16 = 154;
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            slot_type: reader.read_bits_le(ranged_bits(DROP_SLOTS))?,
+        })
+    }
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_bits_le(self.slot_type, ranged_bits(DROP_SLOTS));
+    }
+}
+
+/// `PerformCraftingDropSlotAction` (155), press repair, or dismantle.
+///
+/// Sent either straight from the button (`FUN_007fcac0`) or from the confirmation dialog's
+/// callback, depending on a flag on the panel. Both arrive here identically.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PerformCraftingDropSlotAction {
+    pub slot_type: u32,
+}
+
+impl PerformCraftingDropSlotAction {
+    pub const ID: u16 = 155;
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            slot_type: reader.read_bits_le(ranged_bits(DROP_SLOTS))?,
+        })
+    }
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_bits_le(self.slot_type, ranged_bits(DROP_SLOTS));
+    }
+}
+
+/// `NewResourceEncountered` (43), "you have never seen one of these before".
+///
+/// The handler `FUN_0073b140` checks a "have I seen this" set and, if not, pushes the discovery
+/// toast. Purely cosmetic: omitting it costs only the popup.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewResourceEncountered {
+    /// The player who found it.
+    pub entity_id: u32,
+
+    /// What was found. Only `resource` is read by anything the toast does.
+    pub item_spec: ItemSpec,
+}
+
+impl NewResourceEncountered {
+    pub const ID: u16 = 43;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+        writer.write_u32(self.entity_id);
+        self.item_spec.encode(writer);
+    }
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        Ok(Self {
+            entity_id: reader.read_u32()?,
+            item_spec: ItemSpec::decode(reader)?,
+        })
+    }
+}
+
+/// `CraftingNotification` (67), "your item is ready".
 ///
 /// Registration `FUN_00741f00`, deserializer `FUN_00743410`, handler `FUN_0073b210`. The
 /// handler builds a `0x70`-byte notification record and enqueues it into the UI
@@ -238,7 +370,7 @@ impl CraftingQueryQueue {
 /// # It is a toast, not a state change
 ///
 /// `FUN_0073b210` touches nothing but the notification queue, so this does **not** make a slot
-/// collectable — what does that is the slot's own timer, read as a start time by
+/// collectable, what does that is the slot's own timer, read as a start time by
 /// `FUN_008a7fa0`. Without this packet a finished craft is still collectable; the player is
 /// simply never told, so the item sits in the slot looking unfinished.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -272,7 +404,7 @@ impl CraftingNotification {
     }
 }
 
-/// `CraftingFailed` (42) — the refusal that unsticks the panel.
+/// `CraftingFailed` (42), the refusal that unsticks the panel.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CraftingFailed {
     pub entity_id: u32,
