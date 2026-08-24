@@ -823,6 +823,11 @@ fn player_components(config: &WorldConfig, geodata: &GeoData) -> Vec<Component> 
                 })
                 .collect(),
         }),
+        // **The quest log renders from this parameter, so an empty list still has to go out.**
+        // Absent is not the same as empty: with no list the client has nothing to hang rows or
+        // click targets on, and the panel draws its frame and then sits inert. Six bits buys a
+        // working panel. The contents are the session's, folded in by `entity_now`.
+        Component::TodoList(TodoListComponent::default()),
         // One slot, which is what the data gives a player. Hand crafting is a station like
         // any other; this component is what makes the player one.
         Component::Crafting(CraftingComponent {

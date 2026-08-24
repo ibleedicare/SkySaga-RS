@@ -5,12 +5,16 @@
 //! component of its own. Nothing in the packets distinguishes them, which is why the server
 //! validates the station against the recipe rather than against a flag.
 //!
-//! # A recipe is addressed by what it makes
+//! # A recipe is addressed by its own name
 //!
-//! There is no recipe id on the wire. [`QueueRecipeOnEntity::item_id`] is the name hash of the
-//! recipe's **output resource**. All 177 recipes in 10414 have distinct outputs, so the lookup
-//! is total. The recipe book's `recipelist` uses a *different* hash, of the recipe's own name;
-//! the two are easy to confuse and neither is convertible to the other.
+//! [`QueueRecipeOnEntity::item_id`] is the name hash of the recipe's **own name**, despite
+//! being spelled `itemID`. A live client queuing `Hand_Craft_Carved_Stone_Piece` sends
+//! `2767626641`, which is that name's hash; its output, `Carved_Stone_Piece`, hashes elsewhere.
+//!
+//! `crafting.md` says the opposite — that the field is the hash of the output resource — and
+//! that is wrong. It matters because it is the *same* id the recipe book's `recipelist`
+//! carries, so the book and the queue speak one scheme rather than two, and a server that
+//! keyed its lookup on outputs refuses every craft the client asks for.
 //!
 //! # Silence hangs the panel
 //!
@@ -122,7 +126,9 @@ pub struct QueueRecipeOnEntity {
     /// The crafting station. The player's own entity for hand crafting.
     pub entity_id: u32,
 
-    /// Name hash of the recipe's **output** resource.
+    /// Name hash of the **recipe's own name**, despite the field being spelled `itemID`.
+    ///
+    /// Not the output resource: see the module docs. This is the same id `recipelist` carries.
     pub item_id: Option<u32>,
 
     pub selected_item_specs: Vec<ItemSpec>,

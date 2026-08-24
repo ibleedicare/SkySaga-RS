@@ -17,7 +17,8 @@ pub use components::{
     FeatureUnlockComponent, HealthComponent, InteractionComponent, InventoryComponent,
     InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, OwnerComponent, PhysicsComponent,
     PickupComponent, PlayerAspectsComponent, PlayerNameComponent, RecipeBookComponent,
-    ResourcePickupComponent, TimeOfDayComponent, TransformComponent, UseEntityComponent,
+    ResourcePickupComponent, TimeOfDayComponent, TodoListComponent, TransformComponent,
+    UseEntityComponent,
     VoxelLink, VoxelLinkComponent, WalletComponent,
 };
 pub use entity::Entity;

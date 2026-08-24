@@ -20,6 +20,7 @@ pub mod inventory;
 pub mod mail;
 pub mod movement;
 pub mod photo;
+pub mod todo_list;
 pub mod transfer;
 pub mod voxel;
 
@@ -43,6 +44,7 @@ pub use mail::{
 };
 pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
+pub use todo_list::{ItemObjective, TodoListTaskAdd, TodoListTaskRef, TodoTask, ValueObjective};
 pub use transfer::TransferToServer;
 pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 pub use handshake::{

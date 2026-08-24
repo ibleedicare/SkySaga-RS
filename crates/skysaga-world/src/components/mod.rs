@@ -42,6 +42,7 @@ pub mod player_name;
 pub mod recipe_book;
 pub mod resource_pickup;
 pub mod time_of_day;
+pub mod todo_list;
 pub mod transform;
 pub mod voxel_link;
 
@@ -64,6 +65,7 @@ pub use player_name::PlayerNameComponent;
 pub use recipe_book::RecipeBookComponent;
 pub use resource_pickup::ResourcePickupComponent;
 pub use time_of_day::TimeOfDayComponent;
+pub use todo_list::TodoListComponent;
 pub use transform::TransformComponent;
 pub use voxel_link::{VoxelLink, VoxelLinkComponent};
 
@@ -148,6 +150,8 @@ pub enum Component {
     /// Same parameters as [`Transform`](Self::Transform); the entity binds a different name.
     SmoothedTransform(TransformComponent),
     TimeOfDay(TimeOfDayComponent),
+    /// `clienttodolistcomponent` -- the quest log.
+    TodoList(TodoListComponent),
     Transform(TransformComponent),
     UseEntity(UseEntityComponent),
     VoxelLink(VoxelLinkComponent),
@@ -177,6 +181,7 @@ impl Component {
             Self::PlayerName(_) => "clientplayernamecomponent",
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
+            Self::TodoList(_) => "clienttodolistcomponent",
             Self::Transform(_) => "transformcomponent",
             Self::UseEntity(_) => "clientuseentitycomponent",
             Self::VoxelLink(_) => "clientvoxellinkcomponent",
@@ -209,6 +214,7 @@ impl Component {
             Self::PlayerName(component) => component.sync(parameter, writer),
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
+            Self::TodoList(component) => component.sync(parameter, writer),
             Self::Transform(component) => component.sync(parameter, writer),
             Self::UseEntity(component) => component.sync(parameter, writer),
             Self::VoxelLink(component) => component.sync(parameter, writer),

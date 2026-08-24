@@ -171,18 +171,22 @@ fn the_player_entity_is_well_formed() {
     // replicated and every character rendered with the client's built-in defaults no matter
     // what was chosen in the creator.
     //
-    // The last five are crafting, none of which the C# sends. `craftingslots` (18) and
+    // Five more are crafting, none of which the C# sends. `craftingslots` (18) and
     // `maxcraftingslots` (51) make the player a crafting station, which is what hand crafting
     // is; `numberofrecipescrollsused` (58) and `recipelist` (67) are the recipe book, without
     // which the panel has no category tabs; and `joblist` (45) is what unlocks the recipes in
     // it, without which every one of them says "advance in the tutorial".
+    //
+    // The last is `tasklist` (82), the quest log. It goes out empty rather than not at all:
+    // an absent parameter leaves the client with no list to hang rows on, so the panel draws
+    // and then cannot be clicked.
     assert_eq!(
         sync.present_indices().count(),
-        34,
-        "the C#'s 28, plus customisationdata and the five crafting parameters",
+        35,
+        "the C#'s 28, plus customisationdata, five crafting parameters and the quest log",
     );
 
-    for parameter in [18, 45, 51, 58, 67] {
+    for parameter in [18, 45, 51, 58, 67, 82] {
         assert!(sync.present[parameter], "parameter {parameter} is missing");
     }
 

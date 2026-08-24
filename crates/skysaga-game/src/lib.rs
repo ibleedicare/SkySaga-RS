@@ -51,6 +51,9 @@ use skysaga_proto::packets::movement::{EntityMoved, SetLookAtDirection, ANGLE_UN
 use skysaga_proto::packets::crafting::{
     CollectCraftedItemInSlot, CraftingFailed, CraftingQueryQueue, QueueRecipeOnEntity,
 };
+use skysaga_proto::packets::todo_list::{
+    TodoListTaskAdd, TodoListTaskRef, TodoTask, TASK_LIST_DEFAULT,
+};
 use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -214,6 +217,22 @@ pub enum ClientPacket {
     /// 41 — "what is in this station's queue?". Answered with a sync, not a reply packet.
     CraftingQueryQueue(CraftingQueryQueue),
 
+    // --- the quest log -------------------------------------------------------------------
+    //
+    // All four are answered the same way: mutate `tasklist` and sync it back. There is no
+    // reply packet -- the component sync *is* the reply, as it is for the wallet.
+    /// 146 — put an objective on the list.
+    TodoListTaskAdd(TodoListTaskAdd),
+
+    /// 145 — delete a task for good.
+    TodoListTaskErase(TodoListTaskRef),
+
+    /// 147 — take a task off the visible list, keeping it.
+    TodoListTaskRemove(TodoListTaskRef),
+
+    /// 148 — put a removed task back.
+    TodoListTaskReAdd(TodoListTaskRef),
+
     // --- combat --------------------------------------------------------------------------
     //
     // The whole client-to-server half of a fight. There is no hit packet: what arrives is
@@ -364,6 +383,22 @@ impl ClientPacket {
 
             CraftingQueryQueue::ID => CraftingQueryQueue::decode(&mut reader)
                 .map(Self::CraftingQueryQueue)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskAdd::ID => TodoListTaskAdd::decode(&mut reader)
+                .map(Self::TodoListTaskAdd)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::ERASE => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskErase)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::REMOVE => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskRemove)
+                .unwrap_or(Self::Unknown(wire_id)),
+
+            TodoListTaskRef::READD => TodoListTaskRef::decode(&mut reader)
+                .map(Self::TodoListTaskReAdd)
                 .unwrap_or(Self::Unknown(wire_id)),
 
             EquippedItemUsed::ID => EquippedItemUsed::decode(&mut reader)
@@ -583,6 +618,13 @@ pub struct Session {
     /// are placeable.
     crafting: Vec<skysaga_world::CraftingSlot>,
 
+    /// The quest log, one entry per row the client shows.
+    ///
+    /// On the session for the same reason as `crafting`: it lives on the player's own entity.
+    /// The client drives it entirely — the server allocates ids and stores what it is told —
+    /// because nothing yet activates a job challenge, which is what would auto-add a row.
+    todo_tasks: Vec<TodoTask>,
+
     /// Where loot rolls come from.
     ///
     /// Seeded from the player's entity id rather than a clock, so this crate keeps its
@@ -636,6 +678,7 @@ impl Session {
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
             crafting: Vec::new(),
+            todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
@@ -1173,6 +1216,24 @@ impl Session {
                     .collect()
             }
 
+            // --- the quest log ------------------------------------------------------------
+            (ClientPacket::TodoListTaskAdd(packet), _) => self.todo_add(packet, world),
+
+            (ClientPacket::TodoListTaskErase(packet), _) => self.todo_erase(packet, world),
+
+            // Remove and ReAdd are a visibility flip rather than a deletion. Nothing in the
+            // record has been identified as a "hidden" bit, so until one is, both are
+            // acknowledged with a sync and change nothing — which keeps the client's list and
+            // the server's identical instead of silently diverging.
+            (ClientPacket::TodoListTaskRemove(packet), _)
+            | (ClientPacket::TodoListTaskReAdd(packet), _) => {
+                debug!(task = packet.task_id, "todo visibility change");
+
+                self.sync_of(self.player_entity_id, &["tasklist"], world)
+                    .into_iter()
+                    .collect()
+            }
+
             // --- combat -------------------------------------------------------------------
             (ClientPacket::EquippedItemUsed(packet), _) => self.equipped_item_used(packet, world),
 
@@ -1601,6 +1662,70 @@ impl Session {
         out.extend(self.apply(taken, world));
 
         out
+    }
+
+    // --- the quest log ------------------------------------------------------------------
+
+    /// Put an objective on the list and sync it back.
+    ///
+    /// **There is no reply packet.** `TodoListTaskAdd` is client-to-server only, and what
+    /// confirms it is the `tasklist` sync — the same shape as the wallet, where the currency
+    /// sync *is* the answer to `RechargeLifeTickets`.
+    ///
+    /// The id the client sends is not trusted. Ids are 8 bits over a list capped at 32 and the
+    /// UI element is slot-indexed (`Todo_00_tutorial`), so they are the server's to allocate;
+    /// honouring a client-chosen id lets two rows collide and makes Erase ambiguous.
+    fn todo_add(&mut self, packet: TodoListTaskAdd, world: &World) -> Vec<Vec<u8>> {
+        if self.todo_tasks.len() >= TASK_LIST_DEFAULT as usize {
+            debug!("the quest log is full");
+
+            return Vec::new();
+        }
+
+        let Some(task_id) = self.todo_list().free_id() else {
+            return Vec::new();
+        };
+
+        let task = TodoTask {
+            task_id,
+            ..packet.task
+        };
+
+        debug!(
+            task = task_id,
+            manually_added = packet.manually_added,
+            "todo task added",
+        );
+
+        self.todo_tasks.push(task);
+
+        self.sync_of(self.player_entity_id, &["tasklist"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// Delete a task for good.
+    fn todo_erase(&mut self, packet: TodoListTaskRef, world: &World) -> Vec<Vec<u8>> {
+        let before = self.todo_tasks.len();
+
+        self.todo_tasks.retain(|task| task.task_id != packet.task_id);
+
+        if self.todo_tasks.len() == before {
+            debug!(task = packet.task_id, "erasing a task that is not there");
+        }
+
+        // Synced even when nothing changed: the client has already taken the row off its own
+        // list, so staying silent leaves the two disagreeing.
+        self.sync_of(self.player_entity_id, &["tasklist"], world)
+            .into_iter()
+            .collect()
+    }
+
+    /// The quest log as a component, for syncing.
+    fn todo_list(&self) -> skysaga_world::TodoListComponent {
+        skysaga_world::TodoListComponent {
+            tasks: self.todo_tasks.clone(),
+        }
     }
 
     // --- crafting -----------------------------------------------------------------------
@@ -2106,6 +2231,11 @@ impl Session {
                         crafting.slots = self.crafting.clone();
                     }
 
+                    // The quest log likewise: the world's template carries an empty one.
+                    Component::TodoList(todo) => {
+                        todo.tasks = self.todo_tasks.clone();
+                    }
+
                     // The template carries full health; what this player has left is here.
                     Component::Health(health) => {
                         *health = HealthComponent::with_health(self.player_health());
@@ -2215,6 +2345,11 @@ impl Session {
     /// What is queued or waiting to be collected.
     pub fn crafting_slots(&self) -> &[skysaga_world::CraftingSlot] {
         &self.crafting
+    }
+
+    /// The quest log's rows, in the order the client shows them.
+    pub fn todo_tasks(&self) -> &[TodoTask] {
+        &self.todo_tasks
     }
 
     /// Items lying on the floor, as `(pickup entity, stack entity)`.
