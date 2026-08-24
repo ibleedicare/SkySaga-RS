@@ -38,6 +38,8 @@ pub fn router(token: Option<&str>) -> Router<Api> {
         .route("/admin/give", post(give))
         .route("/admin/mail", post(mail))
         .route("/admin/durability", post(durability))
+        .route("/admin/mob", post(mob))
+        .route("/admin/inventory/clear", post(clear_inventory))
 }
 
 /// Whether a request may use the admin API.
@@ -291,6 +293,92 @@ async fn durability(
         queued: true,
         bits: durability.bits,
         enabled: durability.enabled,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Clear {
+    account: String,
+}
+
+/// Empty a player's rucksack, leaving what they are wearing.
+///
+/// **A test fixture, not a feature.** A give takes the first free square, so a driven scenario
+/// that wants to drag the item it just gave has to work out which square that is from a slot
+/// number and a guess about the grid's pitch. Emptying first makes it the first square.
+async fn clear_inventory(
+    State(api): State<Api>,
+    headers: HeaderMap,
+    Json(clear): Json<Clear>,
+) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    api.state.push_command(AdminCommand::ClearInventory {
+        account: clear.account.clone(),
+    });
+
+    Json(Queued {
+        queued: true,
+        account: clear.account,
+        item: String::new(),
+        count: 0,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Mob {
+    /// Who to put it in front of.
+    account: String,
+    /// An `Entities.json` name: `Knight`, `BanditGrunt`, `Yeti`.
+    entity: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+/// How many creatures one request may spawn.
+///
+/// Each is an entity nothing removes, so a mistyped count is a world full of knights until the
+/// server restarts. The same cap the chat command uses.
+const MAX_MOB: u32 = 10;
+
+#[derive(Debug, Serialize)]
+struct MobQueued {
+    queued: bool,
+    entity: String,
+    count: u32,
+}
+
+/// Put something to fight in front of a player.
+///
+/// The chat command has done this for a while; what it could not do is be *driven*. The client
+/// accepts typing into its chat box and refuses the click that sends it, so every combat check
+/// needed a human. This is the same command over the admin API.
+///
+/// ```text
+/// curl -X POST -H 'x-admin-token: drive' -H 'content-type: application/json' \
+///      -d '{"account":"projectv-client","entity":"Knight"}' http://127.0.0.1:5164/admin/mob
+/// ```
+async fn mob(State(api): State<Api>, headers: HeaderMap, Json(mob): Json<Mob>) -> Response {
+    if !authorised(&api, &headers) {
+        return unauthorised();
+    }
+
+    let count = mob.count.unwrap_or(1).clamp(1, MAX_MOB);
+
+    api.state.push_command(AdminCommand::Mob {
+        account: mob.account,
+        entity: mob.entity.clone(),
+        count,
+    });
+
+    Json(MobQueued {
+        queued: true,
+        entity: mob.entity,
+        count,
     })
     .into_response()
 }

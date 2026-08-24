@@ -88,3 +88,74 @@ fn a_full_rucksack_is_refused_differently() {
         Err(GiveRefusal::RucksackFull),
     );
 }
+
+// --- clearing --------------------------------------------------------------------------------
+
+/// **A scenario that cannot control its own rucksack cannot be repeated.**
+///
+/// An admin give takes the first free square, and which one that is depends on everything the
+/// player did before. A driven test that wants to drag "the item it just gave" therefore has to
+/// guess a screen coordinate from a slot number, which is how the end-to-end combat check spent
+/// an afternoon dragging empty squares. Emptying the rucksack first makes the next give land in
+/// the first square, every time.
+#[test]
+fn clearing_empties_every_rucksack_square() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Dirt", 30).unwrap();
+    session.give("Stone", 4).unwrap();
+
+    let effects = session.clear_rucksack();
+
+    assert!(!effects.is_empty(), "nothing was cleared");
+    assert!(session.carried_items().is_empty(), "{:?}", session.carried_items());
+}
+
+/// And the next give lands in the first square, which is the point.
+#[test]
+fn after_clearing_the_next_give_is_in_the_first_square() {
+    let world = world();
+    let mut session = playing(&world);
+
+    for _ in 0..5 {
+        session.give("Dirt", 30).unwrap();
+    }
+
+    session.clear_rucksack();
+
+    let item = session.give("Metal_Sword", 1).expect("a free square");
+
+    assert_eq!(
+        session.slot_of(item),
+        Some(skysaga_world::inventory::FIRST_RUCKSACK_SLOT),
+    );
+}
+
+/// Clearing an empty rucksack is a successful no-op rather than an error.
+#[test]
+fn clearing_nothing_is_not_an_error() {
+    let world = world();
+    let mut session = playing(&world);
+
+    assert!(session.clear_rucksack().is_empty());
+}
+
+/// **Equipment is not touched.** The rucksack is squares 9 and up; below that is what the
+/// player is wearing, and a test that wanted an empty bag did not ask to be undressed.
+#[test]
+fn clearing_leaves_what_the_player_is_wearing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let helmet = session.give("MetalArmourHead", 1).unwrap();
+    let slot = session.slot_of(helmet).unwrap();
+
+    let player = session.player_entity_id();
+
+    session.inventories_mut().equip(player, slot, 2);
+
+    session.clear_rucksack();
+
+    assert_eq!(session.inventory()[2], helmet, "the helmet came off");
+}

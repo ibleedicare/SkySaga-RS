@@ -325,6 +325,13 @@ pub enum AdminCommand {
         attachments: Vec<(String, u32)>,
     },
 
+    /// Empty a player's rucksack, leaving what they are wearing.
+    ///
+    /// For driven tests rather than for players: a give takes the first *free* square, so a
+    /// scenario that wants to drag what it just gave has to know which square that is. After
+    /// this, it is the first one.
+    ClearInventory { account: String },
+
     /// Change how durable items are written, while the server runs.
     ///
     /// **A measuring instrument, not a setting.** The bit widths of `durability` and
