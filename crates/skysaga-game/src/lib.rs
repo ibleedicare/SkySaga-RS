@@ -31,7 +31,7 @@ pub mod world;
 pub use server::{GameServer, GameServerConfig};
 pub use world::{World, WorldConfig};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
 use skysaga_proto::customisation::CustomisationData;
@@ -627,12 +627,16 @@ pub struct Session {
     /// Items lying on the floor, waiting to be walked over.
     pickups: Vec<FloorDrop>,
 
-    /// What is queued or waiting to be collected, one entry per occupied slot.
+    /// What is queued or waiting to be collected, per station, one entry per occupied slot.
     ///
-    /// On the session rather than the world because hand crafting happens on the player's own
-    /// entity. A station's queue belongs to the station and will have to move when stations
-    /// are placeable.
-    crafting: Vec<skysaga_world::CraftingSlot>,
+    /// **Keyed by the station's entity, and the player is one of them.** Hand crafting is not a
+    /// special case: the player carries a crafting component with one slot, an `Anvil` carries
+    /// one with three, and the packets name whichever entity the panel was opened on. One
+    /// shared queue would have a craft started at the anvil appear in the player's own hands.
+    ///
+    /// On the session rather than the world because every station a player can reach is one
+    /// they placed, and placements are per session too. Both move together.
+    crafting: BTreeMap<u32, Vec<skysaga_world::CraftingSlot>>,
 
     /// A fixed wall clock, in milliseconds since the Unix epoch, or `None` for the real one.
     ///
@@ -701,7 +705,7 @@ impl Session {
             player_damage: 0,
             armed: std::collections::HashMap::new(),
             pickups: Vec::new(),
-            crafting: Vec::new(),
+            crafting: BTreeMap::new(),
             clock_ms: None,
             todo_tasks: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
@@ -1665,10 +1669,27 @@ impl Session {
     /// as a missing handler, which is why this is worth answering even though nothing else
     /// depends on it yet.
     fn perform_voxel_action(&mut self, packet: PerformVoxelActions, world: &World) -> Vec<Vec<u8>> {
-        // Only a hand can be holding anything, and only a placeable block places. The hotbar
-        // keeps resource *hashes*, so it can still name an item the player has run out of --
-        // hence the check that a stack actually exists before one is taken from it.
-        let placing = packet.location.is_hand().then(|| self.held_block(world)).flatten();
+        // Only a hand can be holding anything, and what it holds decides between three
+        // outcomes: a block places a voxel, a device or a decoration places an *entity*, and
+        // everything else digs. The hotbar keeps resource *hashes*, so it can still name an
+        // item the player has run out of -- hence the check that a stack actually exists
+        // before one is taken from it.
+        let held = packet.location.is_hand().then(|| self.held_resource()).flatten();
+
+        // An Anvil is not a placeable block, so before this branch existed it fell through to
+        // the dig below and broke the ground it was clicked on.
+        if let Some((item, entity)) =
+            held.and_then(|held| Some((held, world.geodata.places_entity(held)?)))
+        {
+            return self.place_entity(item, entity, &packet, world);
+        }
+
+        let placing = held.and_then(|held| {
+            world
+                .geodata
+                .placeable_for_hash(held)
+                .map(|material| (held, material))
+        });
 
         let Some((item, material)) = placing else {
             return self.dig(packet.chunk, packet.voxel, world);
@@ -1695,6 +1716,93 @@ impl Session {
         // count it was last sent, so a placement that only reports the block leaves the
         // player holding an inexhaustible stack.
         let mut out = vec![Self::chunk_edit(packet.chunk, voxel, material)];
+
+        out.extend(self.apply(taken, world));
+
+        out
+    }
+
+    /// Put a device or a decoration in the world, out of the stack the player is holding.
+    ///
+    /// # The voxel packet is the whole placement
+    ///
+    /// `PerformVoxelActions` is the **only** packet a device placement sends. A live Anvil
+    /// produced no `ExecuteEntityAction` at all, so there is no second half to wait for and
+    /// nothing here needs the action row: which slot acted, which voxel and which face are all
+    /// in the packet already.
+    ///
+    /// # The entity is the resource's own name
+    ///
+    /// The `Anvil` item places the `Anvil` entity, and the data says so only by way of
+    /// `ActionVoxel`. The definition is looked up **before** the stack is touched, so a
+    /// resource naming an entity the data file does not define places nothing rather than
+    /// eating an item.
+    fn place_entity(
+        &mut self,
+        item: u32,
+        name: &str,
+        packet: &PerformVoxelActions,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(definition) = world.definitions.get(name).cloned() else {
+            warn!(%name, "places an entity the data file does not define");
+
+            return Vec::new();
+        };
+
+        let taken = self.take_one(item);
+
+        if taken.is_empty() {
+            debug!(item, %name, "the hotbar names a device the player does not have");
+
+            return self.dig(packet.chunk, packet.voxel, world);
+        }
+
+        // Next to the face that was clicked, as a block placement is: the clicked voxel is
+        // solid, so an entity put there is inside it.
+        let voxel = packet.placement_voxel();
+        let position = World::voxel_corner(packet.chunk, voxel);
+
+        let id = self.inventories.next_entity_id();
+        self.inventories.reserve_ids_from(id + 1);
+
+        let links = definition
+            .default_voxel_links()
+            .into_iter()
+            .map(|(offset, voxel_index)| skysaga_world::VoxelLink {
+                x: offset[0],
+                y: offset[1],
+                z: offset[2],
+                voxel_index,
+            })
+            .collect();
+
+        let built = Entity::new(
+            id,
+            world::device_components(position, links, definition.max_crafting_slots()),
+        );
+
+        self.spawned.push(world::Container {
+            id,
+            name: name.to_owned(),
+            entity: built,
+            definition,
+            // Not a container: a station's window is its crafting queue, and a device with an
+            // inventory would draw an empty rucksack over the top of it.
+            slots: 0,
+            is_loot_chest: false,
+        });
+
+        info!(entity = id, %name, ?voxel, ?position, "placed a device");
+
+        // The entity, then the stack it came out of -- the same order and the same reason as a
+        // block: a placement that reports only the entity leaves the player holding an
+        // inexhaustible stack.
+        let mut out = Vec::new();
+
+        if let Some((built, definition)) = self.entity_now(id, world) {
+            out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+        }
 
         out.extend(self.apply(taken, world));
 
@@ -1794,17 +1902,21 @@ impl Session {
             return refuse("no such recipe");
         };
 
-        // A station craft names the station. Only the player's own entity is servable yet,
-        // and that is exactly the `Hand_Crafting` station.
-        if packet.entity_id != self.player_entity_id {
-            return refuse("only hand crafting is served");
+        // **The packet names the station, and the recipe names what it needs.** A craft is
+        // legitimate when the two agree: `Hand_Craft_*` against the player's own entity, an
+        // anvil recipe against a placed `Anvil`. Nothing in the packet distinguishes the two
+        // UIs, so this comparison is the whole of the check.
+        let Some(station) = self.station_of(packet.entity_id, world) else {
+            return refuse("not a crafting station");
+        };
+
+        if recipe.station() != Some(station.as_str()) {
+            return refuse("that recipe is not made here");
         }
 
-        if recipe.station() != Some(HAND_CRAFTING) {
-            return refuse("that recipe needs a station");
-        }
+        let queued = self.crafting.get(&packet.entity_id).map_or(0, Vec::len);
 
-        if self.crafting.len() >= self.max_crafting_slots() as usize {
+        if queued >= self.max_crafting_slots_of(packet.entity_id, world) as usize {
             return refuse("no free slot");
         }
 
@@ -1824,23 +1936,25 @@ impl Session {
 
         let (output, _) = recipe.output().unwrap_or(("", 0));
 
-        // Finished the moment it is queued. The record's timer is sixty-four raw bits whose
-        // type could not be settled from the binary, so a running craft cannot be expressed
-        // honestly yet; zero is unambiguous under either reading.
         // **The moment it started, not zero.** The client's progress is
         // `(now - timer) / duration`, so a zero start time is one at the Unix epoch and every
         // craft read as finished the instant it was queued -- the recipe's three seconds
         // elapsed before the panel had drawn.
-        self.crafting.push(skysaga_world::CraftingSlot {
-            recipe: Some(recipe.id()),
-            output: Some(skysaga_core::name_hash(output)),
-            timer: self.now_ms(),
-            materials: Vec::new(),
-        });
+        let started = self.now_ms();
 
-        info!(recipe = %recipe.name, output, "queued a craft");
+        self.crafting
+            .entry(packet.entity_id)
+            .or_default()
+            .push(skysaga_world::CraftingSlot {
+                recipe: Some(recipe.id()),
+                output: Some(skysaga_core::name_hash(output)),
+                timer: started,
+                materials: Vec::new(),
+            });
 
-        out.extend(self.sync_of(self.player_entity_id, &["craftingslots"], world));
+        info!(recipe = %recipe.name, output, %station, "queued a craft");
+
+        out.extend(self.sync_of(packet.entity_id, &["craftingslots"], world));
 
         // "Your item is ready." The craft finishes the instant it is queued -- the slot's
         // timer is a start time and zero reads as long past, so `FUN_008a7fa0` returns a
@@ -1863,9 +1977,18 @@ impl Session {
         // Logged on arrival, not just on failure. Whether the client ever asks to collect is
         // the first question when a craft "does nothing", and a handler that is silent on the
         // happy path cannot answer it.
-        debug!(slot = packet.slot, "collect requested");
+        debug!(
+            station = packet.entity_id,
+            slot = packet.slot,
+            "collect requested"
+        );
 
-        let Some(slot) = self.crafting.get(packet.slot as usize).cloned() else {
+        let Some(slot) = self
+            .crafting
+            .get(&packet.entity_id)
+            .and_then(|queue| queue.get(packet.slot as usize))
+            .cloned()
+        else {
             debug!(slot = packet.slot, "collecting an empty crafting slot");
 
             return Vec::new();
@@ -1901,14 +2024,16 @@ impl Session {
         let (name, quantity) = recipe.output().unwrap_or(("", 1));
         let name = name.to_owned();
 
-        self.crafting.remove(packet.slot as usize);
+        if let Some(queue) = self.crafting.get_mut(&packet.entity_id) {
+            queue.remove(packet.slot as usize);
+        }
 
         let Some(stack) = self.give(&name, quantity) else {
             warn!(item = %name, "crafted, but the rucksack is full");
 
             // The slot is already gone, so say so; the item is lost, which is worse than
             // refusing would have been and is why a full rucksack should be checked earlier.
-            return self.sync_of(self.player_entity_id, &["craftingslots"], world)
+            return self.sync_of(packet.entity_id, &["craftingslots"], world)
                 .into_iter()
                 .collect();
         };
@@ -1923,16 +2048,61 @@ impl Session {
             world,
         );
 
-        out.extend(self.sync_of(self.player_entity_id, &["craftingslots"], world));
+        out.extend(self.sync_of(packet.entity_id, &["craftingslots"], world));
 
         info!(item = %name, quantity, "collected a craft");
 
         out
     }
 
-    /// How many crafting slots this player has, which the template declares.
-    fn max_crafting_slots(&self) -> u8 {
-        1
+    /// The station `entity` is, by the resource name a recipe would call it.
+    ///
+    /// **`Hand_Crafting` is a station like any other.** It is a real resource name, it appears
+    /// in the client, and 17 recipes name it as their non-expendable input -- so the player's
+    /// own entity answers with it and hand crafting needs no special case beyond this line.
+    ///
+    /// `None` for anything that is not a station, which is what refuses a craft queued against
+    /// a sheep.
+    fn station_of(&self, entity: u32, world: &World) -> Option<String> {
+        if entity == self.player_entity_id {
+            return Some(HAND_CRAFTING.to_owned());
+        }
+
+        let container = self.container(entity, world)?;
+
+        // A placed device is named by the resource that placed it, and a recipe's station is
+        // that same name -- `Anvil` the item, `Anvil` the entity, `Anvil` the input.
+        container
+            .definition
+            .max_crafting_slots()
+            .map(|_| container.name.clone())
+    }
+
+    /// How long `entity`'s crafting queue is, from the entity's own data.
+    ///
+    /// A station's queue length is a property of the station: an `Anvil` takes three crafts at
+    /// once, a pair of hands one. Reading it from the definition rather than assuming keeps a
+    /// placed station's window agreeing with the server about how many slots it has, and the
+    /// client draws exactly as many squares as `maxcraftingslots` says.
+    ///
+    /// Zero for an entity that is not a station at all, which refuses a craft queued against
+    /// a sheep without a special case for it.
+    pub fn max_crafting_slots_of(&self, entity: u32, world: &World) -> u8 {
+        self.entity_now(entity, world)
+            .and_then(|(_, definition)| definition.max_crafting_slots())
+            .unwrap_or(0)
+    }
+
+    /// Where a placed device stands, in the client's position units.
+    pub fn device_position(&self, entity: u32, world: &World) -> Option<[u32; 3]> {
+        let container = self.container(entity, world)?;
+
+        container.entity.components.iter().find_map(|component| {
+            match component {
+                Component::Transform(transform) => Some(transform.position),
+                _ => None,
+            }
+        })
     }
 
     /// How many of `hash` the player is carrying, across every stack.
@@ -2187,17 +2357,6 @@ impl Session {
         out
     }
 
-    /// The item hash the player is holding, and the block it places, if it places one.
-    fn held_block(&self, world: &World) -> Option<(u32, u8)> {
-        let held = self.held_resource()?;
-
-        // The hotbar carries a hash and the table is keyed by name, so this is a reverse
-        // lookup: which placeable block's resource hashes to what the hand holds.
-        let material = world.geodata.placeable_for_hash(held)?;
-
-        Some((held, material))
-    }
-
     /// Take one item of `hash` out of the rucksack, and say what the client must be told.
     ///
     /// **Empty means nothing was taken**, which is how a caller tells "the hotbar names an item
@@ -2304,7 +2463,7 @@ impl Session {
 
                     // The queue is the player's own, which is what hand crafting is.
                     Component::Crafting(crafting) => {
-                        crafting.slots = self.crafting.clone();
+                        crafting.slots = self.queue_of(entity);
                     }
 
                     // The quest log likewise: the world's template carries an empty one.
@@ -2374,6 +2533,12 @@ impl Session {
                     interaction.has_been_opened = self.closed_lids.contains(&entity);
                 }
 
+                // A station's queue, which is what its window draws. The entity was built
+                // empty when it was placed, and everything queued since lives on the session.
+                Component::Crafting(crafting) => {
+                    crafting.slots = self.queue_of(entity);
+                }
+
                 _ => {}
             }
         }
@@ -2418,9 +2583,22 @@ impl Session {
         PLAYER_HEALTH
     }
 
-    /// What is queued or waiting to be collected.
+    /// What is queued at `station`, or waiting to be collected there.
+    pub fn crafting_queue(&self, station: u32) -> &[skysaga_world::CraftingSlot] {
+        self.crafting
+            .get(&station)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// What the player has on the go in their own hands.
     pub fn crafting_slots(&self) -> &[skysaga_world::CraftingSlot] {
-        &self.crafting
+        self.crafting_queue(self.player_entity_id)
+    }
+
+    /// A station's queue as the wire wants it, ready to be written into its component.
+    fn queue_of(&self, station: u32) -> Vec<skysaga_world::CraftingSlot> {
+        self.crafting_queue(station).to_vec()
     }
 
     /// The quest log's rows, in the order the client shows them.

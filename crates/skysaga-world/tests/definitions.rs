@@ -269,3 +269,38 @@ fn loading_is_deterministic() {
 
     assert_eq!(a, b);
 }
+
+/// The length of a station's queue comes from its own `maxcraftingslots` default.
+///
+/// A station takes three crafts at once and a pair of hands one, which is a difference a player
+/// sees the moment they queue twice.
+///
+/// `crafting.md` says "value 3 for Anvil, 1 for most" and that is the wrong way round: 23 of the
+/// 27 entities declaring the parameter are 3, and the four that are 1 are `Player`, its two test
+/// variants, and `Airship_Damaged`.
+#[test]
+fn a_station_declares_how_long_its_queue_is() {
+    let Some(definitions) = definitions() else { return };
+
+    assert_eq!(
+        definitions.get("Anvil").and_then(|anvil| anvil.max_crafting_slots()),
+        Some(3),
+    );
+
+    assert_eq!(
+        definitions.get("Workbench").and_then(|bench| bench.max_crafting_slots()),
+        Some(3),
+    );
+
+    // The player is a station as well; hand crafting is one slot.
+    assert_eq!(
+        definitions.get("Player").and_then(|player| player.max_crafting_slots()),
+        Some(1),
+    );
+
+    // A sheep is not a station and declares no such parameter.
+    assert_eq!(
+        definitions.get("Sheep").and_then(|sheep| sheep.max_crafting_slots()),
+        None,
+    );
+}

@@ -253,3 +253,50 @@ fn every_starting_recipe_resolves_by_its_book_id() {
         );
     }
 }
+
+// --- what an item places -------------------------------------------------------------------
+
+/// An `Anvil` in the hand puts down an `Anvil`.
+///
+/// The resource carries `ActionVoxel: CreateDevice` and nothing naming an entity, because the
+/// entity is the resource's own name. This is what tells a device placement from a dig: an
+/// Anvil is not a placeable *block*, so before this lookup existed clicking the ground with one
+/// dug a hole.
+#[test]
+fn an_anvil_places_the_anvil_entity() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(
+        geo.places_entity(skysaga_core::name_hash("Anvil")),
+        Some("Anvil"),
+    );
+
+    assert_eq!(
+        geo.places_entity(skysaga_core::name_hash("Workbench")),
+        Some("Workbench"),
+    );
+}
+
+/// A decoration places an entity too. `CreateEntity` is the same mechanism as `CreateDevice`,
+/// and differs only in what the client shows for it.
+#[test]
+fn a_decoration_places_an_entity() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(
+        geo.places_entity(skysaga_core::name_hash("Barrel_A")),
+        Some("Barrel_A"),
+    );
+}
+
+/// A material places nothing, and neither does a block.
+///
+/// `Stone` is placeable, but as a voxel: it goes through `placeable_for_hash` instead. An item
+/// that answered both would place an entity *and* a block from one click.
+#[test]
+fn a_material_places_no_entity() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(geo.places_entity(skysaga_core::name_hash("Stone")), None);
+    assert_eq!(geo.places_entity(skysaga_core::name_hash("Metal_Rod")), None);
+}

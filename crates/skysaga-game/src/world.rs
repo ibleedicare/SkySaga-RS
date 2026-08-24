@@ -719,6 +719,58 @@ pub fn container_components(
     ]
 }
 
+/// Everything a placed device replicates: an anvil, a forge, a camp fire.
+///
+/// The same four components a chest needs -- transform, interaction, owner, pickup, voxel links
+/// -- and a crafting queue where the entity has one. What it does *not* have is an inventory: a
+/// station is not a container, and its window is drawn from `craftingslots` instead.
+///
+/// `max_crafting_slots` comes from the entity's own `maxcraftingslots` default, so an `Anvil`
+/// gets three and something that is not a station gets no crafting component at all. A
+/// parameter an entity does not declare is never sent, so the component costs nothing where it
+/// is not wanted -- but leaving it off entirely means a station whose queue can never be shown.
+pub fn device_components(
+    position: [u32; 3],
+    links: Vec<VoxelLink>,
+    max_crafting_slots: Option<u8>,
+) -> Vec<Component> {
+    let mut components = vec![
+        Component::Transform(TransformComponent {
+            position,
+            // One, not zero: an unset size renders as nothing at all. See the container.
+            size: [1, 1, 1],
+            ..Default::default()
+        }),
+        Component::Interaction(InteractionComponent {
+            enabled: true,
+            // **Not a loot chest.** The flag decides whether E toggles the window shut, and a
+            // station has an X button of its own -- so a toggle would leave the server a press
+            // out of phase the moment the player closed the panel with the mouse.
+            is_loot_chest: false,
+            has_been_opened: false,
+            owner_only: false,
+            allow_multiple_users: true,
+        }),
+        Component::Owner(OwnerComponent::default()),
+        Component::Pickup(PickupComponent::default()),
+        // What puts the device in the world grid rather than floating in front of it. An Anvil
+        // is twelve linked cells, a Camp_Fire one, and the shape is read from the entity.
+        Component::VoxelLink(VoxelLinkComponent {
+            voxels: links,
+            can_replace_voxels_of_entity_id: 0,
+        }),
+    ];
+
+    if let Some(max_slots) = max_crafting_slots {
+        components.push(Component::Crafting(skysaga_world::CraftingComponent {
+            slots: Vec::new(),
+            max_slots,
+        }));
+    }
+
+    components
+}
+
 /// Everything a creature replicates, wherever it stands and however healthy it is.
 ///
 /// Shared by the props the world seeds and anything `/mob` puts down, so the two cannot drift.
@@ -990,6 +1042,24 @@ impl World {
         }
 
         centre
+    }
+
+    /// The corner of a voxel, in the client's position units.
+    ///
+    /// **Where a placed entity goes**, and deliberately not [`Self::voxel_centre`]. The client
+    /// resolves each linked cell as `transform + (offset + 0.5)` rotated by yaw, so the half
+    /// voxel is already in the link; adding it here as well would put a one-cell device half a
+    /// block into the next one. Confirmed by the live C# placement recorded in
+    /// `documentations/device-placement.md`: voxel `(13, 17, 19)` became position
+    /// `(832, 1088, 1216)`, which is exactly `worldVoxel * 64`.
+    pub fn voxel_corner(chunk: [u32; 3], voxel: [u32; 3]) -> [u32; 3] {
+        let mut corner = [0; 3];
+
+        for (axis, out) in corner.iter_mut().enumerate() {
+            *out = (chunk[axis] * CHUNK_SIZE as u32 + voxel[axis]) * POSITION_SCALE;
+        }
+
+        corner
     }
 
     /// Where a player drops in, in the client's position units.

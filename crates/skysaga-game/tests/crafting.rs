@@ -514,3 +514,210 @@ fn a_client_a_little_ahead_is_honoured() {
         "refused a client that was inside the grace window",
     );
 }
+
+// --- station crafting ----------------------------------------------------------------------
+
+/// Put an `Anvil` down in front of the player and return its entity id.
+///
+/// Through the real placement path rather than by reaching into the session: a station the
+/// tests conjure up is a station whose components nobody checked.
+fn place_anvil(session: &mut Session, world: &World) -> u32 {
+    use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
+    use skysaga_proto::packets::voxel::{ActionLocation, BlockSide, PerformVoxelActions};
+    use skysaga_proto::packets::EntityAdd;
+
+    session.give("Anvil", 1).expect("a free slot");
+
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSlotChange {
+                slot: 1,
+                resource: skysaga_core::name_hash("Anvil"),
+                unknown: 0,
+                item_uuid: String::new(),
+            }
+            .encode(w)
+        })),
+        world,
+    );
+
+    let burst = session.handle(
+        ClientPacket::parse(&encode(|w| {
+            PerformVoxelActions {
+                location: ActionLocation::RightHand,
+                chunk: [1, 0, 1],
+                // Solid sand, so the click is on the ground.
+                voxel: [4, 17, 4],
+                side: BlockSide::Top,
+                power: 32,
+                hit: [0, 0, 0],
+                direction: [0, 1, 0],
+            }
+            .encode(w)
+        })),
+        world,
+    );
+
+    burst
+        .iter()
+        .find_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntityAdd::ID)
+                .then(|| EntityAdd::decode(&mut reader).ok())
+                .flatten()
+        })
+        .expect("the anvil was placed")
+        .id
+}
+
+/// Ask a station to run a recipe, the way the panel opened on it does.
+fn craft_at(session: &mut Session, world: &World, station: u32, recipe: &str) -> Vec<Vec<u8>> {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            QueueRecipeOnEntity {
+                entity_id: station,
+                item_id: Some(skysaga_core::name_hash(recipe)),
+                selected_item_specs: Vec::new(),
+            }
+            .encode(w)
+        })),
+        world,
+    )
+}
+
+fn collect_at(session: &mut Session, world: &World, station: u32, slot: u32) -> Vec<Vec<u8>> {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            CollectCraftedItemInSlot {
+                entity_id: station,
+                slot,
+                immediate: false,
+            }
+            .encode(w)
+        })),
+        world,
+    )
+}
+
+/// `Craft_Wood_Shield` is made at an Anvil out of nine planks, and takes thirty seconds.
+const WOOD_SHIELD_MS: u64 = 30_000;
+
+#[test]
+fn a_recipe_that_needs_an_anvil_is_made_at_one() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_anvil(&mut session, &world);
+
+    session.give("Wooden_Plank", 9).unwrap();
+
+    let burst = craft_at(&mut session, &world, anvil, "Craft_Wood_Shield");
+
+    assert!(!refused(&burst), "the anvil refused its own recipe");
+
+    assert_eq!(
+        session.crafting_queue(anvil).len(),
+        1,
+        "it is queued at the anvil",
+    );
+
+    assert!(
+        session.crafting_slots().is_empty(),
+        "and not in the player's own hands",
+    );
+}
+
+/// The queue belongs to the station, so what it makes is collected from the station.
+#[test]
+fn a_station_craft_is_collected_from_the_station() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_anvil(&mut session, &world);
+
+    session.give("Wooden_Plank", 9).unwrap();
+
+    craft_at(&mut session, &world, anvil, "Craft_Wood_Shield");
+
+    session.set_clock_ms(START_MS + WOOD_SHIELD_MS);
+
+    collect_at(&mut session, &world, anvil, 0);
+
+    assert_eq!(
+        carried(&session, &["Wooden_Plank", "Wood_Shield"]),
+        vec![("Wood_Shield".to_owned(), 1)],
+    );
+
+    assert!(session.crafting_queue(anvil).is_empty(), "the slot is free");
+}
+
+/// An anvil recipe is not a hand recipe, whatever the player is holding.
+#[test]
+fn an_anvil_recipe_cannot_be_made_by_hand() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Wooden_Plank", 9).unwrap();
+
+    let burst = craft(&mut session, &world, "Craft_Wood_Shield");
+
+    assert!(refused(&burst), "an anvil recipe was hand-crafted");
+}
+
+/// ...and neither is the reverse: an anvil will not do the work of a pair of hands.
+#[test]
+fn a_hand_recipe_cannot_be_made_at_an_anvil() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_anvil(&mut session, &world);
+
+    session.give("Stone", 3).unwrap();
+
+    let burst = craft_at(&mut session, &world, anvil, "Hand_Craft_Carved_Stone_Piece");
+
+    assert!(refused(&burst), "the anvil crafted by hand");
+}
+
+/// A station takes three at once where a pair of hands takes one, and the number is the
+/// station's own.
+#[test]
+fn an_anvil_queues_three_crafts() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let anvil = place_anvil(&mut session, &world);
+
+    session.give("Wooden_Plank", 40).unwrap();
+
+    for _ in 0..3 {
+        assert!(!refused(&craft_at(
+            &mut session,
+            &world,
+            anvil,
+            "Craft_Wood_Shield"
+        )));
+    }
+
+    assert_eq!(session.crafting_queue(anvil).len(), 3);
+
+    assert!(
+        refused(&craft_at(&mut session, &world, anvil, "Craft_Wood_Shield")),
+        "a fourth craft fitted into a three-slot queue",
+    );
+}
+
+/// Something that is not a station refuses rather than growing a queue.
+#[test]
+fn a_craft_queued_against_a_sheep_is_refused() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Stone", 3).unwrap();
+
+    // Entity 1 is the Airship the world seeds; anything that is not a station will do.
+    let burst = craft_at(&mut session, &world, 1, "Hand_Craft_Carved_Stone_Piece");
+
+    assert!(refused(&burst), "the airship took a crafting order");
+}

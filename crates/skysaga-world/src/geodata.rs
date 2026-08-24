@@ -125,6 +125,12 @@ pub struct GeoData {
     /// Name hash to stack limit, for the items that override the default.
     stack_overrides: HashMap<u32, u32>,
 
+    /// Name hash to the entity that item places, for the resources that place one.
+    ///
+    /// The entity's name is the resource's own, so this is a set as much as a map; the name is
+    /// kept because what places an entity needs to look it up in `Entities.json`.
+    places: HashMap<u32, String>,
+
     /// `name_hash(EquippedActions[].Name)` to the flattened swing.
     ///
     /// Keyed by hash rather than by name because the hash is what arrives: the client sends
@@ -310,9 +316,26 @@ impl GeoData {
 
         let stack_overrides = file
             .resources
-            .into_iter()
+            .iter()
             .filter(|resource| resource.is_overriding_stack_limit && resource.stack_limit > 0)
             .map(|resource| (skysaga_core::name_hash(&resource.name), resource.stack_limit))
+            .collect();
+
+        // **An item places the entity of its own name.** `Anvil` the resource puts down `Anvil`
+        // the entity, and the only thing that says so is `ActionVoxel`: there is no field naming
+        // the entity. The two verbs differ in the client's UI and not here -- `CreateDevice` is
+        // the 31 usable things (stations, chests, the mailbox) and `CreateEntity` the 143
+        // decorations -- so both are kept, keyed by the hash the hotbar carries.
+        let places = file
+            .resources
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource.action_voxel.as_str(),
+                    "CreateDevice" | "CreateEntity"
+                )
+            })
+            .map(|resource| (skysaga_core::name_hash(&resource.name), resource.name.clone()))
             .collect();
 
         // --- the combat join ---------------------------------------------------------------
@@ -408,6 +431,7 @@ impl GeoData {
             placeable,
             by_index,
             stack_overrides,
+            places,
             actions,
             physical,
             loot: Loot::from_file(file.loot_tables, file.loot_lists),
@@ -569,6 +593,21 @@ impl GeoData {
             .iter()
             .find(|(name, _)| skysaga_core::name_hash(name) == hash)
             .map(|(_, index)| *index)
+    }
+
+    /// The entity this item places, or `None` when it places none.
+    ///
+    /// **This is the second half of the place-or-dig decision.** A block resolves through
+    /// [`Self::placeable_for_hash`]; an Anvil is not a block and resolves here. An item that is
+    /// neither -- a pickaxe, a lump of ore -- digs, which is why an Anvil used to break the
+    /// ground it was clicked on.
+    ///
+    /// The entity's name is the resource's own. Nothing in the data names it, and there is no
+    /// need: the 31 `CreateDevice` and 143 `CreateEntity` resources all share a name with an
+    /// entity in `Entities.json`. The caller still has to look that up, and a resource whose
+    /// entity is missing must place nothing rather than eat the stack.
+    pub fn places_entity(&self, hash: u32) -> Option<&str> {
+        self.places.get(&hash).map(String::as_str)
     }
 
     /// The item a broken block drops, or `None` for blocks with no item form.
@@ -834,4 +873,9 @@ struct RawResource {
 
     #[serde(rename = "StackLimitOverride", default)]
     stack_limit: u32,
+
+    /// What using this item against a voxel does: `PlaceVoxel`, `Dig`, `CreateDevice`,
+    /// `CreateEntity`, or nothing at all for the 151 resources that are only ever materials.
+    #[serde(rename = "ActionVoxel", default)]
+    action_voxel: String,
 }
