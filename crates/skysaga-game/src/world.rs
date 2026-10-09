@@ -468,6 +468,13 @@ pub struct WorldConfig {
     /// over HTTP — one server, so a client is transferred back to this one.
     pub public_ip: String,
     pub game_port: u16,
+
+    /// Whether the player carries `clientuisettingscomponent`, the hotbar's bindings.
+    ///
+    /// Off by default: its widths are read from the client (`FUN_008d4480`) but not yet
+    /// proven in front of it, and a wrong width in an entity's first burst can stop the
+    /// client loading. `SKYSAGA_UI_SETTINGS=1` turns it on for that test.
+    pub ui_settings: bool,
 }
 
 impl WorldConfig {
@@ -499,6 +506,7 @@ impl WorldConfig {
                 seed: parse("SKYSAGA_WORLD_SEED", defaults.terrain.seed),
                 size_chunks: parse("SKYSAGA_WORLD_CHUNKS", defaults.terrain.size_chunks),
             },
+            ui_settings: std::env::var("SKYSAGA_UI_SETTINGS").as_deref() == Ok("1"),
             ..defaults
         }
     }
@@ -523,6 +531,7 @@ impl Default for WorldConfig {
             world_type: 1,
             public_ip: "127.0.0.1".to_owned(),
             game_port: crate::server::DEFAULT_PORT,
+            ui_settings: false,
         }
     }
 }
@@ -1014,7 +1023,7 @@ fn player_components(config: &WorldConfig, geodata: &GeoData) -> Vec<Component> 
     // spawn() already includes 3 voxels of clearance; add any extra on top.
     let spawn = (spawn.0, spawn.1 + config.spawn_clearance - 3, spawn.2);
 
-    vec![
+    let mut components = vec![
         // Sync index 19. Attached unconditionally, even before the player has chosen
         // anything: an *absent* parameter is what makes the client fall back to its built-in
         // defaults, so a default value has to be replicated rather than nothing at all. The
@@ -1105,7 +1114,15 @@ fn player_components(config: &WorldConfig, geodata: &GeoData) -> Vec<Component> 
         }),
         Component::UseEntity(UseEntityComponent::default()),
         Component::Wallet(WalletComponent::default()),
-    ]
+    ];
+
+    // Eight empty squares and square 0, which is what the client builds for itself. The
+    // session folds its own bindings in (`Session::entity_now`).
+    if config.ui_settings {
+        components.push(Component::UiSettings(UiSettingsComponent::default()));
+    }
+
+    components
 }
 
 /// Every solid chunk of the island, as `ChunkSync` packets.

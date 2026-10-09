@@ -45,6 +45,7 @@ pub mod resource_pickup;
 pub mod time_of_day;
 pub mod todo_list;
 pub mod transform;
+pub mod ui_settings;
 pub mod voxel_link;
 
 pub use character_customisation::CharacterCustomisationComponent;
@@ -69,6 +70,7 @@ pub use resource_pickup::ResourcePickupComponent;
 pub use time_of_day::TimeOfDayComponent;
 pub use todo_list::TodoListComponent;
 pub use transform::TransformComponent;
+pub use ui_settings::{HotbarSlot, UiSettingsComponent};
 pub use voxel_link::{VoxelLink, VoxelLinkComponent};
 
 use skysaga_proto::bitstream::BitWriter;
@@ -157,6 +159,8 @@ pub enum Component {
     /// `clienttodolistcomponent` -- the quest log.
     TodoList(TodoListComponent),
     Transform(TransformComponent),
+    /// `clientuisettingscomponent` -- the hotbar's bindings and the selected square.
+    UiSettings(UiSettingsComponent),
     UseEntity(UseEntityComponent),
     VoxelLink(VoxelLinkComponent),
     Wallet(WalletComponent),
@@ -188,6 +192,7 @@ impl Component {
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
             Self::TodoList(_) => "clienttodolistcomponent",
             Self::Transform(_) => "transformcomponent",
+            Self::UiSettings(_) => "clientuisettingscomponent",
             Self::UseEntity(_) => "clientuseentitycomponent",
             Self::VoxelLink(_) => "clientvoxellinkcomponent",
             Self::Wallet(_) => "clientwalletcomponent",
@@ -222,6 +227,7 @@ impl Component {
             Self::TimeOfDay(component) => component.sync(parameter, writer),
             Self::TodoList(component) => component.sync(parameter, writer),
             Self::Transform(component) => component.sync(parameter, writer),
+            Self::UiSettings(component) => component.sync(parameter, writer),
             Self::UseEntity(component) => component.sync(parameter, writer),
             Self::VoxelLink(component) => component.sync(parameter, writer),
             Self::Wallet(component) => component.sync(parameter, writer),

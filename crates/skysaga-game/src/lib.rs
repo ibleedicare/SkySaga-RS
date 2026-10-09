@@ -988,6 +988,33 @@ impl Session {
         hands[0].or(hands[1])
     }
 
+    /// The hotbar as the server now believes it, sent back to the player.
+    ///
+    /// Only when the player carries `clientuisettingscomponent` (`SKYSAGA_UI_SETTINGS=1`).
+    /// Off, the client keeps its own copy and nothing is sent, as before. On, this is what
+    /// puts the component's encoding in front of the client: a wrong width draws a wrong
+    /// hotbar on the next bind.
+    fn echo_hotbar(&self, world: &World) -> Vec<Vec<u8>> {
+        let carries = world.player_template.as_ref().is_some_and(|(player, _)| {
+            player
+                .components
+                .iter()
+                .any(|component| matches!(component, Component::UiSettings(_)))
+        });
+
+        if !carries {
+            return Vec::new();
+        }
+
+        self.sync_of(
+            self.player_entity_id,
+            &["hotbarslotresources", "activeslot"],
+            world,
+        )
+        .into_iter()
+        .collect()
+    }
+
     /// Bind `item` to one hand of a hotbar square, or with `None` empty that hand.
     fn bind_hand(&mut self, square: u32, hand: u32, item: Option<u32>) {
         let hands = self.hotbar.entry(square).or_default();
@@ -1591,7 +1618,7 @@ impl Session {
                 // always follow one with a SetActiveSlot.
                 self.active_slot = packet.slot;
 
-                Vec::new()
+                self.echo_hotbar(world)
             }
 
             (ClientPacket::RequestUiSettingsSetActiveSlot(packet), _) => {
@@ -1599,7 +1626,7 @@ impl Session {
 
                 self.active_slot = packet.slot;
 
-                Vec::new()
+                self.echo_hotbar(world)
             }
 
             // --- where the player is ---------------------------------------------------
@@ -3453,6 +3480,19 @@ impl Session {
                     // The quest log likewise: the world's template carries an empty one.
                     Component::TodoList(todo) => {
                         todo.tasks = self.todo_tasks.clone();
+                    }
+
+                    // The hotbar the client told us about, as the client keeps it.
+                    Component::UiSettings(ui_settings) => {
+                        ui_settings.active_slot = self.active_slot;
+
+                        for (square, slot) in ui_settings.hotbar.iter_mut().enumerate() {
+                            let hands = self.hotbar.get(&(square as u32));
+
+                            for (hand, spec) in slot.hands.iter_mut().enumerate() {
+                                spec.resource = hands.and_then(|hands| hands[hand]);
+                            }
+                        }
                     }
 
                     // The template carries full health; what this player has left is here.
