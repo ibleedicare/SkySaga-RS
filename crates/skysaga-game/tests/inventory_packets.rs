@@ -9,6 +9,7 @@
 
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
+use skysaga_proto::packets::crafting::ItemSpec;
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -249,26 +250,33 @@ fn equipping_armour_syncs_the_player() {
     assert_eq!(syncs(&burst), vec![player]);
 }
 
+/// A slot change for `slot` and `hand`, naming `item` or, with `None`, an unbind.
+fn bind(slot: u32, hand: u32, item: Option<&str>) -> Vec<u8> {
+    encode(|w| {
+        RequestUiSettingsSlotChange {
+            slot,
+            hand,
+            item_spec: ItemSpec {
+                resource: item.map(skysaga_core::name_hash),
+                ..ItemSpec::default()
+            },
+        }
+        .encode(w)
+    })
+}
+
+fn select(slot: u32) -> Vec<u8> {
+    encode(|w| RequestUiSettingsSetActiveSlot { slot }.encode(w))
+}
+
 #[test]
 fn binding_to_the_hotbar_sends_nothing_back() {
-    // The client keeps its own copy of `hotbarslotresources` and does not wait on a reply.
-    // Echoing a wrongly-encoded list back would be worse than staying quiet: the format is
-    // not confirmed, and the client would draw whatever it was sent.
+    // With `clientuisettingscomponent` off (the default) the client keeps its own copy of
+    // `hotbarslotresources` and does not wait on a reply.
     let world = world();
     let mut session = playing(&world);
 
-    let burst = session.handle(
-        ClientPacket::parse(&encode(|w| {
-            RequestUiSettingsSlotChange {
-                slot: 3,
-                resource: skysaga_core::name_hash("Dirt"),
-                unknown: 0,
-                item_uuid: "an-item".to_owned(),
-            }
-            .encode(w)
-        })),
-        &world,
-    );
+    let burst = session.handle(ClientPacket::parse(&bind(3, 0, Some("Dirt"))), &world);
 
     assert!(burst.is_empty(), "{burst:?}");
 
@@ -277,58 +285,70 @@ fn binding_to_the_hotbar_sends_nothing_back() {
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Dirt")));
 }
 
-/// **The two packets number the squares differently.** Measured against the retail client:
-/// pressing "1" reports an active slot of 0 and "5" reports 4, so `SetActiveSlot` counts from
-/// zero; dragging into the fifth square reports a bind of 5, so `SlotChange` counts from one.
-///
-/// This test used to select slot 1 after binding slot 1 and expect the same square, which is
-/// what the handler assumed too. In game the client sends both for one action and the two
-/// disagreed, so the hand came up empty and every placement fell through to a dig.
+/// **Both packets number the squares from zero.** The old reading took 5 bits for a 3-bit
+/// slot, so a bind of square 1 looked like "5" and a select of square 1 like "4", and a
+/// `- 1` made them agree for hand 0 only. Read from the client: `FUN_007f40d0` and
+/// `FUN_007f3ea0` both write the square with `FUN_007f3da0`, 3 bits.
 #[test]
-fn selecting_a_hotbar_square_changes_what_is_held() {
+fn a_bind_and_a_select_name_the_same_square() {
     let world = world();
     let mut session = playing(&world);
 
-    // Binds are one-based, so these are the first and second squares.
-    for (slot, item) in [(1u32, "Dirt"), (2, "Stone")] {
-        session.handle(
-            ClientPacket::parse(&encode(|w| {
-                RequestUiSettingsSlotChange {
-                    slot,
-                    resource: skysaga_core::name_hash(item),
-                    unknown: 0,
-                    item_uuid: String::new(),
-                }
-                .encode(w)
-            })),
-            &world,
-        );
+    for (slot, item) in [(0u32, "Dirt"), (3, "Stone")] {
+        session.handle(ClientPacket::parse(&bind(slot, 0, Some(item))), &world);
     }
 
     // The last bind is also what is selected, because the client does not always follow one
     // with a SetActiveSlot.
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Stone")));
 
-    // Selects are zero-based, so square 0 is the one "Dirt" was bound into by slot 1.
-    let burst = session.handle(
-        ClientPacket::parse(&encode(|w| {
-            RequestUiSettingsSetActiveSlot { slot: 0 }.encode(w)
-        })),
-        &world,
-    );
+    let burst = session.handle(ClientPacket::parse(&select(0)), &world);
 
     assert!(burst.is_empty(), "{burst:?}");
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Dirt")));
 
-    // And back to the second square, which the client would call slot 1.
-    session.handle(
-        ClientPacket::parse(&encode(|w| {
-            RequestUiSettingsSetActiveSlot { slot: 1 }.encode(w)
-        })),
-        &world,
-    );
+    session.handle(ClientPacket::parse(&select(3)), &world);
 
     assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Stone")));
+}
+
+#[test]
+fn a_square_holds_one_item_per_hand() {
+    // UISettings_SetHotbarSlotSpec (FUN_008d3330) writes +0x04 for hand 0 and +0x20 for
+    // hand 1: two specs per square. Which one a placement uses is inferred: hand 0 first.
+    let world = world();
+    let mut session = playing(&world);
+
+    session.handle(ClientPacket::parse(&bind(2, 1, Some("Metal_Sword"))), &world);
+    session.handle(ClientPacket::parse(&select(2)), &world);
+
+    assert_eq!(
+        session.held_resource(),
+        Some(skysaga_core::name_hash("Metal_Sword")),
+        "the second hand is held when the first is empty",
+    );
+
+    session.handle(ClientPacket::parse(&bind(2, 0, Some("Dirt"))), &world);
+
+    assert_eq!(
+        session.held_resource(),
+        Some(skysaga_core::name_hash("Dirt")),
+        "the first hand wins when both are bound",
+    );
+}
+
+#[test]
+fn an_unbind_empties_the_hand() {
+    // An unbind is a spec naming no resource. The old reading took the next 32 bits as a
+    // hash and bound whatever they happened to be.
+    let world = world();
+    let mut session = playing(&world);
+
+    session.handle(ClientPacket::parse(&bind(4, 0, Some("Dirt"))), &world);
+    session.handle(ClientPacket::parse(&bind(4, 0, None)), &world);
+    session.handle(ClientPacket::parse(&select(4)), &world);
+
+    assert_eq!(session.held_resource(), None);
 }
 
 #[test]
@@ -406,16 +426,8 @@ fn no_inventory_packet_is_reported_as_unhandled() {
             }
             .encode(w)
         }),
-        encode(|w| {
-            RequestUiSettingsSlotChange {
-                slot: 1,
-                resource: 0,
-                unknown: 0,
-                item_uuid: String::new(),
-            }
-            .encode(w)
-        }),
-        encode(|w| RequestUiSettingsSetActiveSlot { slot: 1 }.encode(w)),
+        bind(1, 0, None),
+        select(1),
     ];
 
     for packet in &packets {

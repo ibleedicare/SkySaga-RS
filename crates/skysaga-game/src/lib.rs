@@ -701,11 +701,12 @@ pub struct Session {
     /// so opening containers means moving this to the server and passing it in.
     inventories: Inventories,
 
-    /// Hotbar square to the item name hash bound to it.
+    /// Hotbar square to the item name hash bound to each of its two hands.
     ///
-    /// Not storage. `hotbarslotresources` holds *resources*, so a bound stack stays in the
-    /// rucksack; this is only the server's record of what the player is holding.
-    hotbar: std::collections::HashMap<u32, u32>,
+    /// Not storage. `hotbarslotresources` holds item specs, so a bound stack stays in the
+    /// rucksack; this is only the server's record of what the player is holding. Two hands
+    /// per square, as the client keeps them (`UISettings_SetHotbarSlotSpec`, `FUN_008d3330`).
+    hotbar: std::collections::HashMap<u32, [Option<u32>; 2]>,
 
     /// Which hotbar square is selected.
     active_slot: u32,
@@ -979,8 +980,23 @@ impl Session {
     ///
     /// What the player is holding. Placing a block and digging arrive as the same
     /// `PerformVoxelActions` packet, and this is what tells the two apart.
+    ///
+    /// Hand 0 first, then hand 1. Which hand a placement uses is inferred, not read.
     pub fn held_resource(&self) -> Option<u32> {
-        self.hotbar.get(&self.active_slot).copied()
+        let hands = self.hotbar.get(&self.active_slot)?;
+
+        hands[0].or(hands[1])
+    }
+
+    /// Bind `item` to one hand of a hotbar square, or with `None` empty that hand.
+    fn bind_hand(&mut self, square: u32, hand: u32, item: Option<u32>) {
+        let hands = self.hotbar.entry(square).or_default();
+
+        hands[hand.min(1) as usize] = item;
+
+        if hands.iter().all(Option::is_none) {
+            self.hotbar.remove(&square);
+        }
     }
 
     /// Create a stack of `item` in the first free rucksack square, returning its entity id.
@@ -1521,16 +1537,13 @@ impl Session {
                 // The hands are a hotbar bind, not a move, and the model reports no effects
                 // for them. Record what is now held, which is the whole point of the packet.
                 if packet.equip_slot < 2 {
-                    self.hotbar.remove(&self.active_slot);
-
-                    if let Some(item) = self
+                    let item = self
                         .inventories
                         .slot(packet.entity_id, packet.bag_slot)
                         .filter(|item| *item != 0)
-                        .and_then(|item| self.inventories.name(item))
-                    {
-                        self.hotbar.insert(self.active_slot, item);
-                    }
+                        .and_then(|item| self.inventories.name(item));
+
+                    self.bind_hand(self.active_slot, packet.equip_slot, item);
                 }
 
                 self.apply(effects, world)
@@ -1543,7 +1556,7 @@ impl Session {
                 if packet.equip_slot < 2 {
                     debug!(slot = packet.equip_slot, "emptied a hand");
 
-                    self.hotbar.remove(&self.active_slot);
+                    self.bind_hand(self.active_slot, packet.equip_slot, None);
 
                     return self
                         .sync_of(self.player_entity_id, &["hotbarslotresources"], world)
@@ -1563,33 +1576,21 @@ impl Session {
             }
 
             (ClientPacket::RequestUiSettingsSlotChange(packet), _) => {
-                // **This packet numbers the squares from one and `SetActiveSlot` numbers them
-                // from zero.** Measured against the retail client: the "1" key reports an
-                // active slot of 0 and the "5" key reports 4, while dragging an item into the
-                // fifth square reports a bind of 5. The client sends both for one action, a
-                // tenth of a millisecond apart, so keying the hotbar by the raw numbers files
-                // the item under 5 and then looks it up under 4.
-                //
-                // Everything downstream is kept in the zero-based numbering, because that is
-                // the one the player's `activeslot` parameter uses.
-                let square = packet.slot.saturating_sub(1);
-
+                // Both hotbar packets number the squares from zero: they write the square
+                // with the same 3-bit field. An unbind is a spec naming no resource.
                 debug!(
-                    slot = packet.slot,
-                    square,
-                    resource = packet.resource,
+                    square = packet.slot,
+                    hand = packet.hand,
+                    resource = ?packet.item_spec.resource,
                     "hotbar bound",
                 );
 
-                self.hotbar.insert(square, packet.resource);
+                self.bind_hand(packet.slot, packet.hand, packet.item_spec.resource);
 
                 // A fresh bind is also what the player just selected: the client does not
                 // always follow one with a SetActiveSlot.
-                self.active_slot = square;
+                self.active_slot = packet.slot;
 
-                // Deliberately nothing back. `hotbarslotresources` (sync index 34) is kept by
-                // the client itself, and its encoding is not confirmed -- echoing a wrong one
-                // would draw a wrong hotbar, which is worse than drawing the client's own.
                 Vec::new()
             }
 

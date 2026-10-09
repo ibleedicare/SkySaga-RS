@@ -47,10 +47,12 @@ fn hold(session: &mut Session, world: &World, item: &str) {
     session.handle(
         ClientPacket::parse(&encode(|w| {
             RequestUiSettingsSlotChange {
-                slot: 1,
-                resource: skysaga_core::name_hash(item),
-                unknown: 0,
-                item_uuid: String::new(),
+                slot: 0,
+                hand: 0,
+                item_spec: skysaga_proto::packets::crafting::ItemSpec {
+                    resource: Some(skysaga_core::name_hash(item)),
+                    ..Default::default()
+                },
             }
             .encode(w)
         })),
