@@ -840,12 +840,6 @@ impl GameServer {
             return;
         };
 
-        let Some(definition) = self.world.item_definition().cloned() else {
-            warn!("cannot send mail: BasicInventoryItem is not defined");
-
-            return;
-        };
-
         let Some(session) = self.sessions.get_mut(&guid) else {
             return;
         };
@@ -861,31 +855,18 @@ impl GameServer {
 
         self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
 
-        // Announce the attachment items themselves, so the container's slot list names
-        // entities the client has been told about.
         let Some(mail) = session.mail(&uuid).cloned() else {
             return;
         };
 
-        let items: Vec<(u32, skysaga_world::InventoryItemComponent)> = session
-            .inventories()
-            .slots(mail.attachment_entity)
-            .iter()
-            .copied()
-            .filter(|item| *item != 0)
-            .filter_map(|item| {
-                session
-                    .inventories()
-                    .item(item)
-                    .map(|component| (item, component.clone()))
-            })
-            .collect();
+        // The attachment items, and **the container that names them**. One helper for both this
+        // path and the restore, because getting the order wrong -- or leaving the container out
+        // -- is a message that arrives with no attachments, and the two paths would otherwise
+        // have to be got right twice.
+        let announcements = session.announce_attachments(&uuid, &self.world);
 
-        for (id, component) in items {
-            let stack = Entity::new(id, vec![Component::InventoryItem(component)]);
-
-            self.peer
-                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        for packet in announcements {
+            self.peer.send(guid, &packet);
         }
 
         self.flush_notifications(guid);

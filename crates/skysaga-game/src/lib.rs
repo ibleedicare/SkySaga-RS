@@ -3072,10 +3072,73 @@ impl Session {
 
         info!(messages = stored.len(), "restored the inbox");
 
+        // The stacks are announced by the effects; the containers that name them are not, and a
+        // container the client has never heard of shows a message with no attachments.
         let mut out = self.apply(effects, world);
+
+        for message in stored {
+            out.extend(self.announce_attachments(&message.uuid, world));
+        }
 
         // ...and the inbox itself, which is what draws the rows.
         out.extend(self.sync_mailbox(world));
+
+        out
+    }
+
+    /// Everything the client must be told about a message's attachments, in order.
+    ///
+    /// **The items first, then the container that names them.** `mailitemlist` carries the
+    /// container's entity id and the client resolves it to an entity with an inventory; a
+    /// container announced before its items has slots pointing at ids the client has never
+    /// heard of, and one never announced at all resolves to nothing -- the message arrives with
+    /// its text and no attachments, which is what a live client showed.
+    ///
+    /// `documentations/mail.md` says the same: the item entities are created *before* the
+    /// `EntityAdd` that references them.
+    pub fn announce_attachments(&self, uuid: &str, world: &World) -> Vec<Vec<u8>> {
+        let Some(mail) = self.mail(uuid) else {
+            return Vec::new();
+        };
+
+        let container = mail.attachment_entity;
+
+        let mut out = Vec::new();
+
+        if let Some(definition) = world.item_definition() {
+            for item in self
+                .inventories
+                .slots(container)
+                .iter()
+                .copied()
+                .filter(|item| *item != 0)
+            {
+                let Some(component) = self.inventories.item(item) else {
+                    continue;
+                };
+
+                let stack = Entity::new(item, vec![Component::InventoryItem(component.clone())]);
+
+                out.push(encode(|w| stack.to_entity_add(definition).encode(w)));
+            }
+        }
+
+        let Some(definition) = world.mail_item_definition() else {
+            warn!("MailItem is not defined; a message's attachments cannot be announced");
+
+            return out;
+        };
+
+        let built = Entity::new(
+            container,
+            vec![Component::Inventory(skysaga_world::InventoryComponent {
+                inventory_entity_list: self.inventories.slots(container).to_vec(),
+                max_inventory_slots: (MAIL_ATTACHMENT_SLOTS + MAIL_ATTACHMENT_BASE) as u8,
+                ..Default::default()
+            })],
+        );
+
+        out.push(encode(|w| built.to_entity_add(definition).encode(w)));
 
         out
     }
