@@ -701,12 +701,14 @@ pub struct Session {
     /// so opening containers means moving this to the server and passing it in.
     inventories: Inventories,
 
-    /// Hotbar square to the item name hash bound to each of its two hands.
+    /// Hotbar square to the spec bound to each of its two hands, as the client sent it.
     ///
     /// Not storage. `hotbarslotresources` holds item specs, so a bound stack stays in the
     /// rucksack; this is only the server's record of what the player is holding. Two hands
     /// per square, as the client keeps them (`UISettings_SetHotbarSlotSpec`, `FUN_008d3330`).
-    hotbar: std::collections::HashMap<u32, [Option<u32>; 2]>,
+    /// Kept whole, uuid included: echoed back with less, the client re-sends the bind every
+    /// tick.
+    hotbar: std::collections::HashMap<u32, [ItemSpec; 2]>,
 
     /// Which hotbar square is selected.
     active_slot: u32,
@@ -985,7 +987,15 @@ impl Session {
     pub fn held_resource(&self) -> Option<u32> {
         let hands = self.hotbar.get(&self.active_slot)?;
 
-        hands[0].or(hands[1])
+        hands[0].resource.or(hands[1].resource)
+    }
+
+    /// What one hand of a hotbar square is bound to, if anything.
+    pub fn hotbar_spec(&self, square: u32, hand: u32) -> Option<&ItemSpec> {
+        self.hotbar
+            .get(&square)
+            .map(|hands| &hands[hand.min(1) as usize])
+            .filter(|spec| spec.resource.is_some())
     }
 
     /// The hotbar as the server now believes it, sent back to the player.
@@ -1015,13 +1025,13 @@ impl Session {
         .collect()
     }
 
-    /// Bind `item` to one hand of a hotbar square, or with `None` empty that hand.
-    fn bind_hand(&mut self, square: u32, hand: u32, item: Option<u32>) {
+    /// Bind `spec` to one hand of a hotbar square; a spec naming no resource empties it.
+    fn bind_hand(&mut self, square: u32, hand: u32, spec: ItemSpec) {
         let hands = self.hotbar.entry(square).or_default();
 
-        hands[hand.min(1) as usize] = item;
+        hands[hand.min(1) as usize] = spec;
 
-        if hands.iter().all(Option::is_none) {
+        if hands.iter().all(|spec| spec.resource.is_none()) {
             self.hotbar.remove(&square);
         }
     }
@@ -1561,8 +1571,9 @@ impl Session {
                     self.inventories
                         .equip(packet.entity_id, packet.bag_slot, packet.equip_slot);
 
-                // The hands are a hotbar bind, not a move, and the model reports no effects
-                // for them. Record what is now held, which is the whole point of the packet.
+                // **Filling a hand binds nothing.** The client fills the hands for a square
+                // *before* it selects it (logged live, 2026-10-10), so binding here filed items
+                // under the square being left. Bindings come from slot changes alone.
                 if packet.equip_slot < 2 {
                     let item = self
                         .inventories
@@ -1570,7 +1581,7 @@ impl Session {
                         .filter(|item| *item != 0)
                         .and_then(|item| self.inventories.name(item));
 
-                    self.bind_hand(self.active_slot, packet.equip_slot, item);
+                    debug!(hand = packet.equip_slot, ?item, "filled a hand");
                 }
 
                 self.apply(effects, world)
@@ -1580,15 +1591,14 @@ impl Session {
                 // **The hands hold what the hotbar names**, so emptying one is not a move: the
                 // model reports no effects and what has to change is the binding. Anything else
                 // goes back into the first free rucksack square.
+                // **Emptying a hand is how the client changes square**, not an unbind: every
+                // turn of the mouse wheel sends `UnEquip` for both hands and then
+                // `SetActiveSlot` (logged live, 2026-10-09). The bindings stay; an unbind
+                // arrives as a slot change naming no resource.
                 if packet.equip_slot < 2 {
                     debug!(slot = packet.equip_slot, "emptied a hand");
 
-                    self.bind_hand(self.active_slot, packet.equip_slot, None);
-
-                    return self
-                        .sync_of(self.player_entity_id, &["hotbarslotresources"], world)
-                        .into_iter()
-                        .collect();
+                    return Vec::new();
                 }
 
                 let effects = self.inventories.unequip(self.player_entity_id, packet.equip_slot);
@@ -1612,7 +1622,7 @@ impl Session {
                     "hotbar bound",
                 );
 
-                self.bind_hand(packet.slot, packet.hand, packet.item_spec.resource);
+                self.bind_hand(packet.slot, packet.hand, packet.item_spec.clone());
 
                 // A fresh bind is also what the player just selected: the client does not
                 // always follow one with a SetActiveSlot.
@@ -3487,11 +3497,11 @@ impl Session {
                         ui_settings.active_slot = self.active_slot;
 
                         for (square, slot) in ui_settings.hotbar.iter_mut().enumerate() {
-                            let hands = self.hotbar.get(&(square as u32));
-
-                            for (hand, spec) in slot.hands.iter_mut().enumerate() {
-                                spec.resource = hands.and_then(|hands| hands[hand]);
-                            }
+                            slot.hands = self
+                                .hotbar
+                                .get(&(square as u32))
+                                .cloned()
+                                .unwrap_or_default();
                         }
                     }
 
