@@ -56,7 +56,9 @@ use skysaga_proto::packets::crafting::{
 use skysaga_proto::packets::todo_list::{
     TodoListTaskAdd, TodoListTaskRef, TodoTask, TASK_LIST_DEFAULT,
 };
-use skysaga_proto::packets::voxel::{ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
+use skysaga_proto::packets::voxel::{
+    ActionLocation, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions,
+};
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -997,6 +999,20 @@ impl Session {
         let hands = self.hotbar.get(&self.active_slot)?;
 
         hands[0].resource.or(hands[1].resource)
+    }
+
+    /// What the hand at `location` holds on the selected square: 0 is the L half, 1 the R.
+    ///
+    /// `None` for anything that is not a hand, and for a hand with nothing bound. It does not
+    /// fall back to the other hand, which is what [`Self::held_resource`] is for.
+    pub fn held_in(&self, location: ActionLocation) -> Option<u32> {
+        let hand = match location {
+            ActionLocation::LeftHand => 0,
+            ActionLocation::RightHand => 1,
+            _ => return None,
+        };
+
+        self.hotbar.get(&self.active_slot)?[hand].resource
     }
 
     /// What one hand of a hotbar square is bound to, if anything.
@@ -2270,7 +2286,11 @@ impl Session {
         // everything else digs. The hotbar keeps resource *hashes*, so it can still name an
         // item the player has run out of -- hence the check that a stack actually exists
         // before one is taken from it.
-        let held = packet.location.is_hand().then(|| self.held_resource()).flatten();
+        //
+        // **The hand that acts is the hand that holds.** A square has two halves and each
+        // mouse button swings one, so the packet's `location` picks the half: read as one
+        // item, a swing of the right hand's pickaxe placed the left hand's dirt.
+        let held = self.held_in(packet.location);
 
         // An Anvil is not a placeable block, so before this branch existed it fell through to
         // the dig below and broke the ground it was clicked on.

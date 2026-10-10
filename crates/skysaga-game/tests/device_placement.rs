@@ -67,7 +67,7 @@ fn click(session: &mut Session, world: &World, voxel: [u32; 3]) -> Vec<Vec<u8>> 
     session.handle(
         ClientPacket::parse(&encode(|w| {
             PerformVoxelActions {
-                location: ActionLocation::RightHand,
+                location: ActionLocation::LeftHand,
                 chunk: [1, 0, 1],
                 voxel,
                 side: BlockSide::Top,
