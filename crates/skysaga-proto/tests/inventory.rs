@@ -5,12 +5,13 @@
 //! down; the field values beside them were known in advance because the drag that produced
 //! them had a known source and target.
 //!
-//! This matters more than usual for these packets. They are client to server, so the client
-//! contains no serialiser to read the layout off, and two of them were decoded wrongly first:
-//! an earlier reading of `InventoryItemTransferToSlot` straddled the count field and turned a
-//! 9 -> 10 drag into 9 -> 18.
+//! This matters more than usual for these packets. They are client to server, and three of
+//! them were decoded wrongly first: an earlier reading of `InventoryItemTransferToSlot`
+//! straddled the count field and turned a 9 -> 10 drag into 9 -> 18, and the two hotbar
+//! packets were read with a 5-bit slot until their serialisers were read in the client.
 
 use skysaga_proto::bitstream::{BitReader, BitWriter, ID_USER_PACKET_ENUM};
+use skysaga_proto::packets::crafting::ItemSpec;
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
     RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -208,14 +209,110 @@ fn a_swap_interleaves_its_slots_with_its_entities() {
 }
 
 // --- the hotbar ------------------------------------------------------------------------
+//
+// These two *do* have a serialiser in the client, and the layouts below are read from it:
+// `Send_RequestUISettingsSlotChange` (FUN_007f40d0) and `Send_RequestUISettingsSetActiveSlot`
+// (FUN_007f3ea0). An earlier reading took a 5-bit "slot" from a capture; the vectors marked
+// "logged" are the values that reading produced, re-read with the real layout.
+
+fn dirt() -> u32 {
+    skysaga_core::name_hash("Dirt")
+}
+
+/// The body of a slot change after its first five bits, for a spec naming `resource` with no
+/// materials, no teach item and no uuid: what every logged bind looked like.
+fn rest_of_a_plain_spec(w: &mut BitWriter, resource: u32) {
+    w.write_u32(resource);
+    w.write_bits_le(0, 3); // material count
+    w.write_bit(false); // teach item absent
+    w.write_string("");
+}
 
 #[test]
-fn a_slot_change_carries_a_resource_hash_and_an_item_uuid() {
-    let packet = RequestUiSettingsSlotChange {
-        slot: 3,
-        resource: skysaga_core::name_hash("Dirt"),
-        unknown: 0,
+fn a_slot_change_is_a_three_bit_slot_a_hand_bit_and_an_item_spec() {
+    // FUN_007f40d0: hotbarSlot via FUN_007f3da0 (3 bits), hand via FUN_007f3e20 (1 bit),
+    // itemSpec via WriteItemSpec (FUN_007971a0). STAT.
+    let spec = ItemSpec {
+        resource: Some(dirt()),
+        sub_resources: Vec::new(),
+        material_resource: None,
         item_uuid: "8b2f4b3e-0000-4000-8000-000000000001".to_owned(),
+    };
+
+    let bytes = encoded(|w| {
+        w.write_packet_id(15);
+        w.write_bits_le(2, 3);
+        w.write_bit(true);
+        spec.encode(w);
+    });
+
+    let mut reader = BitReader::from_bytes(&bytes);
+    reader.read_packet_id().unwrap();
+
+    assert_eq!(
+        RequestUiSettingsSlotChange::decode(&mut reader).unwrap(),
+        RequestUiSettingsSlotChange {
+            slot: 2,
+            hand: 1,
+            item_spec: spec,
+        },
+    );
+}
+
+#[test]
+fn the_logged_five_bit_slots_are_a_slot_a_hand_and_the_resource_bit() {
+    // Logged by the old 5-bit reading: a bind of 5 beside an active slot of "4", and drags
+    // reported as 11, 15, 19, 23. Read as slot(3) hand(1) present(1).
+    for (logged, slot, hand) in [(5, 1, 0), (11, 2, 1), (15, 3, 1), (19, 4, 1), (23, 5, 1)] {
+        let bytes = encoded(|w| {
+            w.write_packet_id(15);
+            w.write_bits_le(logged, 5);
+            rest_of_a_plain_spec(w, dirt());
+        });
+
+        let mut reader = BitReader::from_bytes(&bytes);
+        reader.read_packet_id().unwrap();
+
+        let packet = RequestUiSettingsSlotChange::decode(&mut reader).unwrap();
+
+        assert_eq!((packet.slot, packet.hand), (slot, hand), "logged {logged}");
+        assert_eq!(packet.item_spec.resource, Some(dirt()), "logged {logged}");
+    }
+}
+
+#[test]
+fn an_unbind_names_no_resource() {
+    // The "none" sentinel DAT_00ea0a64 goes out as a clear presence bit. The old reading took
+    // the next 32 bits as a hash regardless.
+    let spec = ItemSpec::default();
+
+    let bytes = encoded(|w| {
+        w.write_packet_id(15);
+        w.write_bits_le(4, 3);
+        w.write_bit(false);
+        spec.encode(w);
+    });
+
+    let mut reader = BitReader::from_bytes(&bytes);
+    reader.read_packet_id().unwrap();
+
+    let packet = RequestUiSettingsSlotChange::decode(&mut reader).unwrap();
+
+    assert_eq!((packet.slot, packet.hand), (4, 0));
+    assert_eq!(packet.item_spec.resource, None);
+}
+
+#[test]
+fn a_slot_change_round_trips_a_spec_with_materials() {
+    let packet = RequestUiSettingsSlotChange {
+        slot: 7,
+        hand: 0,
+        item_spec: ItemSpec {
+            resource: Some(skysaga_core::name_hash("Metal_Sword")),
+            sub_resources: vec![Some(skysaga_core::name_hash("Iron")), None],
+            material_resource: Some(dirt()),
+            item_uuid: "a".to_owned(),
+        },
     };
 
     let bytes = encoded(|w| packet.encode(w));
@@ -223,44 +320,46 @@ fn a_slot_change_carries_a_resource_hash_and_an_item_uuid() {
     let mut reader = BitReader::from_bytes(&bytes);
     assert_eq!(reader.read_packet_id().unwrap(), 15);
 
-    assert_eq!(RequestUiSettingsSlotChange::decode(&mut reader).unwrap(), packet);
+    assert_eq!(
+        RequestUiSettingsSlotChange::decode(&mut reader).unwrap(),
+        packet
+    );
 }
 
 #[test]
-fn the_resource_starts_at_bit_five() {
-    // How the layout was found: a 32 bit window was slid over the payload until a known
-    // resource hash appeared, and it appeared at bit 5. That offset is the whole finding, so
-    // it is asserted directly rather than only through a round trip.
-    let dirt = skysaga_core::name_hash("Dirt");
-
+fn a_set_active_slot_is_one_three_bit_field() {
+    // FUN_007f3ea0 writes activeSlot through FUN_007f3da0: 8 - NumBitsRequired8(7) = 3 bits.
     let bytes = encoded(|w| {
-        RequestUiSettingsSlotChange {
-            slot: 1,
-            resource: dirt,
-            unknown: 0,
-            item_uuid: String::new(),
-        }
-        .encode(w)
+        w.write_packet_id(16);
+        w.write_bits_le(6, 3);
     });
-
-    let mut reader = BitReader::from_bytes(&bytes);
-    reader.read_packet_id().unwrap();
-    reader.skip_bits(5).unwrap();
-
-    assert_eq!(reader.read_u32().unwrap(), dirt);
-}
-
-#[test]
-fn a_set_active_slot_is_one_five_bit_field() {
-    let packet = RequestUiSettingsSetActiveSlot { slot: 6 };
-
-    let bytes = encoded(|w| packet.encode(w));
-
-    // 8 id bits + 5 = 13, so two bytes -- which is the size the C# records.
-    assert_eq!(bytes.len(), 2);
 
     let mut reader = BitReader::from_bytes(&bytes);
     assert_eq!(reader.read_packet_id().unwrap(), 16);
 
-    assert_eq!(RequestUiSettingsSetActiveSlot::decode(&mut reader).unwrap(), packet);
+    assert_eq!(
+        RequestUiSettingsSetActiveSlot::decode(&mut reader).unwrap(),
+        RequestUiSettingsSetActiveSlot { slot: 6 },
+    );
+}
+
+#[test]
+fn the_logged_active_slots_were_four_times_the_square() {
+    // The server logged exactly 0, 4, 8, ... 28: three real bits read as five.
+    for logged in (0..32).step_by(4) {
+        let bytes = encoded(|w| {
+            w.write_packet_id(16);
+            w.write_bits_le(logged, 5);
+        });
+
+        let mut reader = BitReader::from_bytes(&bytes);
+        reader.read_packet_id().unwrap();
+
+        assert_eq!(
+            RequestUiSettingsSetActiveSlot::decode(&mut reader)
+                .unwrap()
+                .slot,
+            logged / 4,
+        );
+    }
 }

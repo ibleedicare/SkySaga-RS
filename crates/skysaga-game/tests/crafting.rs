@@ -564,10 +564,12 @@ fn place_anvil(session: &mut Session, world: &World) -> u32 {
     session.handle(
         ClientPacket::parse(&encode(|w| {
             RequestUiSettingsSlotChange {
-                slot: 1,
-                resource: skysaga_core::name_hash("Anvil"),
-                unknown: 0,
-                item_uuid: String::new(),
+                slot: 0,
+                hand: 0,
+                item_spec: skysaga_proto::packets::crafting::ItemSpec {
+                    resource: Some(skysaga_core::name_hash("Anvil")),
+                    ..Default::default()
+                },
             }
             .encode(w)
         })),

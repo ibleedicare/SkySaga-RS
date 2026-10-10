@@ -18,7 +18,7 @@ pub use components::{
     InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, OwnerComponent, PhysicsComponent,
     PickupComponent, PlayerAspectsComponent, PlayerNameComponent, RecipeBookComponent,
     ResourcePickupComponent, TimeOfDayComponent, TodoListComponent, TransformComponent,
-    UseEntityComponent,
+    UiSettingsComponent, HotbarSlot, UseEntityComponent,
     VoxelLink, VoxelLinkComponent, WalletComponent,
 };
 pub use entity::Entity;

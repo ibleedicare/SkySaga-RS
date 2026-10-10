@@ -13,8 +13,10 @@
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::inventory::{
-    RequestEquipInventoryItem, RequestUnEquipInventoryItem,
+    RequestEquipInventoryItem, RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
+    RequestUnEquipInventoryItem,
 };
+use skysaga_proto::packets::crafting::ItemSpec;
 use skysaga_proto::packets::EntitySync;
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
@@ -163,23 +165,85 @@ fn taking_something_off_syncs_the_slot_list() {
     );
 }
 
-/// A hand is not storage: it holds whatever the hotbar names, so taking one "off" clears the
-/// binding rather than moving an item.
+fn bind(session: &mut Session, world: &World, square: u32, hand: u32, item: &str, uuid: &str) {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSlotChange {
+                slot: square,
+                hand,
+                item_spec: ItemSpec {
+                    resource: Some(skysaga_core::name_hash(item)),
+                    item_uuid: uuid.to_owned(),
+                    ..ItemSpec::default()
+                },
+            }
+            .encode(w)
+        })),
+        world,
+    );
+}
+
+fn select(session: &mut Session, world: &World, square: u32) {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSetActiveSlot { slot: square }.encode(w)
+        })),
+        world,
+    );
+}
+
+/// **Emptying the hands is how the client changes square**, not an unbind. Logged live on
+/// 2026-10-09: every turn of the mouse wheel sends `UnEquip` hand 0, `UnEquip` hand 1, then
+/// `SetActiveSlot`. Clearing the binding on those emptied the whole hotbar as the player
+/// scrolled through it.
 #[test]
-fn emptying_a_hand_clears_what_is_held() {
+fn emptying_the_hands_to_change_square_keeps_the_bindings() {
+    let world = world();
+    let mut session = playing(&world);
+
+    session.give("Dirt", 10).unwrap();
+    bind(&mut session, &world, 1, 0, "Dirt", "dirt-uuid");
+
+    // Scroll away and back, exactly as logged.
+    unequip(&mut session, &world, 0);
+    unequip(&mut session, &world, 1);
+    select(&mut session, &world, 2);
+
+    unequip(&mut session, &world, 0);
+    unequip(&mut session, &world, 1);
+    select(&mut session, &world, 1);
+
+    assert_eq!(session.held_resource(), Some(skysaga_core::name_hash("Dirt")));
+}
+
+/// The bind is kept whole, uuid included: the client compares what it is sent against its own
+/// spec, and an echo missing the uuid made it re-send the bind every tick (logged live).
+#[test]
+fn a_binding_keeps_the_whole_spec_the_client_sent() {
+    let world = world();
+    let mut session = playing(&world);
+
+    bind(&mut session, &world, 3, 1, "Metal_Sword", "sword-uuid");
+
+    let spec = session.hotbar_spec(3, 1).expect("bound");
+
+    assert_eq!(spec.item_uuid, "sword-uuid");
+    assert_eq!(spec.resource, Some(skysaga_core::name_hash("Metal_Sword")));
+}
+
+#[test]
+fn equipping_what_a_hand_already_names_keeps_its_spec() {
     let world = world();
     let mut session = playing(&world);
 
     let sword = session.give("Metal_Sword", 1).unwrap();
     let slot = session.slot_of(sword).unwrap();
 
+    select(&mut session, &world, 0);
+    bind(&mut session, &world, 0, 0, "Metal_Sword", "sword-uuid");
     equip(&mut session, &world, slot, 0);
 
-    assert!(session.held_resource().is_some(), "nothing was in hand to begin with");
-
-    unequip(&mut session, &world, 0);
-
-    assert!(session.held_resource().is_none(), "the hand is still holding it");
+    assert_eq!(session.hotbar_spec(0, 0).unwrap().item_uuid, "sword-uuid");
 }
 
 /// An empty slot is an ordinary no-op rather than an error: the client sends this on any drag
@@ -190,4 +254,27 @@ fn emptying_an_empty_slot_does_nothing() {
     let mut session = playing(&world);
 
     assert!(unequip(&mut session, &world, 3).is_empty());
+}
+
+/// **Filling a hand binds nothing.** Logged live on 2026-10-10: pressing "4" from square 2 sends
+/// `Equip` of the sword into hand 0 *before* `SetActiveSlot`, so binding on equip filed the sword
+/// under the square being left and the client drew a ghost of it there. Bindings come from
+/// slot changes alone.
+#[test]
+fn filling_a_hand_before_the_select_binds_nothing() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sword = session.give("Metal_Sword", 1).unwrap();
+    let slot = session.slot_of(sword).unwrap();
+
+    bind(&mut session, &world, 3, 0, "Metal_Sword", "sword-uuid");
+    select(&mut session, &world, 2);
+
+    // The order the client used: fill the hand for square 3, then select it.
+    equip(&mut session, &world, slot, 0);
+    select(&mut session, &world, 3);
+
+    assert_eq!(session.hotbar_spec(2, 0), None, "a ghost of the sword on square 2");
+    assert_eq!(session.hotbar_spec(3, 0).unwrap().item_uuid, "sword-uuid");
 }

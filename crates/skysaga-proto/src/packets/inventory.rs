@@ -26,6 +26,7 @@
 //! exactly; nothing here is wide enough for the difference to show.
 
 use crate::bitstream::{BitError, BitReader, BitWriter};
+use crate::packets::crafting::ItemSpec;
 
 /// Enough to address the 45 inventory slots: `32 - NumBitsRequired(45)`.
 const SLOT_BITS: u32 = 6;
@@ -33,8 +34,11 @@ const SLOT_BITS: u32 = 6;
 /// A stack size. Confirmed against splits: half of 50 arrives as 25, a partial drag of 5 as 5.
 const COUNT_BITS: u32 = 8;
 
-/// The hotbar's squares.
-const HOTBAR_SLOT_BITS: u32 = 5;
+/// The hotbar's eight squares: `8 - NumBitsRequired8(7)` (FUN_007f3da0).
+pub const HOTBAR_SLOT_BITS: u32 = 3;
+
+/// Which of a square's two hands: `8 - NumBitsRequired8(1)` (FUN_007f3e20).
+const HAND_BITS: u32 = 1;
 
 /// Drag and drop onto an **empty** square: move `count` of `source_slot` to `target_slot`.
 ///
@@ -293,60 +297,55 @@ impl RequestUnEquipInventoryItem {
     }
 }
 
-/// Binding an item to a hotbar square.
+/// Binding an item to a hotbar square, in one of its two hands.
 ///
-/// The hotbar is **not storage**: `hotbarslotresources` holds item name *hashes*, so a bound
-/// item legitimately stays in the rucksack. What looks like a duplicate is one stack
-/// referenced from two places.
+/// The hotbar is **not storage**: `hotbarslotresources` holds item specs, so a bound item
+/// legitimately stays in the rucksack. What looks like a duplicate is one stack referenced
+/// from two places.
+///
+/// Read from the client's serialiser, `Send_RequestUISettingsSlotChange` (`FUN_007f40d0`):
 ///
 /// ```text
-///   slot        5     hotbar square
-///   resource   32     item name hash (GeoData Resources)
-///   unknown     4     zero in every capture
-///   itemUUID   str    standard framing
+///   hotbarSlot   3     clamped to 0..7 (FUN_007f3da0)
+///   hand         1     0 or 1 (FUN_007f3e20)
+///   itemSpec           WriteItemSpec (FUN_007971a0); an unbind names no resource
 /// ```
 ///
-/// The resource offset of bit 5 is how the layout was found: a 32-bit window slid over the
-/// payload until a known hash appeared.
+/// This was once read as a 5-bit slot, a 32-bit hash and 4 "unknown" bits, which made the
+/// squares look numbered from one: the low bits of that "slot" are the hand and the spec's
+/// presence bit. See `documentations/ui-settings-and-hotbar.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestUiSettingsSlotChange {
     pub slot: u32,
-    /// `Util.ComputeCrc32` of a GeoData resource name.
-    pub resource: u32,
-    /// Zero in every capture; purpose unknown, kept so the packet round-trips.
-    pub unknown: u32,
-    pub item_uuid: String,
+    pub hand: u32,
+    pub item_spec: ItemSpec,
 }
 
 impl RequestUiSettingsSlotChange {
     pub const ID: u16 = 15;
 
-    const UNKNOWN_BITS: u32 = 4;
-
     pub fn encode(&self, writer: &mut BitWriter) {
         writer.write_packet_id(Self::ID);
 
         writer.write_bits_le(self.slot, HOTBAR_SLOT_BITS);
-        writer.write_u32(self.resource);
-        writer.write_bits_le(self.unknown, Self::UNKNOWN_BITS);
-        writer.write_string(&self.item_uuid);
+        writer.write_bits_le(self.hand, HAND_BITS);
+        self.item_spec.encode(writer);
     }
 
     pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
         Ok(Self {
             slot: reader.read_bits_le(HOTBAR_SLOT_BITS)?,
-            resource: reader.read_u32()?,
-            unknown: reader.read_bits_le(Self::UNKNOWN_BITS)?,
-            item_uuid: reader.read_string()?,
+            hand: reader.read_bits_le(HAND_BITS)?,
+            item_spec: ItemSpec::decode(reader)?,
         })
     }
 }
 
 /// Selecting a different hotbar square: the mouse wheel, or the number keys.
 ///
-/// Two bytes on the wire, so the body is this one field. Worth tracking because placing a
-/// block and digging arrive as the same [`PerformVoxelActions`](super) packet, and which one
-/// it is depends on whether the selected square holds a placeable block or a tool.
+/// One 3-bit field (`Send_RequestUISettingsSetActiveSlot`, `FUN_007f3ea0`). Worth tracking
+/// because placing a block and digging arrive as the same [`PerformVoxelActions`](super)
+/// packet, and which one it is depends on what the selected square holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestUiSettingsSetActiveSlot {
     pub slot: u32,

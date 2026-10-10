@@ -701,11 +701,14 @@ pub struct Session {
     /// so opening containers means moving this to the server and passing it in.
     inventories: Inventories,
 
-    /// Hotbar square to the item name hash bound to it.
+    /// Hotbar square to the spec bound to each of its two hands, as the client sent it.
     ///
-    /// Not storage. `hotbarslotresources` holds *resources*, so a bound stack stays in the
-    /// rucksack; this is only the server's record of what the player is holding.
-    hotbar: std::collections::HashMap<u32, u32>,
+    /// Not storage. `hotbarslotresources` holds item specs, so a bound stack stays in the
+    /// rucksack; this is only the server's record of what the player is holding. Two hands
+    /// per square, as the client keeps them (`UISettings_SetHotbarSlotSpec`, `FUN_008d3330`).
+    /// Kept whole, uuid included: echoed back with less, the client re-sends the bind every
+    /// tick.
+    hotbar: std::collections::HashMap<u32, [ItemSpec; 2]>,
 
     /// Which hotbar square is selected.
     active_slot: u32,
@@ -979,8 +982,58 @@ impl Session {
     ///
     /// What the player is holding. Placing a block and digging arrive as the same
     /// `PerformVoxelActions` packet, and this is what tells the two apart.
+    ///
+    /// Hand 0 first, then hand 1. Which hand a placement uses is inferred, not read.
     pub fn held_resource(&self) -> Option<u32> {
-        self.hotbar.get(&self.active_slot).copied()
+        let hands = self.hotbar.get(&self.active_slot)?;
+
+        hands[0].resource.or(hands[1].resource)
+    }
+
+    /// What one hand of a hotbar square is bound to, if anything.
+    pub fn hotbar_spec(&self, square: u32, hand: u32) -> Option<&ItemSpec> {
+        self.hotbar
+            .get(&square)
+            .map(|hands| &hands[hand.min(1) as usize])
+            .filter(|spec| spec.resource.is_some())
+    }
+
+    /// The hotbar as the server now believes it, sent back to the player.
+    ///
+    /// Only when the player carries `clientuisettingscomponent` (`SKYSAGA_UI_SETTINGS=1`).
+    /// Off, the client keeps its own copy and nothing is sent, as before. On, this is what
+    /// puts the component's encoding in front of the client: a wrong width draws a wrong
+    /// hotbar on the next bind.
+    fn echo_hotbar(&self, world: &World) -> Vec<Vec<u8>> {
+        let carries = world.player_template.as_ref().is_some_and(|(player, _)| {
+            player
+                .components
+                .iter()
+                .any(|component| matches!(component, Component::UiSettings(_)))
+        });
+
+        if !carries {
+            return Vec::new();
+        }
+
+        self.sync_of(
+            self.player_entity_id,
+            &["hotbarslotresources", "activeslot"],
+            world,
+        )
+        .into_iter()
+        .collect()
+    }
+
+    /// Bind `spec` to one hand of a hotbar square; a spec naming no resource empties it.
+    fn bind_hand(&mut self, square: u32, hand: u32, spec: ItemSpec) {
+        let hands = self.hotbar.entry(square).or_default();
+
+        hands[hand.min(1) as usize] = spec;
+
+        if hands.iter().all(|spec| spec.resource.is_none()) {
+            self.hotbar.remove(&square);
+        }
     }
 
     /// Create a stack of `item` in the first free rucksack square, returning its entity id.
@@ -1518,19 +1571,17 @@ impl Session {
                     self.inventories
                         .equip(packet.entity_id, packet.bag_slot, packet.equip_slot);
 
-                // The hands are a hotbar bind, not a move, and the model reports no effects
-                // for them. Record what is now held, which is the whole point of the packet.
+                // **Filling a hand binds nothing.** The client fills the hands for a square
+                // *before* it selects it (logged live, 2026-10-10), so binding here filed items
+                // under the square being left. Bindings come from slot changes alone.
                 if packet.equip_slot < 2 {
-                    self.hotbar.remove(&self.active_slot);
-
-                    if let Some(item) = self
+                    let item = self
                         .inventories
                         .slot(packet.entity_id, packet.bag_slot)
                         .filter(|item| *item != 0)
-                        .and_then(|item| self.inventories.name(item))
-                    {
-                        self.hotbar.insert(self.active_slot, item);
-                    }
+                        .and_then(|item| self.inventories.name(item));
+
+                    debug!(hand = packet.equip_slot, ?item, "filled a hand");
                 }
 
                 self.apply(effects, world)
@@ -1540,15 +1591,14 @@ impl Session {
                 // **The hands hold what the hotbar names**, so emptying one is not a move: the
                 // model reports no effects and what has to change is the binding. Anything else
                 // goes back into the first free rucksack square.
+                // **Emptying a hand is how the client changes square**, not an unbind: every
+                // turn of the mouse wheel sends `UnEquip` for both hands and then
+                // `SetActiveSlot` (logged live, 2026-10-09). The bindings stay; an unbind
+                // arrives as a slot change naming no resource.
                 if packet.equip_slot < 2 {
                     debug!(slot = packet.equip_slot, "emptied a hand");
 
-                    self.hotbar.remove(&self.active_slot);
-
-                    return self
-                        .sync_of(self.player_entity_id, &["hotbarslotresources"], world)
-                        .into_iter()
-                        .collect();
+                    return Vec::new();
                 }
 
                 let effects = self.inventories.unequip(self.player_entity_id, packet.equip_slot);
@@ -1563,34 +1613,22 @@ impl Session {
             }
 
             (ClientPacket::RequestUiSettingsSlotChange(packet), _) => {
-                // **This packet numbers the squares from one and `SetActiveSlot` numbers them
-                // from zero.** Measured against the retail client: the "1" key reports an
-                // active slot of 0 and the "5" key reports 4, while dragging an item into the
-                // fifth square reports a bind of 5. The client sends both for one action, a
-                // tenth of a millisecond apart, so keying the hotbar by the raw numbers files
-                // the item under 5 and then looks it up under 4.
-                //
-                // Everything downstream is kept in the zero-based numbering, because that is
-                // the one the player's `activeslot` parameter uses.
-                let square = packet.slot.saturating_sub(1);
-
+                // Both hotbar packets number the squares from zero: they write the square
+                // with the same 3-bit field. An unbind is a spec naming no resource.
                 debug!(
-                    slot = packet.slot,
-                    square,
-                    resource = packet.resource,
+                    square = packet.slot,
+                    hand = packet.hand,
+                    resource = ?packet.item_spec.resource,
                     "hotbar bound",
                 );
 
-                self.hotbar.insert(square, packet.resource);
+                self.bind_hand(packet.slot, packet.hand, packet.item_spec.clone());
 
                 // A fresh bind is also what the player just selected: the client does not
                 // always follow one with a SetActiveSlot.
-                self.active_slot = square;
+                self.active_slot = packet.slot;
 
-                // Deliberately nothing back. `hotbarslotresources` (sync index 34) is kept by
-                // the client itself, and its encoding is not confirmed -- echoing a wrong one
-                // would draw a wrong hotbar, which is worse than drawing the client's own.
-                Vec::new()
+                self.echo_hotbar(world)
             }
 
             (ClientPacket::RequestUiSettingsSetActiveSlot(packet), _) => {
@@ -1598,7 +1636,7 @@ impl Session {
 
                 self.active_slot = packet.slot;
 
-                Vec::new()
+                self.echo_hotbar(world)
             }
 
             // --- where the player is ---------------------------------------------------
@@ -3452,6 +3490,19 @@ impl Session {
                     // The quest log likewise: the world's template carries an empty one.
                     Component::TodoList(todo) => {
                         todo.tasks = self.todo_tasks.clone();
+                    }
+
+                    // The hotbar the client told us about, as the client keeps it.
+                    Component::UiSettings(ui_settings) => {
+                        ui_settings.active_slot = self.active_slot;
+
+                        for (square, slot) in ui_settings.hotbar.iter_mut().enumerate() {
+                            slot.hands = self
+                                .hotbar
+                                .get(&(square as u32))
+                                .cloned()
+                                .unwrap_or_default();
+                        }
                     }
 
                     // The template carries full health; what this player has left is here.

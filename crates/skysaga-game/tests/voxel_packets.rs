@@ -10,6 +10,7 @@
 
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
+use skysaga_proto::packets::crafting::ItemSpec;
 use skysaga_proto::packets::interaction::{Action, ExecuteEntityAction};
 use skysaga_proto::packets::inventory::{
     RequestUiSettingsSetActiveSlot, RequestUiSettingsSlotChange,
@@ -49,10 +50,12 @@ fn hold(session: &mut Session, world: &World, item: &str) {
     session.handle(
         ClientPacket::parse(&encode(|w| {
             RequestUiSettingsSlotChange {
-                slot: 1,
-                resource: skysaga_core::name_hash(item),
-                unknown: 0,
-                item_uuid: String::new(),
+                slot: 0,
+                hand: 0,
+                item_spec: ItemSpec {
+                    resource: Some(skysaga_core::name_hash(item)),
+                    ..ItemSpec::default()
+                },
             }
             .encode(w)
         })),
@@ -70,15 +73,17 @@ fn select(session: &mut Session, world: &World, square: u32) {
     );
 }
 
-/// Bind an item into a hotbar square the way a drag does: **numbered from one**.
+/// Bind an item into hand 0 of a hotbar square the way a drag does, also numbered from zero.
 fn bind(session: &mut Session, world: &World, square: u32, item: &str) {
     session.handle(
         ClientPacket::parse(&encode(|w| {
             RequestUiSettingsSlotChange {
                 slot: square,
-                resource: skysaga_core::name_hash(item),
-                unknown: 0,
-                item_uuid: String::new(),
+                hand: 0,
+                item_spec: ItemSpec {
+                    resource: Some(skysaga_core::name_hash(item)),
+                    ..ItemSpec::default()
+                },
             }
             .encode(w)
         })),
@@ -651,17 +656,13 @@ fn placing_the_last_block_removes_the_stack_and_clears_the_square() {
     );
 }
 
-/// **The two hotbar packets number the squares differently, and the server must not mix them.**
+/// **A bind and the select that follows it name the same square.**
 ///
-/// Measured against the retail client: pressing the "1" key reports `SetActiveSlot` slot 0 and
-/// the "5" key reports slot 4, so that packet counts from zero. Dragging an item into the fifth
-/// square reports `SlotChange` slot 5, so that one counts from one. The client sends both, a
-/// tenth of a millisecond apart, for a single action.
-///
-/// Keyed by the raw numbers, the bind lands under 5 and the select immediately points the hand
-/// at 4, which is empty. Nothing is held, so the placement falls through to the dig branch: in
-/// game the block is never placed, the stack is never spent, and the player swings a pickaxe at
-/// the ground instead of building on it.
+/// The client sends both, a tenth of a millisecond apart, for a single action. They were once
+/// logged as a bind of "5" and a select of "4" and read as two numberings; both were square 1,
+/// read with a 5-bit field where the client writes 3 bits (`FUN_007f3da0`). If the two ever
+/// disagree, nothing is held and the placement falls through to the dig branch: the block is
+/// never placed and the player swings a pickaxe at the ground instead.
 #[test]
 fn a_bind_and_the_select_that_follows_it_mean_the_same_square() {
     let world = world();
@@ -669,9 +670,9 @@ fn a_bind_and_the_select_that_follows_it_mean_the_same_square() {
 
     let item = session.give("Dirt", 10).unwrap();
 
-    // Exactly what the client sent, in the order it sent it.
-    bind(&mut session, &world, 5, "Dirt");
-    select(&mut session, &world, 4);
+    // What the client sent, in the order it sent it: square 1 both times.
+    bind(&mut session, &world, 1, "Dirt");
+    select(&mut session, &world, 1);
 
     let burst = swing(&mut session, &world, [4, 20, 4], [0, 1, 0]);
 
@@ -692,7 +693,7 @@ fn selecting_an_empty_square_digs() {
 
     session.give("Dirt", 10).unwrap();
 
-    bind(&mut session, &world, 5, "Dirt");
+    bind(&mut session, &world, 4, "Dirt");
     select(&mut session, &world, 0);
 
     let burst = dig_through(&mut session, &world, SAND);
