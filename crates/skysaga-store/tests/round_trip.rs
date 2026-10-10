@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
 use skysaga_state::{
-    AppState, CredentialPolicy, StoredBlock, StoredDevice, StoredItem, StoredMail,
+    AppState, CredentialPolicy, StoredBinding, StoredBlock, StoredDevice, StoredItem, StoredMail,
 };
 use skysaga_store::{Persistence, SqliteStore, Store};
 
@@ -454,4 +454,67 @@ async fn a_deleted_message_stays_deleted() {
     let loaded = store.load().await.expect("loads").mail;
 
     assert_eq!(loaded, vec![("alice".to_owned(), two[1..].to_vec())]);
+}
+
+#[tokio::test]
+async fn a_hotbar_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let bound = vec![
+        StoredBinding { square: 1, hand: 0, item: 0x1111_1111 },
+        StoredBinding { square: 3, hand: 1, item: 0x2222_2222 },
+    ];
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").expect("signs in");
+        state.set_hotbar("Alice", bound.clone());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    state.import_hotbars(snapshot.hotbars);
+
+    assert_eq!(state.hotbar("Alice"), bound);
+    assert_eq!(state.hotbar("alice"), bound, "the account key is case-insensitive");
+}
+
+/// A hand that is unbound has to *stay* unbound: the whole hotbar is rewritten, so the row for
+/// it disappears rather than surviving an upsert.
+#[tokio::test]
+async fn an_unbound_hand_does_not_come_back() {
+    let (_guard, url) = database_url();
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").expect("signs in");
+        state.set_hotbar(
+            "Alice",
+            vec![
+                StoredBinding { square: 1, hand: 0, item: 7 },
+                StoredBinding { square: 1, hand: 1, item: 8 },
+            ],
+        );
+        state.set_hotbar("Alice", vec![StoredBinding { square: 1, hand: 1, item: 8 }]);
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(
+        snapshot.hotbars,
+        vec![("alice".to_owned(), vec![StoredBinding { square: 1, hand: 1, item: 8 }])],
+    );
 }

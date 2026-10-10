@@ -104,7 +104,7 @@ const AIR: [u32; 3] = [4, 20, 4];
 /// Swing at a voxel, from a hand. **Once** -- a stack count is asserted on afterwards, so a
 /// helper that sent twice would take two blocks and read as an off-by-one in the handler.
 fn swing(session: &mut Session, world: &World, voxel: [u32; 3], direction: [i32; 3]) -> Vec<Vec<u8>> {
-    swing_from(session, world, ActionLocation::RightHand, voxel, direction)
+    swing_from(session, world, ActionLocation::LeftHand, voxel, direction)
 }
 
 fn swing_from(
@@ -162,7 +162,7 @@ fn dig_through_hitting(
         last = swing_hitting(
             session,
             world,
-            ActionLocation::RightHand,
+            ActionLocation::LeftHand,
             voxel,
             [0, 1, 0],
             hit,
@@ -915,4 +915,74 @@ fn a_moving_payload_stops_being_reported() {
     }
 
     assert_eq!(session.reported_unhandled().len(), skysaga_game::UNHANDLED_SAMPLES);
+}
+
+/// Bind `item` to one hand of a square, as a drag onto its L or R half does.
+fn bind_hand(session: &mut Session, world: &World, square: u32, hand: u32, item: &str) {
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSlotChange {
+                slot: square,
+                hand,
+                item_spec: ItemSpec {
+                    resource: Some(skysaga_core::name_hash(item)),
+                    ..ItemSpec::default()
+                },
+            }
+            .encode(w)
+        })),
+        world,
+    );
+}
+
+/// **The hand that acts is the hand that holds.** A square has an L and an R half, each mouse
+/// button swings one of them, and `PerformVoxelActions` says which in `location`. Reading the
+/// square as one item took the left hand's block for a swing of the right hand's pickaxe, so a
+/// dig placed dirt.
+#[test]
+fn each_hand_acts_with_what_it_holds() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let dirt = session.give("Dirt", 10).unwrap();
+    session.give("Metal_Pickaxe", 1).unwrap();
+
+    bind_hand(&mut session, &world, 0, 0, "Dirt");
+    bind_hand(&mut session, &world, 0, 1, "Metal_Pickaxe");
+
+    // The right hand holds the pickaxe: three swings break the sand, and no dirt is spent.
+    let mut burst = Vec::new();
+
+    for _ in 0..3 {
+        burst = swing_from(&mut session, &world, ActionLocation::RightHand, SAND, [0, 1, 0]);
+    }
+
+    assert_eq!(edits(&burst), vec![(255, SAND)], "the pickaxe hand should dig");
+    assert_eq!(session.inventories().count(dirt), Some(10), "and spend no dirt");
+
+    // The left hand holds the dirt: one click places it.
+    let burst = swing_from(&mut session, &world, ActionLocation::LeftHand, [4, 20, 4], [0, 1, 0]);
+
+    assert_eq!(edits(&burst), vec![(0, [4, 21, 4])], "the dirt hand should place");
+    assert_eq!(session.inventories().count(dirt), Some(9));
+}
+
+#[test]
+fn a_hand_holding_nothing_does_not_borrow_the_other_hands_block() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let dirt = session.give("Dirt", 10).unwrap();
+
+    bind_hand(&mut session, &world, 0, 0, "Dirt");
+
+    // Only the left hand is bound. A swing of the empty right hand places nothing.
+    let burst = swing_from(&mut session, &world, ActionLocation::RightHand, [4, 20, 4], [0, 1, 0]);
+
+    assert!(
+        edits(&burst).iter().all(|(material, _)| *material == 255),
+        "the empty hand placed the other hand's block: {:?}",
+        edits(&burst),
+    );
+    assert_eq!(session.inventories().count(dirt), Some(10));
 }

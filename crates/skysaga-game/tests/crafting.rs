@@ -579,7 +579,7 @@ fn place_anvil(session: &mut Session, world: &World) -> u32 {
     let burst = session.handle(
         ClientPacket::parse(&encode(|w| {
             PerformVoxelActions {
-                location: ActionLocation::RightHand,
+                location: ActionLocation::LeftHand,
                 chunk: [1, 0, 1],
                 // Solid sand, so the click is on the ground.
                 voxel: [4, 17, 4],

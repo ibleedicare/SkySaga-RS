@@ -120,3 +120,16 @@ fn switched_on_a_select_is_echoed_to_the_player() {
 
     assert_eq!(syncs(&burst), vec![session.player_entity_id()]);
 }
+
+/// A server that is run carries the hotbar unless told not to; `WorldConfig::default()` stays
+/// off because the handshake tests compare the player's first burst with captures that have
+/// no such component.
+#[test]
+fn a_running_server_carries_the_hotbar_unless_switched_off() {
+    use skysaga_game::ui_settings_from;
+
+    assert!(ui_settings_from(None), "unset means on");
+    assert!(ui_settings_from(Some("1")));
+    assert!(!ui_settings_from(Some("0")), "the one way to turn it off");
+    assert!(ui_settings_from(Some("")), "an empty value is not a refusal");
+}

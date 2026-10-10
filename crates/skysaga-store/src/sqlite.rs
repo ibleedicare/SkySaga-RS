@@ -9,7 +9,8 @@
 
 use async_trait::async_trait;
 use skysaga_state::{
-    AccountRecord, Character, Photo, StoredBlock, StoredDevice, StoredItem, StoredMail,
+    AccountRecord, Character, Photo, StoredBinding, StoredBlock, StoredDevice, StoredItem,
+    StoredMail,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -84,6 +85,15 @@ CREATE TABLE IF NOT EXISTS mail_attachments (
     item     INTEGER NOT NULL,
     count    INTEGER NOT NULL,
     PRIMARY KEY (account, uuid, slot)
+);
+
+CREATE TABLE IF NOT EXISTS hotbars (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    square      INTEGER NOT NULL,
+    hand        INTEGER NOT NULL,
+    item        INTEGER NOT NULL,
+    PRIMARY KEY (account, square, hand)
 );
 
 CREATE TABLE IF NOT EXISTS inventories (
@@ -287,6 +297,28 @@ impl Store for SqliteStore {
             }
         }
 
+        let mut hotbars: Vec<(String, Vec<StoredBinding>)> = Vec::new();
+
+        for row in sqlx::query(
+            "SELECT account, square, hand, item FROM hotbars ORDER BY account, square, hand",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let account: String = row.try_get("account")?;
+
+            let binding = StoredBinding {
+                square: row.try_get::<i64, _>("square")? as u32,
+                hand: row.try_get::<i64, _>("hand")? as u32,
+                item: row.try_get::<i64, _>("item")? as u32,
+            };
+
+            match hotbars.last_mut() {
+                Some((held, bindings)) if *held == account => bindings.push(binding),
+                _ => hotbars.push((account, vec![binding])),
+            }
+        }
+
         let photos = sqlx::query("SELECT id, bytes, captured_at FROM photos ORDER BY id")
             .fetch_all(&self.pool)
             .await?
@@ -311,6 +343,7 @@ impl Store for SqliteStore {
             blocks,
             devices,
             mail,
+            hotbars,
         })
     }
 
@@ -369,6 +402,35 @@ impl Store for SqliteStore {
 
     /// Replace an account's whole rucksack.
     ///
+    /// Delete-then-insert in one transaction, as a rucksack is: an unbound hand is a row that
+    /// has to go, and an upsert alone would bring it back.
+    async fn save_hotbar(
+        &self,
+        account: &str,
+        bindings: &[StoredBinding],
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM hotbars WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for binding in bindings {
+            sqlx::query("INSERT INTO hotbars (account, square, hand, item) VALUES (?, ?, ?, ?)")
+                .bind(account)
+                .bind(binding.square as i64)
+                .bind(binding.hand as i64)
+                .bind(binding.item as i64)
+                .execute(&mut *transaction)
+                .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(())
+    }
+
     /// Delete-then-insert inside one transaction, because the change describes every square:
     /// an upsert alone would leave rows behind for squares that were emptied, and those would
     /// come back as items the player had spent.

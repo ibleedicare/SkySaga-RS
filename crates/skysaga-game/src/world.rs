@@ -471,9 +471,10 @@ pub struct WorldConfig {
 
     /// Whether the player carries `clientuisettingscomponent`, the hotbar's bindings.
     ///
-    /// Off by default: its widths are read from the client (`FUN_008d4480`) but not yet
-    /// proven in front of it, and a wrong width in an entity's first burst can stop the
-    /// client loading. `SKYSAGA_UI_SETTINGS=1` turns it on for that test.
+    /// On for a server that is run (`SKYSAGA_UI_SETTINGS=0` turns it off): the encoding was
+    /// proven in front of the client on 2026-10-10, and a saved hotbar is only worth restoring
+    /// if the client is told about it. Off in [`Default`], because the handshake tests compare
+    /// the player's first burst with captures of a server that never sent this component.
     pub ui_settings: bool,
 }
 
@@ -506,10 +507,15 @@ impl WorldConfig {
                 seed: parse("SKYSAGA_WORLD_SEED", defaults.terrain.seed),
                 size_chunks: parse("SKYSAGA_WORLD_CHUNKS", defaults.terrain.size_chunks),
             },
-            ui_settings: std::env::var("SKYSAGA_UI_SETTINGS").as_deref() == Ok("1"),
+            ui_settings: ui_settings_from(std::env::var("SKYSAGA_UI_SETTINGS").ok().as_deref()),
             ..defaults
         }
     }
+}
+
+/// Whether `SKYSAGA_UI_SETTINGS` leaves the hotbar component on: anything but `0`.
+pub fn ui_settings_from(value: Option<&str>) -> bool {
+    value != Some("0")
 }
 
 impl Default for WorldConfig {

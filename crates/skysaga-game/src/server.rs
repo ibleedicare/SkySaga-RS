@@ -160,8 +160,10 @@ impl GameServer {
         }
 
         self.restore_inventories();
+        self.restore_hotbars();
         self.restore_mailboxes();
         self.record_inventories();
+        self.record_hotbars();
         self.record_mailboxes();
         self.record_blocks();
         self.record_devices();
@@ -198,6 +200,39 @@ impl GameServer {
             }
 
             session.mark_items_restored();
+        }
+    }
+
+    /// Give a player back the hotbar they had when they last played.
+    ///
+    /// **After the rucksack**, and only once it is back: a binding is pointed at a stack the
+    /// player carries, and those stacks are what `restore_inventories` has just created. It
+    /// runs in the same tick, one call later.
+    fn restore_hotbars(&mut self) {
+        let restores: Vec<(Guid, Vec<skysaga_state::StoredBinding>)> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.items_restored() && !session.bindings_restored())
+            // Off, the client keeps its own bar: nothing is restored, and because the session
+            // is never marked restored, nothing is written over the saved one either.
+            .filter(|(_, session)| session.carries_hotbar(&self.world))
+            .filter_map(|(guid, session)| {
+                let account = session.account()?;
+
+                Some((*guid, self.state.hotbar(account)))
+            })
+            .collect();
+
+        for (guid, bindings) in restores {
+            let Some(session) = self.sessions.get_mut(&guid) else {
+                continue;
+            };
+
+            for packet in session.restore_bindings(&bindings, &self.world) {
+                self.peer.send(guid, &packet);
+            }
+
+            session.mark_bindings_restored();
         }
     }
 
@@ -300,6 +335,23 @@ impl GameServer {
 
         for (account, items) in changed {
             self.state.set_inventory(&account, items);
+        }
+    }
+
+    /// Write down what each player has bound to the hotbar, when it changes.
+    fn record_hotbars(&mut self) {
+        let changed: Vec<(String, Vec<skysaga_state::StoredBinding>)> = self
+            .sessions
+            .values_mut()
+            .filter_map(|session| {
+                let bindings = session.bindings_to_record()?;
+
+                Some((session.account()?.to_owned(), bindings))
+            })
+            .collect();
+
+        for (account, bindings) in changed {
+            self.state.set_hotbar(&account, bindings);
         }
     }
 
