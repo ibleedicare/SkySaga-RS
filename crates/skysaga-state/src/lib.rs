@@ -154,6 +154,9 @@ struct Inner {
     /// server around the loaded state, finds it already in place.
     inventories: HashMap<String, Vec<StoredItem>>,
 
+    /// What each account has bound to its hotbar, by lowercased account name.
+    hotbars: HashMap<String, Vec<StoredBinding>>,
+
     /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
     snapshot: ServerSnapshot,
 
@@ -210,6 +213,13 @@ pub enum Change {
     Inventory {
         account: String,
         items: Vec<StoredItem>,
+    },
+
+    /// What an account has bound to its hotbar, in full, for the same reason a rucksack is
+    /// written whole: an unbind is a row that has to disappear.
+    Hotbar {
+        account: String,
+        bindings: Vec<StoredBinding>,
     },
 
     /// One block, changed.
@@ -453,6 +463,20 @@ pub struct StoredItem {
     pub count: u32,
 }
 
+/// One hand of one hotbar square, and the item bound to it.
+///
+/// A binding names a stack by uuid while the server runs, and that uuid is derived from an
+/// entity id minted per session, so it means nothing tomorrow. What survives is *which item*
+/// the hand names; a restore points it at whatever stack of that item the player then carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredBinding {
+    /// The hotbar square, from zero.
+    pub square: u32,
+    /// 0 for the L half, 1 for the R half.
+    pub hand: u32,
+    pub item: u32,
+}
+
 /// All mutable server state, shared between the auth, web and game servers.
 ///
 /// Interior mutability rather than `&mut self` so it can sit in an `Arc` and be handed to
@@ -518,6 +542,11 @@ impl AppState {
 
         inner.photos.extend(photos);
         inner.inventories.extend(inventories);
+    }
+
+    /// Load the stored hotbars at startup. Silent, as the rest of `import` is.
+    pub fn import_hotbars(&self, hotbars: Vec<(String, Vec<StoredBinding>)>) {
+        self.write().hotbars.extend(hotbars);
     }
 
     /// Load the stored inboxes at startup. Silent, as the rest of `import` is.
@@ -672,6 +701,33 @@ impl AppState {
         }
 
         self.record(Change::Inventory { account: key, items });
+    }
+
+    /// What `account` has bound to its hotbar, as last recorded.
+    pub fn hotbar(&self, account: &str) -> Vec<StoredBinding> {
+        self.read()
+            .hotbars
+            .get(&account.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record what an account has bound to its hotbar now. Returns early when nothing differs,
+    /// as [`Self::set_inventory`] does.
+    pub fn set_hotbar(&self, account: &str, bindings: Vec<StoredBinding>) {
+        let key = account.trim().to_ascii_lowercase();
+
+        {
+            let mut inner = self.write();
+
+            if inner.hotbars.get(&key).is_some_and(|held| *held == bindings) {
+                return;
+            }
+
+            inner.hotbars.insert(key.clone(), bindings.clone());
+        }
+
+        self.record(Change::Hotbar { account: key, bindings });
     }
 
     fn record(&self, change: Change) {

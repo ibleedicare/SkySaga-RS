@@ -123,6 +123,7 @@ Read by `skysaga-server`:
 | `SKYSAGA_DATA_DIR` | *(a checkout of the upstream C# tree)* | directory holding `entities.json` and `geodata.json` |
 | `SKYSAGA_DATABASE_URL` | `sqlite://skysaga.db` | where state is persisted; set it empty to keep everything in memory |
 | `SKYSAGA_RAKNET_LIB` | *(`.raknet/lib`)* | directory holding `libRakNet.so`; read at build time |
+| `SKYSAGA_UI_SETTINGS` | *(on)* | `0` stops sending the player's hotbar component, so the client keeps its own and a saved hotbar is not shown |
 | `RUST_LOG` | `info` | e.g. `skysaga_web=debug` to log every request body |
 
 Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORLD_TYPE`,
@@ -131,8 +132,9 @@ Read by `skysaga-game` only: `SKYSAGA_ADVENTURE`, `SKYSAGA_BIOME`, `SKYSAGA_WORL
 
 ### Persistence
 
-SQLite holds accounts, characters and photos, and they survive a restart. The server creates
-the database on first run; there is nothing to set up.
+SQLite holds accounts, characters, photos, what each player carries and has bound to the
+hotbar, their mail, and the blocks and devices placed in the world. They survive a restart.
+The server creates the database on first run; there is nothing to set up.
 
 The server keeps state in memory while it runs and writes it down as it changes, so nothing
 sits on a request path. A write is durable a moment after the change rather than at the

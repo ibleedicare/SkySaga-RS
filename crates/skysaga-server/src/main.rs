@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
             blocks = snapshot.blocks.len(),
             devices = snapshot.devices.len(),
             inboxes = snapshot.mail.len(),
+            hotbars = snapshot.hotbars.len(),
             "loaded stored state",
         );
 
@@ -97,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         state.import_blocks(snapshot.blocks);
         state.import_devices(snapshot.devices);
         state.import_mail(snapshot.mail);
+        state.import_hotbars(snapshot.hotbars);
 
         state
     };

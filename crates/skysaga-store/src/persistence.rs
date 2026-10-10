@@ -76,6 +76,8 @@ async fn apply(store: &dyn Store, change: &Change) -> Result<(), crate::StoreErr
 
         Change::Inventory { account, items } => store.save_inventory(account, items).await,
 
+        Change::Hotbar { account, bindings } => store.save_hotbar(account, bindings).await,
+
         Change::Block(block) => store.save_block(block).await,
 
         Change::Device(device) => store.save_device(device).await,

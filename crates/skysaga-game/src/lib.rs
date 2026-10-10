@@ -29,7 +29,7 @@ pub mod server;
 pub mod world;
 
 pub use server::{GameServer, GameServerConfig};
-pub use world::{Device, PlacedDevice, VoxelEdit, World, WorldConfig};
+pub use world::{ui_settings_from, Device, PlacedDevice, VoxelEdit, World, WorldConfig};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -811,6 +811,13 @@ pub struct Session {
     /// rucksack over a stored one.
     items_restored: bool,
 
+    /// Whether the hotbar this account had has been put back. Separate from the rucksack's
+    /// flag because the bindings are restored after it: they point at its stacks.
+    bindings_restored: bool,
+
+    /// The bindings last handed to the store, so a quiet tick writes nothing.
+    recorded_bindings: Option<Vec<skysaga_state::StoredBinding>>,
+
     /// The rucksack as last written down, so an unchanged tick costs nothing.
     recorded_items: Option<Vec<skysaga_state::StoredItem>>,
 
@@ -890,6 +897,8 @@ impl Session {
             drop_slots: [0; DROP_SLOTS],
             seen_resources: BTreeSet::new(),
             items_restored: false,
+            bindings_restored: false,
+            recorded_bindings: None,
             recorded_items: None,
             clock_ms: None,
             todo_tasks: Vec::new(),
@@ -1077,6 +1086,104 @@ impl Session {
     /// Say that it has, so a later tick does not do it again.
     pub fn mark_items_restored(&mut self) {
         self.items_restored = true;
+    }
+
+    /// What is bound to the hotbar, by square and hand, for writing down.
+    ///
+    /// The item only: a binding's uuid names a stack of this session and means nothing to the
+    /// next one. In square order, so the same hotbar always writes the same rows.
+    pub fn bound_items(&self) -> Vec<skysaga_state::StoredBinding> {
+        let mut bindings: Vec<skysaga_state::StoredBinding> = self
+            .hotbar
+            .iter()
+            .flat_map(|(square, hands)| {
+                hands.iter().enumerate().filter_map(|(hand, spec)| {
+                    Some(skysaga_state::StoredBinding {
+                        square: *square,
+                        hand: hand as u32,
+                        item: spec.resource?,
+                    })
+                })
+            })
+            .collect();
+
+        bindings.sort_by_key(|binding| (binding.square, binding.hand));
+
+        bindings
+    }
+
+    /// Whether this session has already been handed back its hotbar.
+    pub fn bindings_restored(&self) -> bool {
+        self.bindings_restored
+    }
+
+    /// Say that it has, so a later tick does not do it again.
+    pub fn mark_bindings_restored(&mut self) {
+        self.bindings_restored = true;
+    }
+
+    /// The hotbar to write down, or `None` when nothing has changed since the last time.
+    ///
+    /// Nothing before the restore, for the rucksack's reason: the first tick of a session
+    /// would record an empty hotbar and erase the one the player had.
+    pub fn bindings_to_record(&mut self) -> Option<Vec<skysaga_state::StoredBinding>> {
+        if !self.bindings_restored {
+            return None;
+        }
+
+        let bindings = self.bound_items();
+
+        if self.recorded_bindings.as_ref() == Some(&bindings) {
+            return None;
+        }
+
+        self.recorded_bindings = Some(bindings.clone());
+
+        Some(bindings)
+    }
+
+    /// Put back the hotbar a player had, pointing each binding at a stack they carry now.
+    ///
+    /// **After the rucksack is restored**, because that is what creates the stacks. A binding
+    /// names a stack by uuid, and the uuid is this session's: it is looked up here rather than
+    /// stored. An item the player no longer carries is still bound, with no uuid, and the
+    /// client draws it with a count of 0.
+    ///
+    /// The client is told only when it carries `clientuisettingscomponent`; otherwise it keeps
+    /// its own hotbar and this is the server's record alone.
+    pub fn restore_bindings(
+        &mut self,
+        bindings: &[skysaga_state::StoredBinding],
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        if bindings.is_empty() {
+            return Vec::new();
+        }
+
+        for binding in bindings {
+            let item_uuid = self
+                .inventories
+                .slots(self.player_entity_id)
+                .iter()
+                .copied()
+                .filter(|entity| *entity != 0)
+                .find(|entity| self.inventories.name(*entity) == Some(binding.item))
+                .and_then(|entity| self.inventories.item(entity))
+                .map(|stack| stack.slot_data.item_uuid.clone())
+                .unwrap_or_default();
+
+            let spec = ItemSpec {
+                resource: Some(binding.item),
+                item_uuid,
+                ..ItemSpec::default()
+            };
+
+            self.bind_hand(binding.square, binding.hand, spec);
+        }
+
+        info!(bindings = bindings.len(), "restored the player's hotbar");
+
+        self.echo_hotbar(world)
     }
 
     /// What to write down, or `None` when nothing has changed since the last time.
