@@ -84,6 +84,9 @@ pub struct World {
     /// panel reads the item's materials from.
     pub material_durable_item_definition: Option<EntityDefinition>,
 
+    /// `MaterialBasedInventoryItem`, for a plate or a rod: made of something, never worn.
+    pub material_item_definition: Option<EntityDefinition>,
+
     /// The game's own tables: which block an item places, what a broken one drops, how large
     /// a stack may be.
     ///
@@ -307,6 +310,11 @@ impl World {
     /// The definition for a stack that wears out and names its materials.
     pub fn material_durable_item_definition(&self) -> Option<&EntityDefinition> {
         self.material_durable_item_definition.as_ref()
+    }
+
+    /// The definition for a stack that names its materials and does not wear out.
+    pub fn material_item_definition(&self) -> Option<&EntityDefinition> {
+        self.material_item_definition.as_ref()
     }
 
     /// The container with this entity id, if it is one.
@@ -796,6 +804,7 @@ impl World {
             material_durable_item_definition: definitions
                 .get("MaterialDurableInventoryItem")
                 .cloned(),
+            material_item_definition: definitions.get("MaterialBasedInventoryItem").cloned(),
             mail_item_definition: definitions.get("MailItem").cloned(),
             geodata,
             definitions: definitions.clone(),
