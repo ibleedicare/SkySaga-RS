@@ -213,6 +213,9 @@ impl GameServer {
             .sessions
             .iter()
             .filter(|(_, session)| session.items_restored() && !session.bindings_restored())
+            // Off, the client keeps its own bar: nothing is restored, and because the session
+            // is never marked restored, nothing is written over the saved one either.
+            .filter(|(_, session)| session.carries_hotbar(&self.world))
             .filter_map(|(guid, session)| {
                 let account = session.account()?;
 

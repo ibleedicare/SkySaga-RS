@@ -1023,6 +1023,20 @@ impl Session {
             .filter(|spec| spec.resource.is_some())
     }
 
+    /// Whether the client is told about its hotbar: the player carries
+    /// `clientuisettingscomponent` (`SKYSAGA_UI_SETTINGS`, on unless set to `0`).
+    ///
+    /// When it does not, the client's own bar is the only one. It starts empty every session
+    /// and cannot be told otherwise, so the saved bar is neither restored nor overwritten.
+    pub fn carries_hotbar(&self, world: &World) -> bool {
+        world.player_template.as_ref().is_some_and(|(player, _)| {
+            player
+                .components
+                .iter()
+                .any(|component| matches!(component, Component::UiSettings(_)))
+        })
+    }
+
     /// The hotbar as the server now believes it, sent back to the player.
     ///
     /// Only when the player carries `clientuisettingscomponent` (`SKYSAGA_UI_SETTINGS=1`).
@@ -1030,14 +1044,7 @@ impl Session {
     /// puts the component's encoding in front of the client: a wrong width draws a wrong
     /// hotbar on the next bind.
     fn echo_hotbar(&self, world: &World) -> Vec<Vec<u8>> {
-        let carries = world.player_template.as_ref().is_some_and(|(player, _)| {
-            player
-                .components
-                .iter()
-                .any(|component| matches!(component, Component::UiSettings(_)))
-        });
-
-        if !carries {
+        if !self.carries_hotbar(world) {
             return Vec::new();
         }
 
@@ -1165,14 +1172,15 @@ impl Session {
     /// stored. An item the player no longer carries is still bound, with no uuid, and the
     /// client draws it with a count of 0.
     ///
-    /// The client is told only when it carries `clientuisettingscomponent`; otherwise it keeps
-    /// its own hotbar and this is the server's record alone.
+    /// Does nothing when the client is not told about its hotbar ([`Self::carries_hotbar`]):
+    /// a binding the client was never shown would leave the server believing in a bar the
+    /// player does not have.
     pub fn restore_bindings(
         &mut self,
         bindings: &[skysaga_state::StoredBinding],
         world: &World,
     ) -> Vec<Vec<u8>> {
-        if bindings.is_empty() {
+        if bindings.is_empty() || !self.carries_hotbar(world) {
             return Vec::new();
         }
 

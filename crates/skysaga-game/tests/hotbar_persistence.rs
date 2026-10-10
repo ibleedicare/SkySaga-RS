@@ -102,7 +102,7 @@ fn an_unbound_square_is_not_reported() {
 
 #[test]
 fn a_restored_binding_points_at_the_restored_stack() {
-    let world = world(false);
+    let world = world(true);
     let mut session = playing(&world);
 
     let stack = session.give_at(9, "Dirt", 30).expect("a free square");
@@ -127,7 +127,7 @@ fn a_binding_to_something_no_longer_carried_is_still_restored() {
     // The client draws such a square with a count of 0, which is the truth: the bar still
     // names the item and the player has none. Dropping the binding would quietly rearrange
     // the bar a player laid out.
-    let world = world(false);
+    let world = world(true);
     let mut session = playing(&world);
 
     session.restore_bindings(&[StoredBinding { square: 5, hand: 1, item: sword() }], &world);
@@ -139,20 +139,41 @@ fn a_binding_to_something_no_longer_carried_is_still_restored() {
 }
 
 #[test]
-fn a_restore_tells_the_client_when_it_carries_the_hotbar() {
-    let on = world(true);
-    let mut session = playing(&on);
+fn a_restore_tells_the_client() {
+    let world = world(true);
+    let mut session = playing(&world);
 
-    let burst = session.restore_bindings(&[StoredBinding { square: 0, hand: 0, item: dirt() }], &on);
+    let burst = session.restore_bindings(&[StoredBinding { square: 0, hand: 0, item: dirt() }], &world);
 
     assert_eq!(syncs(&burst), 1);
+}
 
-    let off = world(false);
-    let mut session = playing(&off);
+/// **With the hotbar component off, the client's bar is the only one.** It starts empty and
+/// cannot be told otherwise, so restoring the saved bindings left the server believing in a
+/// bar the player did not have (seen live, 2026-10-11). Nothing is restored, and since
+/// nothing is restored nothing is written down either: the saved bar is left as it was.
+#[test]
+fn switched_off_the_saved_hotbar_is_left_alone() {
+    let world = world(false);
+    let mut session = playing(&world);
 
-    let burst = session.restore_bindings(&[StoredBinding { square: 0, hand: 0, item: dirt() }], &off);
+    assert!(!session.carries_hotbar(&world));
 
-    assert!(burst.is_empty(), "nothing to say to a client that keeps its own hotbar");
+    let burst = session.restore_bindings(&[StoredBinding { square: 0, hand: 0, item: dirt() }], &world);
+
+    assert!(burst.is_empty());
+    assert_eq!(session.hotbar_spec(0, 0), None, "a binding the client was never shown");
+
+    bind(&mut session, &world, 3, 0, Some("Dirt"));
+
+    assert_eq!(session.bindings_to_record(), None, "and the saved bar is not overwritten");
+}
+
+#[test]
+fn switched_on_the_player_carries_the_hotbar() {
+    let world = world(true);
+
+    assert!(playing(&world).carries_hotbar(&world));
 }
 
 #[test]
