@@ -10,7 +10,7 @@ use std::sync::Arc;
 use raknet::{message_id, Guid, Peer};
 use skysaga_proto::bitstream::BitWriter;
 use skysaga_proto::packets::{Bits, EntityAdd, EntityRemoved, EntitySync};
-use skysaga_world::{Component, Entity};
+use skysaga_world::Component;
 use skysaga_state::{AdminCommand, AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
@@ -584,20 +584,12 @@ impl GameServer {
 
             AdminCommand::ClearInventory { account } => self.clear_inventory(&account),
 
-            AdminCommand::Durability { bits, enabled } => {
-                // Both optional, so either can be changed without disturbing the other.
-                if let Some(bits) = bits {
-                    skysaga_world::components::durability::set_bits(bits);
-                }
-
+            AdminCommand::Durability { enabled } => {
                 if let Some(enabled) = enabled {
                     crate::set_durable_items(enabled);
                 }
 
-                info!(
-                    bits = skysaga_world::components::durability::bits(),
-                    "durability encoding changed",
-                );
+                info!(?enabled, "durable items switched");
             }
 
             AdminCommand::Mail {
@@ -786,12 +778,6 @@ impl GameServer {
             return;
         };
 
-        let Some(definition) = self.world.item_definition().cloned() else {
-            warn!("cannot give: BasicInventoryItem is not defined");
-
-            return;
-        };
-
         let Some(session) = self.sessions.get_mut(&guid) else {
             return;
         };
@@ -816,14 +802,11 @@ impl GameServer {
 
         // The client must know the entity before a slot points at it, or the slot references
         // an entity it has never been told about and the square draws empty.
-        if let Some(component) = session.inventories().item(item_entity) {
-            let stack = Entity::new(
-                item_entity,
-                vec![Component::InventoryItem(component.clone())],
-            );
-
-            self.peer
-                .send(guid, &encode(|w| stack.to_entity_add(&definition).encode(w)));
+        //
+        // Through the session, which knows a tool from a stack of dirt: building the packet
+        // here from the basic definition sent every sword as a `BasicInventoryItem`.
+        for packet in session.announce_item(item_entity, &self.world) {
+            self.peer.send(guid, &packet);
         }
 
         let Some(session) = self.sessions.get(&guid) else {

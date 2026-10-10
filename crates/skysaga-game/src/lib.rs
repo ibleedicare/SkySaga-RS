@@ -144,18 +144,16 @@ fn craft_notification_enabled() -> bool {
     std::env::var("SKYSAGA_CRAFT_NOTIFICATION").as_deref() != Ok("0")
 }
 
-/// Whether tools and armour are minted as `DurableInventoryItem`.
+/// Whether tools and armour are minted as durable items rather than as ordinary stacks.
 ///
-/// **Off by default, and the reason is the wire format rather than the feature.** The widths of
-/// `durability` and `durabilitymax` are not known: no capture carries one and the C# oracle
-/// never wrote one. They are sync indices 1 and 2 against `inventoryslotdata`'s 5, so a wrong
-/// width shifts the slot data and every rucksack square draws wrong. Turn it on with
-/// `SKYSAGA_DURABLE_ITEMS=1` to sweep the width in front of a client; see
-/// `skysaga_world::components::durability`.
+/// On unless `SKYSAGA_DURABLE_ITEMS=0`. Played on 2026-10-11: the rucksack draws a durability
+/// bar, the repair panel takes a pickaxe and lists what it is made of, and dismantling one
+/// hands its ingredients back.
 fn durable_items_enabled() -> bool {
     match DURABLE_ITEMS.load(std::sync::atomic::Ordering::Relaxed) {
         UNSET => {
-            let from_env = std::env::var("SKYSAGA_DURABLE_ITEMS").as_deref() == Ok("1");
+            let from_env =
+                durable_items_from(std::env::var("SKYSAGA_DURABLE_ITEMS").ok().as_deref());
 
             set_durable_items(from_env);
 
@@ -166,11 +164,15 @@ fn durable_items_enabled() -> bool {
     }
 }
 
+/// What `SKYSAGA_DURABLE_ITEMS` asks for: on, unless it is exactly `0`.
+pub fn durable_items_from(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
 /// Turn durable items on or off while the server is running.
 ///
-/// Runtime rather than start-up, because the point is to *sweep*: the width has to be tried,
-/// looked at in the client, and tried again, and a restart between each costs a minute of
-/// loading screen. Pairs with `skysaga_world::components::durability::set_bits`.
+/// Runtime rather than start-up, so the two kinds of item can be compared in front of one
+/// client without a restart and its minute of loading screen.
 pub fn set_durable_items(on: bool) {
     DURABLE_ITEMS.store(if on { ON } else { OFF }, std::sync::atomic::Ordering::Relaxed);
 }
@@ -4522,6 +4524,28 @@ impl Session {
         // A tool is a different *entity* from a stack of dirt: it carries a durability
         // component, and the repair square refuses anything that does not resolve one.
         if let Some(durability) = self.durability_of(entity, world) {
+            // One made of something is a third entity again: the repair panel reads the
+            // materials off it and refuses the item without them.
+            let materials = self.materials_of(entity, world);
+
+            if !materials.is_empty() {
+                if let Some(definition) = world.material_durable_item_definition() {
+                    return Some((
+                        Entity::new(
+                            entity,
+                            vec![
+                                Component::Durability(durability),
+                                Component::InventoryItem(component.clone()),
+                                Component::MaterialComposition(
+                                    skysaga_world::MaterialCompositionComponent { materials },
+                                ),
+                            ],
+                        ),
+                        definition,
+                    ));
+                }
+            }
+
             if let Some(definition) = world.durable_item_definition() {
                 return Some((
                     Entity::new(
@@ -4568,6 +4592,26 @@ impl Session {
             .geodata
             .durability_of(name)
             .map(skysaga_world::DurabilityComponent::new)
+    }
+
+    /// What the stack in `entity` is made of: a material per category its item names.
+    ///
+    /// Like the durability, straight from the data. An item crafted from a chosen metal would
+    /// carry that metal instead, which needs the materials stored on the stack.
+    pub fn materials_of(&self, entity: u32, world: &World) -> Vec<Option<u32>> {
+        self.inventories
+            .name(entity)
+            .map(|name| world.geodata.materials_of(name).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The `EntityAdd` for one stack the player already holds, as the kind of item it is.
+    ///
+    /// For a caller that has minted the stack itself and syncs the slot list separately, which
+    /// is what the admin `give` does. Building that packet by hand from the basic definition
+    /// is how a sword came to reach the client as a `BasicInventoryItem`.
+    pub fn announce_item(&mut self, entity: u32, world: &World) -> Vec<Vec<u8>> {
+        self.apply(vec![Effect::ItemCreated { entity }], world)
     }
 
     /// Create a stack and say what the client must be told, for tests and for probes.

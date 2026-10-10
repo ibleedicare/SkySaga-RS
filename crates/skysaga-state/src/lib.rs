@@ -376,13 +376,9 @@ pub enum AdminCommand {
 
     /// Change how durable items are written, while the server runs.
     ///
-    /// **A measuring instrument, not a setting.** The bit widths of `durability` and
-    /// `durabilitymax` are not known: nothing has ever written one, so they have to be swept
-    /// against a live client, and a restart between attempts costs a minute of loading screen.
-    /// Both fields are optional so either can be changed alone.
+    /// Durable items can be switched without a restart, which costs a minute of loading
+    /// screen. The widths are no longer part of this: they are read from the client.
     Durability {
-        /// How many bits each of the two numbers is written with.
-        bits: Option<u32>,
         /// Whether tools are minted as `DurableInventoryItem` at all.
         enabled: Option<bool>,
     },

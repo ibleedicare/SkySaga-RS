@@ -10,50 +10,36 @@
 //! (Indices are `DurableInventoryItem`'s. `MaterialDurableInventoryItem` numbers them the same
 //! way for the four that matter.)
 //!
-//! # The widths are not known, and that is why they are a variable
+//! # The widths, read from the client
 //!
-//! Every other ranged field in this port came from the C# oracle writing
-//! `32 - NumBitsRequiredUInt32(max)` with a max somebody had read out of the client. This
-//! component has no such source: the emulator never creates a `DurableInventoryItem`, so it
-//! never had to write one, and `Entities.json` carries no ranges. Static reading got as far as
-//! the client's field offsets (`durability` at `+0x2c`, `durabilitymax` at `+0x30`, both plain
-//! ints, read back by `FUN_008d4760` as a fraction) without reaching the deserialiser.
+//! The component's own reader and writer (`FUN_008d51b0`, `FUN_008d5420`, on the sync
+//! interface at `this+0x28`, vtable `00d034fc`) say:
 //!
-//! So the width is [`bits`], settable at runtime, and the plan is to observe rather than guess.
-//! **The oracle is the square itself.** `durability` and `durabilitymax` are sync indices 1 and
-//! 2 while `inventoryslotdata` is 5, so a wrong width shifts the slot data that follows and the
-//! rucksack square draws wrong immediately. Sweep the width, look at the square, keep the one
-//! that draws the item.
+//! | local | parameter | encoding |
+//! |---:|---|---|
+//! | 0 | `durability` | ranged to 100000, so 17 bits; the writer clamps |
+//! | 1 | `durabilitymax` | the same |
+//! | 2 | `indestructible` | one bit |
+//! | 3 | `lifetimedata` | one presence bit, then two 64-bit values (`FUN_008d5330`) |
+//!
+//! These were once a runtime variable to be swept against the client, because no capture had
+//! one. The sweep could never have worked: the admin `give` it used announced every item as a
+//! `BasicInventoryItem`, so the client never built this component and never read a bit of it.
 //!
 //! # Lifetime is declined rather than written empty
 //!
-//! `lifetimedata` is a pair of timestamps the client uses *instead of* durability when its
-//! `+0x48` flag is clear, and nothing in this server has a use for a decaying item. A parameter
-//! that reports success gets its flag set, and a set flag over no payload shifts everything
-//! after it, so it is declined: [`DurabilityComponent::sync`] returns `false` for it.
-
-use std::sync::atomic::{AtomicU32, Ordering};
+//! `lifetimedata` is a pair of timestamps the client uses *instead of* durability, and nothing
+//! in this server has a use for a decaying item. A parameter that reports success gets its
+//! flag set, so it is declined: [`DurabilityComponent::sync`] returns `false` for it and the
+//! client keeps its default of none.
 
 use skysaga_proto::bitstream::BitWriter;
 
-/// The width `durability` and `durabilitymax` are written with, in bits.
-///
-/// A guess until it is measured; see the module docs. 32 is the reading that needs no range at
-/// all, which is the most likely shape for a field the data declares no bounds for.
-static BITS: AtomicU32 = AtomicU32::new(32);
+/// The most either number may be: the client's writer clamps to it (`FUN_008d5420`).
+pub const MAX_DURABILITY: u32 = 100_000;
 
-/// How many bits a durability is written with.
-pub fn bits() -> u32 {
-    BITS.load(Ordering::Relaxed)
-}
-
-/// Change it, for sweeping the width in front of a client.
-///
-/// Clamped to 1..=32: zero would write nothing while claiming to have written something, which
-/// is the one failure that looks like a client bug rather than a server one.
-pub fn set_bits(bits: u32) {
-    BITS.store(bits.clamp(1, 32), Ordering::Relaxed);
-}
+/// `32 - NumBitsRequired(100000)` (`FUN_008d4ea0`).
+const BITS: u32 = 32 - MAX_DURABILITY.leading_zeros();
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DurabilityComponent {
@@ -78,11 +64,11 @@ impl DurabilityComponent {
     }
 
     pub fn sync(&self, parameter: &str, writer: &mut BitWriter) -> bool {
-        let width = bits();
-
         match parameter.to_ascii_lowercase().as_str() {
-            "durability" => writer.write_bits_le(self.durability, width),
-            "durabilitymax" => writer.write_bits_le(self.durability_max, width),
+            "durability" => writer.write_bits_le(self.durability.min(MAX_DURABILITY), BITS),
+            "durabilitymax" => {
+                writer.write_bits_le(self.durability_max.min(MAX_DURABILITY), BITS)
+            }
             "indestructible" => writer.write_bit(self.indestructible),
 
             // Declined on purpose. See the module docs.

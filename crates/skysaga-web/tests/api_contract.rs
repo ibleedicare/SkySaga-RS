@@ -1038,7 +1038,7 @@ mod admin {
             ("/admin/give", json!({"account": "Alice", "item": "Dirt"})),
             ("/admin/mail", json!({"account": "Alice", "subject": "hi"})),
             ("/admin/mob", json!({"account": "Alice", "entity": "Knight"})),
-            ("/admin/durability", json!({"bits": 32})),
+            ("/admin/durability", json!({"enabled": true})),
         ] {
             let (status, _) = api
                 .send(

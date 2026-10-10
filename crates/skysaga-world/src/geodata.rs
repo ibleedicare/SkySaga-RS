@@ -138,6 +138,11 @@ pub struct GeoData {
     /// why naming a stat template is not the same as being durable.
     durability: HashMap<u32, u32>,
 
+    /// Name hash to what the item is made of: a material per category its row names.
+    ///
+    /// Absent for an item that names no category. See [`Self::materials_of`].
+    materials: HashMap<u32, Vec<Option<u32>>>,
+
     /// Every `Resources` name, lower-cased: the set of things a player may ask for by name.
     ///
     /// A name is hashed everywhere else, and a hash of a misspelling is a perfectly good number
@@ -363,6 +368,38 @@ impl GeoData {
             })
             .collect();
 
+        // --- what things are made of -------------------------------------------------------
+        //
+        // A resource names up to four material *categories* ("Metal", "Wood"); the `Materials`
+        // table lists the materials of each. Which metal a particular sword is made of is the
+        // item's own history, which a minted item does not have, so it gets the first of the
+        // category in file order: arbitrary, but the same every time.
+        let mut first_of_category: HashMap<&str, u32> = HashMap::new();
+
+        for material in &file.materials {
+            first_of_category
+                .entry(material.category.as_str())
+                .or_insert_with(|| skysaga_core::name_hash(&material.name));
+        }
+
+        let materials: HashMap<u32, Vec<Option<u32>>> = file
+            .resources
+            .iter()
+            .filter_map(|resource| {
+                let mut made_of: Vec<Option<u32>> = resource
+                    .material_categories()
+                    .iter()
+                    .map(|category| first_of_category.get(category.as_str()).copied())
+                    .collect();
+
+                while made_of.last() == Some(&None) {
+                    made_of.pop();
+                }
+
+                (!made_of.is_empty()).then(|| (skysaga_core::name_hash(&resource.name), made_of))
+            })
+            .collect();
+
         let resource_names: BTreeSet<String> = file
             .resources
             .iter()
@@ -487,6 +524,7 @@ impl GeoData {
             by_index,
             stack_overrides,
             durability,
+            materials,
             resource_names,
             places,
             actions,
@@ -521,6 +559,14 @@ impl GeoData {
     /// `BaseDurability`: a sword has 600, a pickaxe 1500, a piece of armour 100.
     pub fn durability_of(&self, hash: u32) -> Option<u32> {
         self.durability.get(&hash).copied()
+    }
+
+    /// What `hash` is made of: one material per category its row names, primary first.
+    ///
+    /// Empty for an item that names none. `None` inside the list is a gap, a category left
+    /// blank before one that is not.
+    pub fn materials_of(&self, hash: u32) -> &[Option<u32>] {
+        self.materials.get(&hash).map_or(&[], Vec::as_slice)
     }
 
     /// Every item that wears out, as `(name hash, durability)`.
@@ -806,6 +852,9 @@ struct File {
     #[serde(rename = "StatTemplates", default)]
     stat_templates: Vec<RawStatTemplate>,
 
+    #[serde(rename = "Materials", default)]
+    materials: Vec<RawMaterial>,
+
     #[serde(rename = "EquippedActions", default)]
     equipped_actions: Vec<RawEquippedActionEntry>,
 
@@ -978,6 +1027,40 @@ struct RawResource {
     /// The `StatTemplates` row this item's numbers come from, or empty.
     #[serde(rename = "StatTemplateName", default)]
     stat_template: String,
+
+    #[serde(rename = "PrimaryMaterialCategory", default)]
+    primary_material: String,
+
+    #[serde(rename = "SecondaryMaterialCategory", default)]
+    secondary_material: String,
+
+    #[serde(rename = "TertiaryMaterialCategory", default)]
+    tertiary_material: String,
+
+    #[serde(rename = "QuaternaryMaterialCategory", default)]
+    quaternary_material: String,
+}
+
+impl RawResource {
+    /// The four material categories, in the order the client indexes them.
+    fn material_categories(&self) -> [&String; 4] {
+        [
+            &self.primary_material,
+            &self.secondary_material,
+            &self.tertiary_material,
+            &self.quaternary_material,
+        ]
+    }
+}
+
+/// One `Materials` entry: a material and the category it belongs to.
+#[derive(Debug, Deserialize)]
+struct RawMaterial {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "Category", default)]
+    category: String,
 }
 
 /// One `StatTemplates` entry. Only the durability is read.

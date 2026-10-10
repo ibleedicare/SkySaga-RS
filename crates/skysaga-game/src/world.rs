@@ -78,6 +78,12 @@ pub struct World {
     /// handed resolves one. See [`crate::durable_items_enabled`].
     pub durable_item_definition: Option<EntityDefinition>,
 
+    /// `MaterialDurableInventoryItem`, for the ones that wear out and are made of something.
+    ///
+    /// The same entity with a `materialcompositioncomponent` on top, which is what the repair
+    /// panel reads the item's materials from.
+    pub material_durable_item_definition: Option<EntityDefinition>,
+
     /// The game's own tables: which block an item places, what a broken one drops, how large
     /// a stack may be.
     ///
@@ -296,6 +302,11 @@ impl World {
     /// The definition for a stack that wears out, if the data file has one.
     pub fn durable_item_definition(&self) -> Option<&EntityDefinition> {
         self.durable_item_definition.as_ref()
+    }
+
+    /// The definition for a stack that wears out and names its materials.
+    pub fn material_durable_item_definition(&self) -> Option<&EntityDefinition> {
+        self.material_durable_item_definition.as_ref()
     }
 
     /// The container with this entity id, if it is one.
@@ -782,6 +793,9 @@ impl World {
             player_template: Some((player_template, player_definition)),
             item_definition: definitions.get("BasicInventoryItem").cloned(),
             durable_item_definition: definitions.get("DurableInventoryItem").cloned(),
+            material_durable_item_definition: definitions
+                .get("MaterialDurableInventoryItem")
+                .cloned(),
             mail_item_definition: definitions.get("MailItem").cloned(),
             geodata,
             definitions: definitions.clone(),
