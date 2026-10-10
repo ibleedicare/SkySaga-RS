@@ -86,6 +86,24 @@ fn a_tool_made_of_materials_is_announced_with_them() {
     );
 }
 
+/// **Something made of a material says so even when it does not wear.** A `Metal_Plate` is a
+/// `MaterialBasedInventoryItem`. The repair panel asks for components of the item's own
+/// materials, the way a recipe asks for ingredients, and a plate announced as a plain stack
+/// names none: seen live on 2026-10-11, a worn pickaxe listed "Plate" and "Mahogany rod" and
+/// took neither the plates nor the rods it was offered.
+#[test]
+fn a_material_that_does_not_wear_is_announced_with_what_it_is_made_of() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let burst = session.give_announced("Metal_Plate", 12, &world);
+
+    assert_eq!(
+        added(&burst),
+        vec![skysaga_core::name_hash("MaterialBasedInventoryItem")],
+    );
+}
+
 /// One material per category the item names, in the order primary, secondary, and so on. The
 /// material is the first of its category in the `Materials` table: a given item has no history
 /// to say which metal it was forged from.

@@ -126,6 +126,7 @@ pub fn world_from_capture() -> World {
         item_definition: None,
         durable_item_definition: None,
         material_durable_item_definition: None,
+        material_item_definition: None,
         mail_item_definition: None,
 
         // The C# world this capture came from seeds no container -- it reaches one through

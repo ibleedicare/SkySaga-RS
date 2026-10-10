@@ -233,6 +233,28 @@ pub const UNHANDLED_SAMPLES: usize = 8;
 /// that one line stays one line.
 pub const UNKNOWN_PAYLOAD_BYTES: usize = 24;
 
+/// What breaking one block costs the tool that broke it.
+///
+/// **This server's choice.** The client only draws the number it is sent, and no capture shows
+/// a tool wearing, so there is nothing to copy.
+pub const WEAR_PER_BLOCK: u32 = 1;
+
+/// The cost in use: [`WEAR_PER_BLOCK`] unless `SKYSAGA_WEAR_PER_BLOCK` says otherwise.
+///
+/// A pickaxe has 1500 points, so at one a block its bar does not visibly move in a playtest.
+fn wear_per_block() -> u32 {
+    static COST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+    *COST.get_or_init(|| wear_per_block_from(std::env::var("SKYSAGA_WEAR_PER_BLOCK").ok().as_deref()))
+}
+
+/// What `SKYSAGA_WEAR_PER_BLOCK` asks for; anything that is not a number is the default.
+pub fn wear_per_block_from(value: Option<&str>) -> u32 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(WEAR_PER_BLOCK)
+}
+
 /// How many dig ticks break a block.
 ///
 /// From the C#. The client streams one packet per tick and every field is identical across
@@ -755,6 +777,11 @@ pub struct Session {
     /// Dig ticks accumulated per voxel, until it gives way.
     dig_damage: std::collections::HashMap<([u32; 3], [u32; 3]), u32>,
 
+    /// What is left of each tool that has been used, by item entity.
+    ///
+    /// Only the worn ones: a stack that is not here is as new as its data says.
+    wear: std::collections::HashMap<u32, u32>,
+
     /// Whether a close raises `hasbeenopened`. See [`Session::set_raise_lid_on_close`].
     raise_lid_on_close: bool,
 
@@ -894,6 +921,7 @@ impl Session {
             raise_lid_on_close: true,
             closed_lids: BTreeSet::new(),
             dig_damage: std::collections::HashMap::new(),
+            wear: std::collections::HashMap::new(),
             spawned: Vec::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
@@ -2318,7 +2346,14 @@ impl Session {
         });
 
         let Some((item, material)) = placing else {
-            return self.dig(packet.chunk, packet.voxel, world);
+            let mut out = self.dig(packet.chunk, packet.voxel, world);
+
+            // A block that gave way, as opposed to a tick towards one or a swing at the air.
+            if !out.is_empty() {
+                out.extend(self.wear_held(packet.location, wear_per_block(), world));
+            }
+
+            return out;
         };
 
         // Taking from the stack also confirms there was one to take.
@@ -2853,12 +2888,11 @@ impl Session {
 
     /// Press repair, or dismantle.
     ///
-    /// # Repair is honest about doing nothing
+    /// # Repair makes the item new
     ///
-    /// The server does not model item durability -- an item entity is a name and a count -- so
-    /// there is nothing to restore. The item goes back to the rucksack and the panel is told
-    /// the job is done, which is what the client needs to leave its busy state. When durability
-    /// arrives this is the one line that changes.
+    /// Whatever wear the item had is forgotten, the client is sent the new number, and the
+    /// item goes back to the rucksack. It costs nothing yet: the panel lists the components a
+    /// repair should consume, and what the client sends for them has not been read.
     ///
     /// # Dismantle gives the recipe's materials back
     ///
@@ -2881,11 +2915,17 @@ impl Session {
         match square {
             DISMANTLE_SLOT => self.dismantle(item, world),
 
-            // Repair. Nothing to restore, so the item simply comes back.
+            // Repair: as new, and back in the rucksack.
             REPAIR_SLOT => {
                 let resource = self.inventories.name(item);
 
+                let worn = self.wear.remove(&item).is_some();
+
                 let mut out = self.take_from_drop_slot(slot_type, world);
+
+                if worn {
+                    out.extend(self.sync_of(item, &["durability"], world));
+                }
 
                 out.push(encode(|w| {
                     CraftingNotification {
@@ -2895,7 +2935,7 @@ impl Session {
                     .encode(w)
                 }));
 
-                info!(item, "repaired, as far as anything is damaged");
+                info!(item, worn, "repaired");
 
                 out
             }
@@ -3705,6 +3745,11 @@ impl Session {
             self.fill_container_components(entity, &mut built);
 
             return Some((built, definition));
+        }
+
+        // A stack, whose durability is the one thing about it that changes in place.
+        if self.inventories.item(entity).is_some() {
+            return self.item_entity(entity, world);
         }
 
         let container = self.container(entity, world)?;
@@ -4560,6 +4605,27 @@ impl Session {
             }
         }
 
+        // Made of something and never worn: a plate, a rod, a plank. Gated with the durable
+        // items because the two are one feature, what the repair panel is handed.
+        let materials = self.materials_of(entity, world);
+
+        if durable_items_enabled() && !materials.is_empty() {
+            if let Some(definition) = world.material_item_definition() {
+                return Some((
+                    Entity::new(
+                        entity,
+                        vec![
+                            Component::InventoryItem(component.clone()),
+                            Component::MaterialComposition(
+                                skysaga_world::MaterialCompositionComponent { materials },
+                            ),
+                        ],
+                    ),
+                    definition,
+                ));
+            }
+        }
+
         let definition = world.item_definition().or_else(|| {
             warn!("BasicInventoryItem is not defined; cannot serialise a stack");
 
@@ -4574,9 +4640,8 @@ impl Session {
 
     /// How worn the stack in `entity` is, or `None` if it is not the kind of thing that wears.
     ///
-    /// A stack is a fresh item every time one is minted, so the numbers come straight from the
-    /// data: a sword is a sword. Wear that a player has *done* is not modelled yet, which is
-    /// the next thing repair needs.
+    /// The maximum comes straight from the data: a sword is a sword. What is left of this one
+    /// is the session's, and a stack nobody has used is as new.
     pub fn durability_of(
         &self,
         entity: u32,
@@ -4588,10 +4653,76 @@ impl Session {
 
         let name = self.inventories.name(entity)?;
 
-        world
+        let mut durability = world
             .geodata
             .durability_of(name)
-            .map(skysaga_world::DurabilityComponent::new)
+            .map(skysaga_world::DurabilityComponent::new)?;
+
+        if let Some(left) = self.wear.get(&entity) {
+            durability.durability = (*left).min(durability.durability_max);
+        }
+
+        Some(durability)
+    }
+
+    /// The stack the hand at `location` is swinging, if it is holding one.
+    ///
+    /// The hotbar names a stack by uuid. A binding without one (the client sends those for an
+    /// item it has just been handed) falls back to the first stack of that item.
+    fn held_stack(&self, location: ActionLocation) -> Option<u32> {
+        let hand = match location {
+            ActionLocation::LeftHand => 0,
+            ActionLocation::RightHand => 1,
+            _ => return None,
+        };
+
+        let spec = &self.hotbar.get(&self.active_slot)?[hand];
+        let resource = spec.resource?;
+
+        let stacks = || {
+            self.inventory()
+                .iter()
+                .copied()
+                .filter(|entity| *entity != 0)
+                .filter(|entity| self.inventories.name(*entity) == Some(resource))
+        };
+
+        stacks()
+            .find(|entity| {
+                !spec.item_uuid.is_empty()
+                    && self
+                        .inventories
+                        .item(*entity)
+                        .is_some_and(|item| item.slot_data.item_uuid == spec.item_uuid)
+            })
+            .or_else(|| stacks().next())
+    }
+
+    /// Take `cost` off the tool the hand at `location` holds, and tell the client.
+    ///
+    /// Nothing for a bare hand or a stack of dirt. A tool stops at zero and stays in the
+    /// rucksack: what the real server did with a spent tool is not known, and destroying an
+    /// item on a guess is the wrong way to be wrong.
+    fn wear_held(&mut self, location: ActionLocation, cost: u32, world: &World) -> Vec<Vec<u8>> {
+        let Some(tool) = self.held_stack(location) else {
+            return Vec::new();
+        };
+
+        let Some(durability) = self.durability_of(tool, world) else {
+            return Vec::new();
+        };
+
+        let left = durability.durability.saturating_sub(cost);
+
+        if left == durability.durability {
+            return Vec::new();
+        }
+
+        self.wear.insert(tool, left);
+
+        debug!(tool, left, max = durability.durability_max, "wear");
+
+        self.sync_of(tool, &["durability"], world).into_iter().collect()
     }
 
     /// What the stack in `entity` is made of: a material per category its item names.
