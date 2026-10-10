@@ -1,28 +1,23 @@
 //! A tool is a different entity from a stack of dirt.
 //!
-//! # Why the repair square refuses everything today
+//! `Entities.json` has four item entities and this server used to create only the first.
+//! `BasicInventoryItem` has an `inventoryitemcomponent` and nothing else, and the repair panel
+//! asks two more things of what it is handed:
 //!
-//! `Entities.json` has four item entities and this server only ever created the first:
-//! `BasicInventoryItem` has an `inventoryitemcomponent` and nothing else. The repair panel's own
-//! test (`FUN_008d72a0`) is that the dropped item resolves a `DurabilityComponent`, so with every
-//! stack minted as the basic entity it refuses a `Metal_Sword` exactly as it refuses a stack of
-//! twelve torches. Both drop-slot packets are implemented and unit-tested and neither can be
-//! exercised in the client until this is right.
+//! - that it resolves a `DurabilityComponent` (`FUN_008d72a0`), which is `DurableInventoryItem`;
+//! - that it names a material for every ingredient of its recipe that has a material category
+//!   (`FUN_007fd290`), which is `MaterialDurableInventoryItem` and its
+//!   `materialcompositioncomponent`.
 //!
-//! # Off by default, on purpose
-//!
-//! The **widths** of `durability` and `durabilitymax` are not known: no capture has one and the
-//! C# oracle never wrote one. A wrong width shifts `inventoryslotdata`, which is sync index 5
-//! against durability's 1, so every square would draw wrong. Until the sweep in front of a
-//! client settles it, `SKYSAGA_DURABLE_ITEMS=1` turns this on and the default is unchanged.
+//! Played on 2026-10-11 with a `Metal_Pickaxe`: the panel lists "Plate" and "Mahogany rod", and
+//! dismantling it returns the plates and the rods.
 
 use skysaga_game::{ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::BitReader;
 use skysaga_proto::packets::EntityAdd;
 use skysaga_world::{default_entities_path, EntityDefinitions};
 
-/// Durable items are off by default until the wire format is settled, so every scenario here
-/// turns them on explicitly rather than depending on the environment.
+/// Every scenario turns durable items on explicitly rather than depending on the environment.
 fn world() -> World {
     skysaga_game::set_durable_items(true);
 
@@ -63,13 +58,94 @@ fn a_sword_is_announced_as_a_durable_item() {
     let world = world();
     let mut session = playing(&world);
 
-    let burst = session.give_announced("Metal_Sword", 1, &world);
+    let burst = session.give_announced("Mining_Pick", 1, &world);
 
     assert_eq!(
         added(&burst),
         vec![skysaga_core::name_hash("DurableInventoryItem")],
-        "a sword was minted as an ordinary stack, so the repair square will refuse it",
+        "a pick was minted as an ordinary stack, so the repair square will refuse it",
     );
+}
+
+/// **A tool made of something says what it is made of.** A `Metal_Sword` is metal and wood, and
+/// the repair panel refuses it ("This item cannot be repaired") unless the entity carries a
+/// `materialcompositioncomponent` naming one material per category: `FUN_007fd290` walks the
+/// recipe's ingredients and stops at the first one whose category has no material on the item
+/// (`FUN_0087ded0` reads them from that component). Seen live on 2026-10-11: a pickaxe minted
+/// as a plain `DurableInventoryItem` passed the durability gate and was then refused.
+#[test]
+fn a_tool_made_of_materials_is_announced_with_them() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let burst = session.give_announced("Metal_Sword", 1, &world);
+
+    assert_eq!(
+        added(&burst),
+        vec![skysaga_core::name_hash("MaterialDurableInventoryItem")],
+    );
+}
+
+/// One material per category the item names, in the order primary, secondary, and so on. The
+/// material is the first of its category in the `Materials` table: a given item has no history
+/// to say which metal it was forged from.
+#[test]
+fn a_given_tool_is_made_of_the_first_material_of_each_category() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let sword = session.give("Metal_Sword", 1).expect("a free square");
+    let pick = session.give("Mining_Pick", 1).expect("a free square");
+
+    assert_eq!(
+        session.materials_of(sword, &world),
+        vec![
+            Some(skysaga_core::name_hash("Metal_Black")),
+            Some(skysaga_core::name_hash("Dark_Wood")),
+        ],
+    );
+    assert!(session.materials_of(pick, &world).is_empty(), "a pick names no category");
+}
+
+/// `materiallist` as the client reads it (`FUN_008db340`, written by `FUN_008db1c0`): the count
+/// is ranged 1 to 4, so two bits of `count - 1`; at 4 one more bit says whether it is exactly 4;
+/// then each entry is a presence bit and 32 bits.
+#[test]
+fn a_material_list_is_two_bits_of_count_then_optional_hashes() {
+    use skysaga_proto::bitstream::{BitReader, BitWriter};
+    use skysaga_world::{Component, MaterialCompositionComponent};
+
+    let component = Component::MaterialComposition(MaterialCompositionComponent {
+        materials: vec![Some(0xdead_beef), None],
+    });
+
+    let mut writer = BitWriter::new();
+
+    assert!(component.sync("materiallist", &mut writer));
+    assert_eq!(writer.bits_used(), 2 + 33 + 1);
+
+    let bytes = writer.into_bytes();
+    let mut reader = BitReader::from_bytes(&bytes);
+
+    assert_eq!(reader.read_bits_le(2).unwrap(), 1, "two entries, written as count - 1");
+    assert_eq!(reader.read_optional_u32().unwrap(), Some(0xdead_beef));
+    assert_eq!(reader.read_optional_u32().unwrap(), None);
+}
+
+/// A list at its cap of four writes a clear bit after the count and no 32-bit length.
+#[test]
+fn a_full_material_list_writes_a_clear_escape_bit() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, MaterialCompositionComponent};
+
+    let component = Component::MaterialComposition(MaterialCompositionComponent {
+        materials: vec![Some(1); 4],
+    });
+
+    let mut writer = BitWriter::new();
+
+    assert!(component.sync("materiallist", &mut writer));
+    assert_eq!(writer.bits_used(), 2 + 1 + 4 * 33);
 }
 
 #[test]
@@ -110,21 +186,76 @@ fn a_material_has_no_durability_at_all() {
     assert!(session.durability_of(dirt, &world).is_none());
 }
 
-/// The width the two numbers are written with is a variable, because it is not known: see
-/// `skysaga_world::components::durability`. This is the knob the sweep turns.
+/// **The admin `give` announces a tool as a durable item too.** It used to build its own
+/// `EntityAdd` from the basic definition, so a sword given over the API reached the client as a
+/// `BasicInventoryItem` whatever the switch said. Seen under gdb on 2026-10-11: the client was
+/// handed `0x7aa736ce` for a pickaxe and built one component. Every earlier "the client never
+/// builds a durability component" was measured through that path.
 #[test]
-fn the_durability_width_can_be_changed() {
-    use skysaga_world::components::durability;
+fn an_item_announced_on_its_own_keeps_its_kind() {
+    let world = world();
+    let mut session = playing(&world);
 
-    let original = durability::bits();
+    let sword = session.give("Mining_Pick", 1).expect("a free square");
+    let dirt = session.give("Dirt", 30).expect("a free square");
 
-    durability::set_bits(17);
-    assert_eq!(durability::bits(), 17);
+    assert_eq!(
+        added(&session.announce_item(sword, &world)),
+        vec![skysaga_core::name_hash("DurableInventoryItem")],
+    );
+    assert_eq!(
+        added(&session.announce_item(dirt, &world)),
+        vec![skysaga_core::name_hash("BasicInventoryItem")],
+    );
+}
 
-    // Nothing sensible can be written in zero bits, and a parameter that claims to have been
-    // written but was not shifts every one after it.
-    durability::set_bits(0);
-    assert_eq!(durability::bits(), 1);
+/// Read from the client's own reader and writer for the component (`FUN_008d51b0`,
+/// `FUN_008d5420`): both numbers are ranged to 100000, which is 17 bits, and the writer clamps.
+#[test]
+fn durability_is_written_in_seventeen_bits_and_clamped() {
+    use skysaga_proto::bitstream::{BitReader, BitWriter};
+    use skysaga_world::{Component, DurabilityComponent};
 
-    durability::set_bits(original);
+    let component = Component::Durability(DurabilityComponent {
+        durability: 600,
+        durability_max: 250_000,
+        indestructible: true,
+    });
+
+    for (parameter, bits, value) in [
+        ("durability", 17, 600),
+        ("durabilitymax", 17, 100_000),
+        ("indestructible", 1, 1),
+    ] {
+        let mut writer = BitWriter::new();
+
+        assert!(component.sync(parameter, &mut writer), "{parameter}");
+        assert_eq!(writer.bits_used(), bits, "{parameter}");
+
+        let bytes = writer.into_bytes();
+
+        assert_eq!(BitReader::from_bytes(&bytes).read_bits_le(bits as u32).unwrap(), value, "{parameter}");
+    }
+}
+
+/// `lifetimedata` is optional on the wire (one presence bit, `FUN_008d5330`). Nothing here
+/// decays, so it is declined and the client keeps its default of none.
+#[test]
+fn a_lifetime_is_not_sent() {
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_world::{Component, DurabilityComponent};
+
+    let mut writer = BitWriter::new();
+
+    assert!(!Component::Durability(DurabilityComponent::new(600)).sync("lifetimedata", &mut writer));
+    assert_eq!(writer.bits_used(), 0);
+}
+
+#[test]
+fn a_running_server_mints_durable_items_unless_switched_off() {
+    use skysaga_game::durable_items_from;
+
+    assert!(durable_items_from(None), "unset means on");
+    assert!(durable_items_from(Some("1")));
+    assert!(!durable_items_from(Some("0")), "the one way to turn it off");
 }

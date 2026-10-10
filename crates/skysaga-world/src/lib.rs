@@ -15,7 +15,7 @@ pub use components::{
     CharacterCustomisationComponent, Component, CraftingComponent, CraftingDropSlotsComponent,
     CraftingSlot, Currency, DurabilityComponent,
     FeatureUnlockComponent, HealthComponent, InteractionComponent, InventoryComponent,
-    InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, OwnerComponent, PhysicsComponent,
+    InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, MaterialCompositionComponent, OwnerComponent, PhysicsComponent,
     PickupComponent, PlayerAspectsComponent, PlayerNameComponent, RecipeBookComponent,
     ResourcePickupComponent, TimeOfDayComponent, TodoListComponent, TransformComponent,
     UiSettingsComponent, HotbarSlot, UseEntityComponent,

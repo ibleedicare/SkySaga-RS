@@ -37,6 +37,7 @@ pub mod job_rank;
 pub mod misc;
 pub mod owner;
 pub mod physics;
+pub mod material_composition;
 pub mod pickup;
 pub mod player_aspects;
 pub mod player_name;
@@ -56,6 +57,7 @@ pub use interaction::InteractionComponent;
 pub use inventory::InventoryComponent;
 pub use inventory_item::InventoryItemComponent;
 pub use job_rank::{JobRank, JobRankComponent};
+pub use material_composition::MaterialCompositionComponent;
 pub use misc::{
     CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, MailBoxComponent, MailItem,
     UseEntityComponent, WalletComponent,
@@ -145,6 +147,8 @@ pub enum Component {
     /// `clientjobrankcomponent` -- what gates the recipe book.
     JobRank(JobRankComponent),
     MailBox(MailBoxComponent),
+    /// `materialcompositioncomponent` -- what an item is made of, which repair reads.
+    MaterialComposition(MaterialCompositionComponent),
     Owner(OwnerComponent),
     Pickup(PickupComponent),
     /// `recipebookcomponent` -- no `Client` prefix, unlike almost every other component.
@@ -182,6 +186,7 @@ impl Component {
             Self::Durability(_) => "clientdurabilitycomponent",
             Self::JobRank(_) => "clientjobrankcomponent",
             Self::MailBox(_) => "clientmailboxcomponent",
+            Self::MaterialComposition(_) => "materialcompositioncomponent",
             Self::Owner(_) => "clientownercomponent",
             Self::Pickup(_) => "clientpickupcomponent",
             Self::RecipeBook(_) => "recipebookcomponent",
@@ -217,6 +222,7 @@ impl Component {
             Self::Durability(component) => component.sync(parameter, writer),
             Self::JobRank(component) => component.sync(parameter, writer),
             Self::MailBox(component) => component.sync(parameter, writer),
+            Self::MaterialComposition(component) => component.sync(parameter, writer),
             Self::Owner(component) => component.sync(parameter, writer),
             Self::Pickup(component) => component.sync(parameter, writer),
             Self::RecipeBook(component) => component.sync(parameter, writer),
