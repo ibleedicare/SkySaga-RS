@@ -392,6 +392,14 @@ pub enum AdminCommand {
     /// two readings are told apart without a rebuild between them.
     Lid { account: String, raise_on_close: bool },
 
+    /// Set the state of the last portal put in front of a player, and where it leads.
+    Portal {
+        account: String,
+        state: u32,
+        biome: Option<String>,
+        adventure: Option<String>,
+    },
+
     /// Put a chest in the world, in front of a player.
     ///
     /// The world is built once, so this is the only way to get a *second* chest, a filled one,

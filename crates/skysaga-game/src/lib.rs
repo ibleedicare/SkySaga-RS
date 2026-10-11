@@ -58,7 +58,7 @@ use skysaga_proto::packets::todo_list::{
     TodoListTaskAdd, TodoListTaskRef, TodoTask, TASK_LIST_DEFAULT,
 };
 use skysaga_proto::packets::voxel::{
-    ActionLocation, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions,
+    ActionLocation, ChunkEdit, PartialChunkEditsSync, PerformAlwaysActions, PerformVoxelActions,
 };
 use skysaga_proto::packets::inventory::{
     InventoryItemDestroy, InventoryItemSwap, InventoryItemTransferAll, InventoryItemTransferToSlot,
@@ -234,6 +234,13 @@ pub const UNHANDLED_SAMPLES: usize = 8;
 /// that one line stays one line.
 pub const UNKNOWN_PAYLOAD_BYTES: usize = 24;
 
+/// The `teleporterstate` that opens a portal.
+///
+/// Swept in front of the client on 2026-10-11. From shut, 3 parts the frame and within a few
+/// seconds shows the destination through it. 4 and 5 keep an open portal open, but 4 sent to a
+/// shut one parts the frame and shows nothing. 0, 1, 2, 6, 7 and 8 leave it shut.
+pub const PORTAL_OPEN: u32 = 3;
+
 /// Which of the two drop squares is counting components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Salvage {
@@ -366,6 +373,8 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+    /// 19 -- the item in a hand was used on nothing in particular: a portal stone.
+    PerformAlwaysActions(PerformAlwaysActions),
 
     // --- crafting ------------------------------------------------------------------------
     //
@@ -561,6 +570,10 @@ impl ClientPacket {
 
             InteractWithEntity::ID => InteractWithEntity::decode(&mut reader)
                 .map(Self::InteractWithEntity)
+                .unwrap_or(Self::unknown(wire_id, bytes)),
+
+            PerformAlwaysActions::ID => PerformAlwaysActions::decode(&mut reader)
+                .map(Self::PerformAlwaysActions)
                 .unwrap_or(Self::unknown(wire_id, bytes)),
 
             PerformVoxelActions::ID => PerformVoxelActions::decode(&mut reader)
@@ -785,6 +798,9 @@ pub struct Session {
     /// Dig ticks accumulated per voxel, until it gives way.
     dig_damage: std::collections::HashMap<([u32; 3], [u32; 3]), u32>,
 
+    /// The state of each portal this session has changed, by entity.
+    portals: std::collections::HashMap<u32, skysaga_world::TeleporterComponent>,
+
     /// What is left of each tool that has been used, by item entity.
     ///
     /// Only the worn ones: a stack that is not here is as new as its data says.
@@ -930,6 +946,7 @@ impl Session {
             closed_lids: BTreeSet::new(),
             dig_damage: std::collections::HashMap::new(),
             wear: std::collections::HashMap::new(),
+            portals: std::collections::HashMap::new(),
             spawned: Vec::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
@@ -1874,6 +1891,10 @@ impl Session {
 
             // --- building and digging ----------------------------------------------------
             (ClientPacket::PerformVoxelActions(packet), _) => self.perform_voxel_action(packet, world),
+
+            (ClientPacket::PerformAlwaysActions(packet), _) => {
+                self.perform_always_action(packet, world)
+            }
 
             // --- crafting -----------------------------------------------------------------
             (ClientPacket::QueueRecipeOnEntity(packet), _) => self.queue_recipe(packet, world),
@@ -3882,6 +3903,12 @@ impl Session {
                     interaction.has_been_opened = self.closed_lids.contains(&entity);
                 }
 
+                Component::Teleporter(teleporter) => {
+                    if let Some(portal) = self.portals.get(&entity) {
+                        *teleporter = portal.clone();
+                    }
+                }
+
                 // A station's queue, which is what its window draws. The entity was built
                 // empty when it was placed, and everything queued since lives on the session.
                 Component::Crafting(crafting) => {
@@ -4784,6 +4811,106 @@ impl Session {
         if let Some(durability) = self.durability_of(entity, world) {
             self.wear.insert(entity, left.min(durability.durability_max));
         }
+    }
+
+    /// A portal stone was used: open the portal onto where the stone leads.
+    ///
+    /// The packet names no target. The stone's action was announced a moment earlier
+    /// (`EquippedItemUsed`, kept in `armed`), and its `ActivatePortalActions` row is the
+    /// destination. The portal is the last teleporter put in front of this player, which is
+    /// as much as there is until portals belong to the world.
+    ///
+    /// Not done: the stone is not used up, and walking into the open portal goes nowhere. The
+    /// client sends nothing when it does (seen 2026-10-11), so that is the server's to notice.
+    fn perform_always_action(
+        &mut self,
+        packet: PerformAlwaysActions,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(action) = self.armed.get(&packet.location.bits()).map(|action| action.name.clone())
+        else {
+            debug!(location = ?packet.location, "an always-action with nothing armed");
+
+            return Vec::new();
+        };
+
+        let Some((biome, adventure)) = world.geodata.portal_destination(&action) else {
+            debug!(%action, "an always-action that is not a portal stone");
+
+            return Vec::new();
+        };
+
+        let (biome, adventure) = (biome.to_owned(), adventure.map(str::to_owned));
+
+        let Some(portal) = self
+            .spawned
+            .iter()
+            .rev()
+            .find(|container| {
+                container
+                    .definition
+                    .binds_component("clientteleportercomponent")
+            })
+            .map(|container| container.id)
+        else {
+            debug!(%action, "a portal stone was used with no portal about");
+
+            return Vec::new();
+        };
+
+        info!(portal, %biome, ?adventure, "portal opened");
+
+        self.set_portal(
+            portal,
+            PORTAL_OPEN,
+            Some(skysaga_core::name_hash(&biome)),
+            adventure.as_deref().map(skysaga_core::name_hash),
+            world,
+        )
+    }
+
+    /// Set the state and destination of the last entity spawned in front of the player, and
+    /// tell the client. For finding out what each `teleporterstate` looks like.
+    pub fn set_last_portal(
+        &mut self,
+        state: u32,
+        target_biome: Option<u32>,
+        target_adventure: Option<u32>,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        let Some(entity) = self.spawned.last().map(|container| container.id) else {
+            return Vec::new();
+        };
+
+        self.set_portal(entity, state, target_biome, target_adventure, world)
+    }
+
+    /// The state this session has given a portal, if it has given it one.
+    pub fn portal(&self, entity: u32) -> Option<&skysaga_world::TeleporterComponent> {
+        self.portals.get(&entity)
+    }
+
+    /// Set one portal's state and destination, and tell the client.
+    fn set_portal(
+        &mut self,
+        entity: u32,
+        state: u32,
+        target_biome: Option<u32>,
+        target_adventure: Option<u32>,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        self.portals.insert(
+            entity,
+            skysaga_world::TeleporterComponent {
+                state,
+                target_biome,
+                target_adventure,
+            },
+        );
+
+        self.sync_of(entity, &["teleporterstate", "targetbiome", "targetadventure"], world)
+            .into_iter()
+            .collect()
     }
 
     /// The stack the hand at `location` is swinging, if it is holding one.

@@ -46,7 +46,10 @@ pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use todo_list::{ItemObjective, TodoListTaskAdd, TodoListTaskRef, TodoTask, ValueObjective};
 pub use transfer::TransferToServer;
-pub use voxel::{ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformVoxelActions};
+pub use voxel::{
+    ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformAlwaysActions,
+    PerformVoxelActions,
+};
 pub use handshake::{
     BeginSync, Bits, ChunkSync, ClientEntitiesSyncFinished, DebugRequestFinishTutorial, EntityAdd,
     EntityRemoved, EntitySync,

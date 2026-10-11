@@ -256,6 +256,25 @@ pub fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
             )]
         }
 
+        "portal" => {
+            // `/portal 3`, `/portal 3 Forest Castle_Adventure`.
+            let Some(portal_state) = parts.next().and_then(|word| word.parse::<u32>().ok()) else {
+                return vec!["usage: /portal <state> [biome] [adventure]".to_owned()];
+            };
+
+            let biome = parts.next().map(str::to_owned);
+            let adventure = parts.next().map(str::to_owned);
+
+            state.push_command(AdminCommand::Portal {
+                account: nick.to_owned(),
+                state: portal_state,
+                biome: biome.clone(),
+                adventure: adventure.clone(),
+            });
+
+            vec![format!("portal state {portal_state} biome {biome:?} adventure {adventure:?}")]
+        }
+
         "chest" => {
             // `/chest`, `/chest Dirt:10 Stone`, `/chest @Chest_Generic_Minor Dirt:10`.
             //

@@ -165,6 +165,12 @@ impl EntityDefinition {
         &self.name
     }
 
+    /// Whether any synced parameter of this entity belongs to `component` (lower-case, as in
+    /// the data file).
+    pub fn binds_component(&self, component: &str) -> bool {
+        self.by_index.values().any(|(name, _)| name == component)
+    }
+
     /// The voxel cells this entity occupies, as `(offset, voxel index)`.
     ///
     /// **What puts an entity in the world grid.** An entity sent without them is not part of

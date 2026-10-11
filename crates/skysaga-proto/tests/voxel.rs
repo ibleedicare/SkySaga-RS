@@ -242,3 +242,22 @@ fn a_long_list_takes_the_escape_path() {
     assert!(reader.read_bit().unwrap(), "the escape flag");
     assert_eq!(reader.read_u32().unwrap(), 10, "the real count");
 }
+
+/// The one `PerformAlwaysActions` the live client has sent (2026-10-11): a portal stone used
+/// from the left hand while standing at the spawn point, looking straight ahead.
+#[test]
+fn a_captured_always_action_decodes() {
+    use skysaga_proto::packets::voxel::PerformAlwaysActions;
+
+    let bytes = [0x99, 0x00, 0x01, 0x02, 0x98, 0x20, 0x00, 0x40, 0x80, 0x81, 0x01, 0x00];
+    let mut reader = BitReader::from_bytes(&bytes);
+
+    assert_eq!(reader.read_packet_id().unwrap(), PerformAlwaysActions::ID);
+
+    let packet = PerformAlwaysActions::decode(&mut reader).unwrap();
+
+    assert_eq!(packet.location, ActionLocation::LeftHand);
+    assert_eq!(packet.position, [4096, 1107, 4096], "the spawn point, at hand height");
+    assert_eq!(packet.direction, [64, 64, 128], "straight ahead: 64 is zero");
+    assert_eq!(packet.power, 32);
+}

@@ -138,6 +138,9 @@ pub struct GeoData {
     /// why naming a stat template is not the same as being durable.
     durability: HashMap<u32, u32>,
 
+    /// `ActivatePortalActions` name, lower-cased, to the biome and adventure it opens onto.
+    portals: HashMap<String, (String, Option<String>)>,
+
     /// Name hash to what the item is made of: a material per category its row names.
     ///
     /// Absent for an item that names no category. See [`Self::materials_of`].
@@ -524,6 +527,15 @@ impl GeoData {
             by_index,
             stack_overrides,
             durability,
+            portals: file
+                .activate_portal_actions
+                .into_iter()
+                .map(|entry| {
+                    let adventure = Some(entry.action.adventure).filter(|name| !name.is_empty());
+
+                    (entry.name.to_ascii_lowercase(), (entry.action.biome, adventure))
+                })
+                .collect(),
             materials,
             resource_names,
             places,
@@ -559,6 +571,17 @@ impl GeoData {
     /// `BaseDurability`: a sword has 600, a pickaxe 1500, a piece of armour 100.
     pub fn durability_of(&self, hash: u32) -> Option<u32> {
         self.durability.get(&hash).copied()
+    }
+
+    /// Where the portal action `name` leads: a biome, and an adventure for the portals that
+    /// open onto a particular one.
+    ///
+    /// `name` is an `EquippedActions` name such as `ActivatePortal_ForestCastleAdventure`; the
+    /// `ActivatePortalActions` row of the same name carries the destination.
+    pub fn portal_destination(&self, name: &str) -> Option<(&str, Option<&str>)> {
+        self.portals
+            .get(&name.to_ascii_lowercase())
+            .map(|(biome, adventure)| (biome.as_str(), adventure.as_deref()))
     }
 
     /// What `hash` is made of: one material per category its row names, primary first.
@@ -861,6 +884,9 @@ struct File {
     #[serde(rename = "Materials", default)]
     materials: Vec<RawMaterial>,
 
+    #[serde(rename = "ActivatePortalActions", default)]
+    activate_portal_actions: Vec<RawPortalActionEntry>,
+
     #[serde(rename = "EquippedActions", default)]
     equipped_actions: Vec<RawEquippedActionEntry>,
 
@@ -1057,6 +1083,25 @@ impl RawResource {
             &self.quaternary_material,
         ]
     }
+}
+
+/// One `ActivatePortalActions` entry.
+#[derive(Debug, Deserialize)]
+struct RawPortalActionEntry {
+    #[serde(rename = "Name", default)]
+    name: String,
+
+    #[serde(rename = "ActivatePortalAction", default)]
+    action: RawPortalAction,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawPortalAction {
+    #[serde(rename = "Biome", default)]
+    biome: String,
+
+    #[serde(rename = "Adventure", default)]
+    adventure: String,
 }
 
 /// One `Materials` entry: a material and the category it belongs to.

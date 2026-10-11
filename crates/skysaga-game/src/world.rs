@@ -892,6 +892,8 @@ pub fn container_components(
         }),
         Component::Owner(OwnerComponent::default()),
         Component::Pickup(PickupComponent::default()),
+        // Only a teleporter's definition binds it; on a chest it is never written.
+        Component::Teleporter(skysaga_world::TeleporterComponent::default()),
         // **What puts the chest in the world grid rather than floating in front of it.**
         // Every entity declaring `clientinteractioncomponent` also declares this, and an empty
         // list declines the parameter -- so a chest sent without it is not part of the terrain.
@@ -962,6 +964,8 @@ pub fn device_components(
         }),
         Component::Owner(OwnerComponent::default()),
         Component::Pickup(PickupComponent::default()),
+        // Only a teleporter's definition binds it; on a chest it is never written.
+        Component::Teleporter(skysaga_world::TeleporterComponent::default()),
         // What puts the device in the world grid rather than floating in front of it. An Anvil
         // is twelve linked cells, a Camp_Fire one, and the shape is read from the entity.
         Component::VoxelLink(VoxelLinkComponent {
