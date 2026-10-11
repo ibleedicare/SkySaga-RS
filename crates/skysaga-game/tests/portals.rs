@@ -229,7 +229,7 @@ fn asking_to_go_home_starts_a_transfer_home() {
 #[test]
 fn a_destination_is_the_island_as_another_adventure() {
     let home = world();
-    let keep = home.for_adventure(Some("Castle_Adventure"), "Forest");
+    let keep = home.for_adventure(Some("Castle_Adventure"), "Forest", 900);
 
     assert_eq!(keep.server_info.adventure, Some(skysaga_core::name_hash("Castle_Adventure")));
     assert_eq!(keep.server_info.biome, "Forest");
@@ -237,4 +237,23 @@ fn a_destination_is_the_island_as_another_adventure() {
     assert!(home.server_info.is_home_world);
     assert_ne!(keep.map.biome, home.map.biome);
     assert_eq!(keep.chunks.len(), home.chunks.len(), "the same ground, for now");
+}
+
+/// Away from home the banner is composed from an `AdventureName` entity. Without one the
+/// client keeps showing "<name>'s Home" after a portal (seen under gdb, 2026-10-11).
+#[test]
+fn a_destination_carries_its_name() {
+    let home = world();
+    let keep = home.for_adventure(Some("Castle_Adventure"), "Forest", 900);
+
+    let name = skysaga_core::name_hash("AdventureName");
+
+    assert!(
+        keep.entities.iter().any(|entity| entity.id == 900 && entity.name_hash == Some(name)),
+        "the adventure world announces an AdventureName entity under the id it was given",
+    );
+    assert!(
+        !home.entities.iter().any(|entity| entity.name_hash == Some(name)),
+        "a home island is named from its owner, not from this entity",
+    );
 }

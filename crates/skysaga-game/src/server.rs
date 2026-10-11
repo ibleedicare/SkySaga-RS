@@ -442,9 +442,13 @@ impl GameServer {
                         if !self.adventures.contains_key(&key) {
                             info!(%key, "opening a world");
 
+                            // The world's name is an entity of its own, numbered like any other.
+                            let name_entity = self.next_entity_id;
+                            self.next_entity_id += 1;
+
                             self.adventures.insert(
                                 key.clone(),
-                                self.world.for_adventure(adventure.as_deref(), biome),
+                                self.world.for_adventure(adventure.as_deref(), biome, name_entity),
                             );
                         }
 

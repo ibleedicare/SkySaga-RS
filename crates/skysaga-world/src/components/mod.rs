@@ -43,6 +43,7 @@ pub mod player_aspects;
 pub mod player_name;
 pub mod recipe_book;
 pub mod resource_pickup;
+pub mod adventure_name;
 pub mod teleporter;
 pub mod time_of_day;
 pub mod todo_list;
@@ -59,6 +60,7 @@ pub use inventory::InventoryComponent;
 pub use inventory_item::InventoryItemComponent;
 pub use job_rank::{JobRank, JobRankComponent};
 pub use material_composition::MaterialCompositionComponent;
+pub use adventure_name::{AdventureNameComponent, NamePart};
 pub use teleporter::TeleporterComponent;
 pub use misc::{
     CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, MailBoxComponent, MailItem,
@@ -161,6 +163,8 @@ pub enum Component {
     PlayerName(PlayerNameComponent),
     /// Same parameters as [`Transform`](Self::Transform); the entity binds a different name.
     SmoothedTransform(TransformComponent),
+    /// `clientadventurenamecomponent` -- what a world that is not a home island is called.
+    AdventureName(AdventureNameComponent),
     /// `clientteleportercomponent` -- whether a portal is open, and onto what.
     Teleporter(TeleporterComponent),
     TimeOfDay(TimeOfDayComponent),
@@ -198,6 +202,7 @@ impl Component {
             Self::PlayerAspects(_) => "clientplayeraspectscomponent",
             Self::PlayerName(_) => "clientplayernamecomponent",
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
+            Self::AdventureName(_) => "clientadventurenamecomponent",
             Self::Teleporter(_) => "clientteleportercomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
             Self::TodoList(_) => "clienttodolistcomponent",
@@ -235,6 +240,7 @@ impl Component {
             Self::PlayerAspects(component) => component.sync(parameter, writer),
             Self::PlayerName(component) => component.sync(parameter, writer),
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
+            Self::AdventureName(component) => component.sync(parameter, writer),
             Self::Teleporter(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
             Self::TodoList(component) => component.sync(parameter, writer),
