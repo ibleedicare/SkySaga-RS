@@ -44,6 +44,7 @@ pub mod player_name;
 pub mod recipe_book;
 pub mod resource_pickup;
 pub mod adventure_name;
+pub mod home_island;
 pub mod teleporter;
 pub mod time_of_day;
 pub mod todo_list;
@@ -61,6 +62,7 @@ pub use inventory_item::InventoryItemComponent;
 pub use job_rank::{JobRank, JobRankComponent};
 pub use material_composition::MaterialCompositionComponent;
 pub use adventure_name::{AdventureNameComponent, NamePart};
+pub use home_island::HomeIslandCustomisationComponent;
 pub use teleporter::TeleporterComponent;
 pub use misc::{
     CraftingDropSlotsComponent, Currency, FeatureUnlockComponent, MailBoxComponent, MailItem,
@@ -165,6 +167,8 @@ pub enum Component {
     SmoothedTransform(TransformComponent),
     /// `clientadventurenamecomponent` -- what a world that is not a home island is called.
     AdventureName(AdventureNameComponent),
+    /// `clienthomeislandcustomisationcomponent` -- the title on a home island's banner.
+    HomeIslandCustomisation(HomeIslandCustomisationComponent),
     /// `clientteleportercomponent` -- whether a portal is open, and onto what.
     Teleporter(TeleporterComponent),
     TimeOfDay(TimeOfDayComponent),
@@ -203,6 +207,7 @@ impl Component {
             Self::PlayerName(_) => "clientplayernamecomponent",
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
             Self::AdventureName(_) => "clientadventurenamecomponent",
+            Self::HomeIslandCustomisation(_) => "clienthomeislandcustomisationcomponent",
             Self::Teleporter(_) => "clientteleportercomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
             Self::TodoList(_) => "clienttodolistcomponent",
@@ -241,6 +246,7 @@ impl Component {
             Self::PlayerName(component) => component.sync(parameter, writer),
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
             Self::AdventureName(component) => component.sync(parameter, writer),
+            Self::HomeIslandCustomisation(component) => component.sync(parameter, writer),
             Self::Teleporter(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),
             Self::TodoList(component) => component.sync(parameter, writer),
