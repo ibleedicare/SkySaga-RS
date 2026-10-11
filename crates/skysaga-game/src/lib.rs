@@ -3354,18 +3354,27 @@ impl Session {
             return out;
         };
 
-        let built = Entity::new(
+        let built = self.attachment_container(container);
+
+        out.push(encode(|w| built.to_entity_add(definition).encode(w)));
+
+        out
+    }
+
+    /// A message's attachment container as it is now, ready to serialise.
+    ///
+    /// Built in one place because it is sent twice: whole when the message is announced, and
+    /// as a slot list every time an attachment leaves it. Two copies would be two chances to
+    /// forget that the client reads this list from index 9.
+    fn attachment_container(&self, container: u32) -> Entity {
+        Entity::new(
             container,
             vec![Component::Inventory(skysaga_world::InventoryComponent {
                 inventory_entity_list: self.inventories.slots(container).to_vec(),
                 max_inventory_slots: (MAIL_ATTACHMENT_SLOTS + MAIL_ATTACHMENT_BASE) as u8,
                 ..Default::default()
             })],
-        );
-
-        out.push(encode(|w| built.to_entity_add(definition).encode(w)));
-
-        out
+        )
     }
 
     /// Whether this session has already been handed back its inbox.
@@ -3761,6 +3770,15 @@ impl Session {
         // A stack, whose durability is the one thing about it that changes in place.
         if self.inventories.item(entity).is_some() {
             return self.item_entity(entity, world);
+        }
+
+        // A message's attachment container. It is in neither the world nor the spawned list:
+        // the mailbox is the only thing that names it, so without this an attachment dragged
+        // out of a message moved on the server and stayed drawn in the mail panel.
+        if self.mailbox.iter().any(|mail| mail.attachment_entity == entity) {
+            let definition = world.mail_item_definition()?;
+
+            return Some((self.attachment_container(entity), definition));
         }
 
         let container = self.container(entity, world)?;
