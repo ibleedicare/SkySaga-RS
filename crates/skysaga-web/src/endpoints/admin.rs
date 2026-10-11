@@ -202,6 +202,9 @@ pub struct Give {
     /// `Materials` names to make the item of, primary first: `["Metal_Grey"]`.
     #[serde(default)]
     materials: Vec<String>,
+    /// Seconds since the item was minted, to hand over one that is partly expired.
+    #[serde(default)]
+    age: Option<u32>,
 }
 
 fn one() -> u32 {
@@ -245,6 +248,7 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         count: give.count,
         durability: give.durability,
         materials: give.materials.clone(),
+        age: give.age,
     });
 
     Json(Queued {

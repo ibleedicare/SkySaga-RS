@@ -357,6 +357,7 @@ pub fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                 count,
                 durability: None,
                 materials: Vec::new(),
+                age: None,
             });
 
             vec![format!("queued {count} x {item}")]

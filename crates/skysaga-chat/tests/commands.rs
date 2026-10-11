@@ -32,6 +32,7 @@ fn a_known_item_is_queued() {
             count: 10,
             durability: None,
             materials: Vec::new(),
+            age: None,
         }],
     );
 }

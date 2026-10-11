@@ -986,6 +986,12 @@ pub struct Session {
     /// Recipes read from scrolls, beside the ones every player starts with.
     learned_recipes: Vec<u32>,
 
+    /// When each stack that expires was minted, in Unix milliseconds. See [`Self::lifetime_of`].
+    minted: std::collections::HashMap<u32, u64>,
+
+    /// RakNet's clock as of the last tick, which is what a lifetime goes out in.
+    network_ms: u64,
+
     /// The materials a stack was given, where they are not its item's usual ones.
     made_of: std::collections::HashMap<u32, Vec<Option<u32>>>,
 
@@ -1000,6 +1006,9 @@ pub struct Session {
 
     /// Stored materials waiting for their stacks, by square, as `pending_details` is.
     pending_materials: std::collections::HashMap<u32, Vec<Option<u32>>>,
+
+    /// Stored mint moments waiting for their stacks, by square.
+    pending_minted: std::collections::HashMap<u32, u64>,
 
     /// What was last written down of the above, so an unchanged tick writes nothing.
     recorded_progress: Option<skysaga_state::StoredProgress>,
@@ -1071,10 +1080,13 @@ impl Session {
             clock_ms: None,
             todo_tasks: Vec::new(),
             learned_recipes: Vec::new(),
+            minted: std::collections::HashMap::new(),
+            network_ms: 0,
             made_of: std::collections::HashMap::new(),
             taught: std::collections::HashMap::new(),
             pending_details: std::collections::HashMap::new(),
             pending_materials: std::collections::HashMap::new(),
+            pending_minted: std::collections::HashMap::new(),
             recorded_progress: None,
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
@@ -1444,6 +1456,7 @@ impl Session {
             .collect();
 
         self.pending_materials = progress.item_materials.iter().cloned().collect();
+        self.pending_minted = progress.item_minted.iter().copied().collect();
 
         if progress.recipes.is_empty() || !self.learned_recipes.is_empty() {
             return Vec::new();
@@ -1490,9 +1503,17 @@ impl Session {
             .filter_map(|(slot, entity)| Some((slot as u32, self.made_of.get(entity)?.clone())))
             .collect();
 
+        let item_minted = self
+            .inventory()
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entity)| Some((slot as u32, *self.minted.get(entity)?)))
+            .collect();
+
         skysaga_state::StoredProgress {
             item_details,
             item_materials,
+            item_minted,
             recipes: self.learned_recipes.clone(),
         }
     }
@@ -1562,11 +1583,16 @@ impl Session {
                 self.made_of.insert(entity, materials);
             }
 
+            if let Some(minted) = self.pending_minted.remove(&item.slot) {
+                self.minted.insert(entity, minted);
+            }
+
             effects.push(Effect::ItemCreated { entity });
         }
 
         self.pending_details.clear();
         self.pending_materials.clear();
+        self.pending_minted.clear();
 
         if effects.is_empty() {
             return Vec::new();
@@ -4992,6 +5018,29 @@ impl Session {
         anonymous.slot_data.item_uuid.clear();
         let component = &anonymous;
 
+        // One that expires carries its lifetime on a durability component, and of the item
+        // entities only a portal stone's has one beside the stone's own.
+        if let Some(lifetime) = self.lifetime_of(entity, world) {
+            if let Some(definition) = world.definitions.get("DurablePortalStone") {
+                return Some((
+                    Entity::new(
+                        entity,
+                        vec![
+                            // The client reads neither number once there is a lifetime; equal
+                            // and not zero is what a new item has.
+                            Component::Durability(skysaga_world::DurabilityComponent {
+                                lifetime: Some(lifetime),
+                                ..skysaga_world::DurabilityComponent::new(1)
+                            }),
+                            Component::InventoryItem(component.clone()),
+                            Component::PortalStone(skysaga_world::PortalStoneComponent::default()),
+                        ],
+                    ),
+                    definition,
+                ));
+            }
+        }
+
         // A deed says which title it gives and a scroll which recipe, and the client names the
         // item after it.
         if let Some(teaches) = self.teaches(entity, world) {
@@ -5538,6 +5587,79 @@ impl Session {
             .name(entity)
             .map(|name| world.geodata.materials_of(name).to_vec())
             .unwrap_or_default()
+    }
+
+    /// Tell the session what RakNet's clock reads. Once a tick is enough: a lifetime is a day.
+    pub fn set_network_clock(&mut self, now_ms: u64) {
+        self.network_ms = now_ms;
+    }
+
+    /// Pretend the stack `entity` was minted `seconds` ago, to hand over one partly expired.
+    pub fn age_by(&mut self, entity: u32, seconds: u32) {
+        self.minted
+            .insert(entity, self.now_ms().saturating_sub(u64::from(seconds) * 1000));
+    }
+
+    /// When the stack `entity` began to expire and when it will be gone, on RakNet's clock,
+    /// for the few items that last a while rather than wearing.
+    ///
+    /// The mint moment is kept in wall-clock time, because RakNet's clock starts again with
+    /// the server; both instants are rebuilt from it each time they are sent. A stack not
+    /// yet stamped counts from now, and [`Self::expire_items`] stamps it within a tick.
+    pub fn lifetime_of(&self, entity: u32, world: &World) -> Option<(u64, u64)> {
+        let seconds = world.geodata.lifetime_of(self.inventories.name(entity)?)?;
+
+        let now = self.now_ms();
+        let age = now.saturating_sub(self.minted.get(&entity).copied().unwrap_or(now));
+
+        // Wrapping: a stone minted before this server started began before its clock did,
+        // and the client reads both as signed.
+        let start = self.network_ms.wrapping_sub(age);
+
+        Some((start, start.wrapping_add(u64::from(seconds) * 1000)))
+    }
+
+    /// Stamp the stacks that have just begun to expire, and take away the ones whose time is
+    /// up. Queued for the client like anything else nobody asked for.
+    ///
+    /// **A little before the client would.** It removes an expired item by itself
+    /// (`FUN_008d49d0`); being told first means it is never told about a stack it has
+    /// already forgotten.
+    pub fn expire_items(&mut self, world: &World) {
+        const HEAD_START_MS: u64 = 2_000;
+
+        let now = self.now_ms();
+
+        let lasting: Vec<(u32, u32, u64)> = self
+            .inventory()
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| **entity != 0)
+            .filter_map(|(slot, entity)| {
+                let seconds = world.geodata.lifetime_of(self.inventories.name(*entity)?)?;
+
+                Some((slot as u32, *entity, u64::from(seconds) * 1000))
+            })
+            .collect();
+
+        for (slot, entity, lasts) in lasting {
+            let minted = *self.minted.entry(entity).or_insert(now);
+
+            if now + HEAD_START_MS < minted + lasts {
+                continue;
+            }
+
+            info!(entity, slot, "an item's time is up");
+
+            let count = self.inventories.count(entity).unwrap_or(1);
+            let gone = self.inventories.destroy(self.player_entity_id, slot, count);
+
+            self.minted.remove(&entity);
+
+            let packets = self.apply(gone, world);
+
+            self.notifications.extend(packets);
+        }
     }
 
     /// Make the stack `entity` of the named `Materials`, primary first, rather than of the

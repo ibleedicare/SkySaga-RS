@@ -80,6 +80,15 @@ pub struct Peer {
 unsafe impl Send for Peer {}
 unsafe impl Sync for Peer {}
 
+/// Milliseconds on RakNet's own clock, the one a connected client can convert to its own.
+///
+/// What an item's lifetime is expressed in: the client subtracts the clock difference RakNet
+/// measured for the connection from every such instant it reads.
+pub fn time_ms() -> u64 {
+    // SAFETY: takes no arguments and touches only RakNet's own clock state.
+    unsafe { raknet_sys::CSharp_GetTime() }
+}
+
 impl Peer {
     pub fn new() -> Self {
         Self {

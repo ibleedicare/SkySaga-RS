@@ -238,6 +238,7 @@ fn durability_is_written_in_seventeen_bits_and_clamped() {
         durability: 600,
         durability_max: 250_000,
         indestructible: true,
+        lifetime: None,
     });
 
     for (parameter, bits, value) in [
