@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS item_details (
     PRIMARY KEY (account, slot)
 );
 
+CREATE TABLE IF NOT EXISTS item_materials (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    slot        INTEGER NOT NULL,
+    position    INTEGER NOT NULL,
+    material    INTEGER,
+    PRIMARY KEY (account, slot, position)
+);
+
 CREATE TABLE IF NOT EXISTS learned_recipes (
     account     TEXT NOT NULL
                 REFERENCES accounts(key) ON DELETE CASCADE,
@@ -393,6 +402,24 @@ impl Store for SqliteStore {
         }
 
         for row in sqlx::query(
+            "SELECT account, slot, material FROM item_materials ORDER BY account, slot, position",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let at = entry(&mut progress, row.try_get("account")?);
+            let slot = row.try_get::<i64, _>("slot")? as u32;
+            let material = row.try_get::<Option<i64>, _>("material")?.map(|v| v as u32);
+
+            let stacks = &mut progress[at].1.item_materials;
+
+            match stacks.last_mut() {
+                Some((held, materials)) if *held == slot => materials.push(material),
+                _ => stacks.push((slot, vec![material])),
+            }
+        }
+
+        for row in sqlx::query(
             "SELECT account, recipe FROM learned_recipes ORDER BY account, position",
         )
         .fetch_all(&self.pool)
@@ -621,6 +648,25 @@ impl Store for SqliteStore {
             .bind(account)
             .execute(&mut *transaction)
             .await?;
+
+        sqlx::query("DELETE FROM item_materials WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for (slot, materials) in &progress.item_materials {
+            for (position, material) in materials.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO item_materials (account, slot, position, material) VALUES (?, ?, ?, ?)",
+                )
+                .bind(account)
+                .bind(*slot as i64)
+                .bind(position as i64)
+                .bind(material.map(|v| v as i64))
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
 
         sqlx::query("DELETE FROM learned_recipes WHERE account = ?")
             .bind(account)

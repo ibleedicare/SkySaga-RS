@@ -349,6 +349,7 @@ async fn what_a_player_has_learned_survives_a_restart() {
             StoredItemDetail { slot: 9, durability: Some(700), teaches: None },
             StoredItemDetail { slot: 11, durability: None, teaches: Some(0xdead_beef) },
         ],
+        item_materials: vec![(9, vec![Some(0x7777_7777), None, Some(0x8888_8888)])],
         recipes: vec![0x3333_3333, 0x1111_1111],
     };
 
