@@ -102,24 +102,46 @@ fn an_unbound_square_is_not_reported() {
 
 #[test]
 fn a_restored_binding_points_at_the_restored_stack() {
+    skysaga_game::set_durable_items(true);
+
     let world = world(true);
     let mut session = playing(&world);
 
-    let stack = session.give_at(9, "Dirt", 30).expect("a free square");
+    let pick = session.give_at(9, "Mining_Pick", 1).expect("a free square");
     let uuid = session
         .inventories()
-        .item(stack)
+        .item(pick)
         .expect("the stack")
         .slot_data
         .item_uuid
         .clone();
+
+    let item = skysaga_core::name_hash("Mining_Pick");
+
+    session.restore_bindings(&[StoredBinding { square: 2, hand: 0, item }], &world);
+
+    let spec = session.hotbar_spec(2, 0).expect("bound");
+
+    assert_eq!(spec.resource, Some(item));
+    assert_eq!(spec.item_uuid, uuid, "the tool this session holds, not yesterday's");
+}
+
+/// A pile of dirt is told to the client without a uuid (`Session::uuid_on_the_wire`), so a
+/// binding to one names it the same way or the bar would point at a stack the client cannot
+/// find.
+#[test]
+fn a_restored_binding_to_a_stack_carries_no_uuid() {
+    let world = world(true);
+    let mut session = playing(&world);
+
+    session.give_at(9, "Dirt", 30).expect("a free square");
 
     session.restore_bindings(&[StoredBinding { square: 2, hand: 0, item: dirt() }], &world);
 
     let spec = session.hotbar_spec(2, 0).expect("bound");
 
     assert_eq!(spec.resource, Some(dirt()));
-    assert_eq!(spec.item_uuid, uuid, "the stack this session holds, not yesterday's");
+    assert_eq!(spec.item_uuid, "");
 }
 
 #[test]

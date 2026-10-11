@@ -352,6 +352,8 @@ pub enum AdminCommand {
         /// A `geodata.json > Resources > Name`, such as `Dirt`.
         item: String,
         count: u32,
+        /// How much wear the item has left, for one that wears out; new when absent.
+        durability: Option<u32>,
     },
 
     /// Put a message in a player's inbox.

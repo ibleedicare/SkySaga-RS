@@ -1222,8 +1222,7 @@ impl Session {
                 .copied()
                 .filter(|entity| *entity != 0)
                 .find(|entity| self.inventories.name(*entity) == Some(binding.item))
-                .and_then(|entity| self.inventories.item(entity))
-                .map(|stack| stack.slot_data.item_uuid.clone())
+                .map(|entity| self.uuid_on_the_wire(entity, world))
                 .unwrap_or_default();
 
             let spec = ItemSpec {
@@ -1565,7 +1564,7 @@ impl Session {
 
                 info!(entity = self.player_entity_id, "handing over the player entity");
 
-                vec![
+                let mut out = vec![
                     encode(|w| {
                         SetClientEntity {
                             entity_id: self.player_entity_id,
@@ -1587,7 +1586,14 @@ impl Session {
                     // Without this the client stays in tutorial mode and spills hint text
                     // into the chat log.
                     encode(|w| DebugRequestFinishTutorial.encode(w)),
-                ]
+                ];
+
+                // The client discards the first sync of its drop squares (a skip-once flag in
+                // `FUN_0083ff10`). Better that it discards this one than the player's first
+                // drop on the repair square, which is what left that panel inert.
+                out.extend(self.sync_drop_slots(world));
+
+                out
             }
 
             // --- character creation ---------------------------------------------------
@@ -2921,11 +2927,15 @@ impl Session {
 
                 let worn = self.wear.remove(&item).is_some();
 
-                let mut out = self.take_from_drop_slot(slot_type, world);
+                // The new number first: the rucksack square draws its bar when the item lands
+                // on it, and went on showing a worn one when it was told afterwards.
+                let mut out: Vec<Vec<u8>> = if worn {
+                    self.sync_of(item, &["durability"], world).into_iter().collect()
+                } else {
+                    Vec::new()
+                };
 
-                if worn {
-                    out.extend(self.sync_of(item, &["durability"], world));
-                }
+                out.extend(self.take_from_drop_slot(slot_type, world));
 
                 out.push(encode(|w| {
                     CraftingNotification {
@@ -3439,12 +3449,13 @@ impl Session {
             return Vec::new();
         };
 
+        // By the uuid the client was told, which for a stack of something ordinary is none at
+        // all: the first such attachment is then the one meant.
         let Some(source) = (0..self.inventories.slots(container).len() as u32).find(|slot| {
             self.inventories
                 .slot(container, *slot)
                 .filter(|item| *item != 0)
-                .and_then(|item| self.inventories.item(item))
-                .is_some_and(|item| item.slot_data.item_uuid == item_uuid)
+                .is_some_and(|item| self.uuid_on_the_wire(item, world) == item_uuid)
         }) else {
             debug!(item_uuid, message, "that item is not attached to that message");
 
@@ -4605,6 +4616,11 @@ impl Session {
             }
         }
 
+        // A stack that does not wear has no identity of its own: see `uuid_on_the_wire`.
+        let mut anonymous = component.clone();
+        anonymous.slot_data.item_uuid.clear();
+        let component = &anonymous;
+
         // Made of something and never worn: a plate, a rod, a plank. Gated with the durable
         // items because the two are one feature, what the repair panel is handed.
         let materials = self.materials_of(entity, world);
@@ -4665,6 +4681,16 @@ impl Session {
         Some(durability)
     }
 
+    /// Leave the tool in `entity` with `left` of its durability, at most what it had new.
+    ///
+    /// For handing over a worn tool: a repair cannot be tried on a new one, and wearing one
+    /// down by digging is two minutes of a playtest. Nothing for a stack that does not wear.
+    pub fn wear_to(&mut self, entity: u32, left: u32, world: &World) {
+        if let Some(durability) = self.durability_of(entity, world) {
+            self.wear.insert(entity, left.min(durability.durability_max));
+        }
+    }
+
     /// The stack the hand at `location` is swinging, if it is holding one.
     ///
     /// The hotbar names a stack by uuid. A binding without one (the client sends those for an
@@ -4723,6 +4749,27 @@ impl Session {
         debug!(tool, left, max = durability.durability_max, "wear");
 
         self.sync_of(tool, &["durability"], world).into_iter().collect()
+    }
+
+    /// The uuid the client is told for the stack in `entity`: its own for a tool, none for
+    /// anything that stacks.
+    ///
+    /// **A uuid is an identity, and a pile of plates has none.** The repair panel matches a
+    /// dragged component against the one it wants with every field of the `ItemSpec`, uuid
+    /// included (`FUN_00705560`, called from the slot's drop handler `FUN_007f6540`), and the
+    /// one it wants has no uuid. Seen under gdb on 2026-10-11: the same plate, the same
+    /// material, refused for carrying `00000000-0000-4000-8...` and accepted without it.
+    ///
+    /// The model keeps a uuid for every stack regardless; this is only what is sent.
+    pub fn uuid_on_the_wire(&self, entity: u32, world: &World) -> String {
+        if self.durability_of(entity, world).is_none() {
+            return String::new();
+        }
+
+        self.inventories
+            .item(entity)
+            .map(|stack| stack.slot_data.item_uuid.clone())
+            .unwrap_or_default()
     }
 
     /// What the stack in `entity` is made of: a material per category its item names.

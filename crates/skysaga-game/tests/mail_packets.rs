@@ -265,13 +265,8 @@ fn claiming_an_attachment_moves_it_into_the_rucksack() {
     let container = session.mail(&uuid).unwrap().attachment_entity();
     let item = session.inventories().slot(container, 9).unwrap();
 
-    let item_uuid = session
-        .inventories()
-        .item(item)
-        .expect("the attachment")
-        .slot_data
-        .item_uuid
-        .clone();
+    // What the client was told, which is what it sends back: nothing, for a pile of dirt.
+    let item_uuid = session.uuid_on_the_wire(item, &world);
 
     let burst = session.handle(
         ClientPacket::parse(&encode(|w| {
@@ -341,13 +336,7 @@ fn a_full_rucksack_leaves_the_attachment_in_the_message() {
     let container = session.mail(&uuid).unwrap().attachment_entity();
 
     let item = session.inventories().slot(container, 9).unwrap();
-    let item_uuid = session
-        .inventories()
-        .item(item)
-        .unwrap()
-        .slot_data
-        .item_uuid
-        .clone();
+    let item_uuid = session.uuid_on_the_wire(item, &world);
 
     let burst = session.handle(
         ClientPacket::parse(&encode(|w| {

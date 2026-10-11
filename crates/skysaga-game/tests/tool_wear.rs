@@ -203,3 +203,24 @@ fn the_cost_of_a_block_can_be_set_for_a_playtest() {
     assert_eq!(wear_per_block_from(Some("300")), 300);
     assert_eq!(wear_per_block_from(Some("lots")), WEAR_PER_BLOCK);
 }
+
+/// A worn tool can be handed over as such, which is what `/admin/give` does with `durability`.
+#[test]
+fn a_tool_can_be_left_with_a_given_durability() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let pick = session.give_at(RUCKSACK, "Mining_Pick", 1).expect("a free square");
+    let dirt = session.give_at(RUCKSACK + 1, "Dirt", 5).expect("a free square");
+    let new = left(&session, &world, pick);
+
+    session.wear_to(pick, 40, &world);
+    session.wear_to(dirt, 40, &world);
+
+    assert_eq!(left(&session, &world, pick), 40);
+    assert!(session.durability_of(dirt, &world).is_none(), "dirt still does not wear");
+
+    session.wear_to(pick, new + 500, &world);
+
+    assert_eq!(left(&session, &world, pick), new, "never more than new");
+}

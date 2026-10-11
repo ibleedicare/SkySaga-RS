@@ -95,6 +95,27 @@ fn synced_player(burst: &[Vec<u8>], player: u32) -> usize {
         .count()
 }
 
+/// **The client throws away the first sync of its drop squares.** Its component carries a
+/// skip-once flag (`+0x41`, tested and cleared at the top of `FUN_0083ff10`), so the first
+/// `craftingdropslots` it is sent tells the panel nothing. When that first sync was the first
+/// drop, the repair panel drew the item and never set up its component rows: "%d" for the
+/// quantities, every component refused, REPAIR grey (traced under gdb on 2026-10-11:
+/// `notify_enter` then `notify_skipped_once`, and no callback). So the squares are synced once
+/// as the player is handed over, empty, for the client to throw away.
+#[test]
+fn the_squares_are_synced_once_on_the_way_in() {
+    let world = world();
+    let mut session = Session::new(world.player_entity_id);
+
+    session.handle(ClientPacket::ClientConnected, &world);
+    session.handle(ClientPacket::ClientReadyToSync, &world);
+    session.handle(ClientPacket::ClientInitialSyncFinished, &world);
+
+    let burst = session.handle(ClientPacket::ClientReadyToPlay, &world);
+
+    assert_eq!(synced_player(&burst, session.player_entity_id()), 1);
+}
+
 /// What the player is carrying, as `(resource, count)`, for the names given.
 fn carried(session: &Session, names: &[&str]) -> Vec<(String, u32)> {
     session

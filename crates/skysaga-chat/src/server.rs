@@ -336,6 +336,7 @@ pub fn run_command(state: &AppState, nick: &str, text: &str) -> Vec<String> {
                 account: nick.to_owned(),
                 item: item.to_owned(),
                 count,
+                durability: None,
             });
 
             vec![format!("queued {count} x {item}")]
