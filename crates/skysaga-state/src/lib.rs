@@ -369,6 +369,9 @@ pub enum AdminCommand {
         count: u32,
         /// How much wear the item has left, for one that wears out; new when absent.
         durability: Option<u32>,
+        /// `Materials` names, one per category the item is made of, primary first. Empty
+        /// leaves the item its usual ones.
+        materials: Vec<String>,
     },
 
     /// Put a message in a player's inbox.

@@ -31,6 +31,7 @@ fn a_known_item_is_queued() {
             item: "Wooden_Plank".to_owned(),
             count: 10,
             durability: None,
+            materials: Vec::new(),
         }],
     );
 }

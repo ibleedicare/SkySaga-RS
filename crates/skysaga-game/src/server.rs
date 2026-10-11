@@ -703,7 +703,8 @@ impl GameServer {
                 item,
                 count,
                 durability,
-            } => self.give(&account, &item, count, durability),
+                materials,
+            } => self.give(&account, &item, count, durability, &materials),
 
             AdminCommand::ClearInventory { account } => self.clear_inventory(&account),
 
@@ -919,7 +920,14 @@ impl GameServer {
     /// perfectly good number that resolves to no resource, so an unchecked `/give` fills a
     /// square with a stack the client cannot draw and reports success everywhere the server
     /// looks. See [`Session::give_checked`].
-    fn give(&mut self, account: &str, item: &str, count: u32, durability: Option<u32>) {
+    fn give(
+        &mut self,
+        account: &str,
+        item: &str,
+        count: u32,
+        durability: Option<u32>,
+        materials: &[String],
+    ) {
         let Some((guid, entity_id)) = self
             .sessions
             .iter()
@@ -954,6 +962,10 @@ impl GameServer {
         // Before it is announced, so the client is told once and told the worn number.
         if let Some(left) = durability {
             session.wear_to(item_entity, left, &self.world);
+        }
+
+        if !materials.is_empty() {
+            session.make_of(item_entity, materials);
         }
 
         let slot = session.slot_of(item_entity).unwrap_or_default();
