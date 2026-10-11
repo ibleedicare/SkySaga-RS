@@ -3411,20 +3411,16 @@ impl Session {
 
         let mut out = Vec::new();
 
-        if let Some(definition) = world.item_definition() {
-            for item in self
-                .inventories
-                .slots(container)
-                .iter()
-                .copied()
-                .filter(|item| *item != 0)
-            {
-                let Some(component) = self.inventories.item(item) else {
-                    continue;
-                };
-
-                let stack = Entity::new(item, vec![Component::InventoryItem(component.clone())]);
-
+        // Each as the kind of item it is, which only `item_entity` knows: a mailed pickaxe
+        // still wears and a mailed plate is still made of something.
+        for item in self
+            .inventories
+            .slots(container)
+            .iter()
+            .copied()
+            .filter(|item| *item != 0)
+        {
+            if let Some((stack, definition)) = self.item_entity(item, world) {
                 out.push(encode(|w| stack.to_entity_add(definition).encode(w)));
             }
         }
