@@ -227,10 +227,12 @@ fn the_two_squares_hold_different_items() {
 
 // --- dismantling ---------------------------------------------------------------------------
 
-/// `Craft_Wood_Shield` builds a `Wood_Shield` out of nine `Wooden_Plank`, so taking one apart
-/// gives nine planks back.
+/// `Craft_Wood_Shield` builds a `Wood_Shield` out of nine `Wooden_Plank`. Taking a new one
+/// apart gives five back: half of one more than it took, which is what the client's panel
+/// announces before the button is pressed ("Dismantling will return 5 components"). See
+/// `skysaga_game::salvage`.
 #[test]
-fn dismantling_gives_the_recipes_materials_back() {
+fn dismantling_gives_part_of_the_recipes_materials_back() {
     let world = world();
     let mut session = playing(&world);
 
@@ -242,8 +244,8 @@ fn dismantling_gives_the_recipes_materials_back() {
 
     assert_eq!(
         carried(&session, &["Wood_Shield", "Wooden_Plank"]),
-        vec![("Wooden_Plank".to_owned(), 9)],
-        "the shield is gone and its planks are back",
+        vec![("Wooden_Plank".to_owned(), 5)],
+        "the shield is gone and five of its planks are back",
     );
 
     assert_eq!(session.drop_slots()[DISMANTLE as usize], 0, "square emptied");
@@ -261,7 +263,7 @@ fn dismantling_consumes_one_output_at_a_time() {
     drop_onto(&mut session, &world, DISMANTLE, slot);
     press(&mut session, &world, DISMANTLE);
 
-    // `Hand_Craft_Arrow` makes 25 arrows out of 10 planks.
+    // `Hand_Craft_Arrow` makes 25 arrows out of 10 planks, and half of eleven comes back.
     assert_eq!(
         session.inventories().count(arrows),
         Some(25),
@@ -276,7 +278,7 @@ fn dismantling_consumes_one_output_at_a_time() {
 
     assert_eq!(
         carried(&session, &["Wooden_Plank"]),
-        vec![("Wooden_Plank".to_owned(), 10)],
+        vec![("Wooden_Plank".to_owned(), 5)],
     );
 }
 
@@ -326,6 +328,90 @@ fn repairing_gives_the_item_back_and_answers_the_panel() {
             BitReader::from_bytes(bytes).read_packet_id().ok() == Some(CraftingNotification::ID)
         }),
         "the panel was left spinning",
+    );
+}
+
+/// A `Metal_Pickaxe` is six plates and three rods and has 1500 when new. At 700 the client's
+/// panel reads "2 Damaged" beside the plates and "3 Damaged" beside the rods, and lights
+/// REPAIR once the rucksack holds them (seen 2026-10-11). Those are what the repair takes.
+#[test]
+fn a_repair_takes_the_components_the_panel_asked_for() {
+    skysaga_game::set_durable_items(true);
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let pick = session.give("Metal_Pickaxe", 1).unwrap();
+    let slot = slot_of(&session, pick).unwrap();
+
+    session.wear_to(pick, 700, &world);
+    session.give("Metal_Plate", 12).unwrap();
+    session.give("Wooden_Rod", 6).unwrap();
+
+    drop_onto(&mut session, &world, REPAIR, slot);
+    press(&mut session, &world, REPAIR);
+
+    assert_eq!(
+        carried(&session, &["Metal_Pickaxe", "Metal_Plate", "Wooden_Rod"]),
+        vec![
+            ("Metal_Pickaxe".to_owned(), 1),
+            ("Metal_Plate".to_owned(), 10),
+            ("Wooden_Rod".to_owned(), 3),
+        ],
+        "two plates and three rods gone, and the pickaxe back",
+    );
+    assert_eq!(session.durability_of(pick, &world).unwrap().durability, 1500);
+}
+
+/// The client does not light REPAIR without the components, so a press without them is not
+/// one it sends. Nothing is repaired, nothing is taken, and the item stays where it is.
+#[test]
+fn a_repair_without_its_components_is_refused() {
+    skysaga_game::set_durable_items(true);
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let pick = session.give("Metal_Pickaxe", 1).unwrap();
+    let slot = slot_of(&session, pick).unwrap();
+
+    session.wear_to(pick, 700, &world);
+    session.give("Metal_Plate", 12).unwrap();
+    session.give("Wooden_Rod", 2).unwrap();
+
+    drop_onto(&mut session, &world, REPAIR, slot);
+
+    assert!(press(&mut session, &world, REPAIR).is_empty());
+
+    assert_eq!(session.drop_slots()[REPAIR as usize], pick, "still on the square");
+    assert_eq!(session.durability_of(pick, &world).unwrap().durability, 700);
+    assert_eq!(
+        carried(&session, &["Metal_Plate", "Wooden_Rod"]),
+        vec![("Metal_Plate".to_owned(), 12), ("Wooden_Rod".to_owned(), 2)],
+        "and not one plate was taken for a repair that did not happen",
+    );
+}
+
+/// A worn tool comes apart into less: at 700 of 1500 a pickaxe returns two components where a
+/// new one returns five.
+#[test]
+fn a_worn_tool_dismantles_into_less() {
+    skysaga_game::set_durable_items(true);
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let pick = session.give("Metal_Pickaxe", 1).unwrap();
+    let slot = slot_of(&session, pick).unwrap();
+
+    session.wear_to(pick, 700, &world);
+
+    drop_onto(&mut session, &world, DISMANTLE, slot);
+    press(&mut session, &world, DISMANTLE);
+
+    assert_eq!(
+        carried(&session, &["Metal_Plate", "Wooden_Rod"]),
+        vec![("Metal_Plate".to_owned(), 1), ("Wooden_Rod".to_owned(), 1)],
     );
 }
 

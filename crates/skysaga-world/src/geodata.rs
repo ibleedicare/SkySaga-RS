@@ -775,6 +775,12 @@ impl GeoData {
     pub fn stack_limits(&self) -> StackLimits {
         let mut limits = StackLimits::default();
 
+        // Something that wears is one of a kind: two of them are two amounts of wear, which a
+        // single stack cannot hold. The data's own figure, where it gives one, still wins.
+        for name in self.durability.keys() {
+            limits.set(*name, 1);
+        }
+
         for (name, limit) in &self.stack_overrides {
             limits.set(*name, *limit);
         }

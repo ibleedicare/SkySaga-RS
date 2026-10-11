@@ -25,6 +25,7 @@
 //! ```
 
 pub mod combat;
+pub mod salvage;
 pub mod server;
 pub mod world;
 
@@ -232,6 +233,13 @@ pub const UNHANDLED_SAMPLES: usize = 8;
 /// Enough for a layout to be read off -- the client's packets are small -- and short enough
 /// that one line stays one line.
 pub const UNKNOWN_PAYLOAD_BYTES: usize = 24;
+
+/// Which of the two drop squares is counting components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Salvage {
+    Repair,
+    Dismantle,
+}
 
 /// What breaking one block costs the tool that broke it.
 ///
@@ -2897,14 +2905,15 @@ impl Session {
     /// # Repair makes the item new
     ///
     /// Whatever wear the item had is forgotten, the client is sent the new number, and the
-    /// item goes back to the rucksack. It costs nothing yet: the panel lists the components a
-    /// repair should consume, and what the client sends for them has not been read.
+    /// item goes back to the rucksack. It costs the components the client's panel listed,
+    /// which the server works out for itself: see [`salvage`]. Short of one, nothing happens.
     ///
-    /// # Dismantle gives the recipe's materials back
+    /// # Dismantle gives part of the recipe's materials back
     ///
-    /// The item is taken apart into whatever the recipe that builds it consumed. Only one
-    /// output's worth is consumed at a time, which matches the client's own precondition: it
-    /// refuses the drop when the stack is smaller than the recipe's output quantity.
+    /// The item is taken apart into some of what the recipe that builds it consumed: as many
+    /// components as the client's panel announced, fewer for a worn tool. Only one output's
+    /// worth is consumed at a time, which matches the client's own precondition: it refuses
+    /// the drop when the stack is smaller than the recipe's output quantity.
     fn perform_drop_slot_action(&mut self, slot_type: u32, world: &World) -> Vec<Vec<u8>> {
         let Some(square) = self.drop_slot(slot_type) else {
             return Vec::new();
@@ -2921,19 +2930,37 @@ impl Session {
         match square {
             DISMANTLE_SLOT => self.dismantle(item, world),
 
-            // Repair: as new, and back in the rucksack.
+            // Repair: as new, and back in the rucksack, for the components the panel showed.
             REPAIR_SLOT => {
                 let resource = self.inventories.name(item);
+
+                // Checked before anything is taken, so a refusal costs nothing.
+                let cost = self.salvage(item, Salvage::Repair, world);
+
+                if let Some((name, needed)) = cost
+                    .iter()
+                    .find(|(name, needed)| self.carried(skysaga_core::name_hash(name)) < *needed)
+                {
+                    debug!(item, %name, needed, "not repaired: a component is missing");
+
+                    return Vec::new();
+                }
+
+                let mut paid = Vec::new();
+
+                for (name, quantity) in &cost {
+                    paid.extend(self.take(skysaga_core::name_hash(name), *quantity, world));
+                }
 
                 let worn = self.wear.remove(&item).is_some();
 
                 // The new number first: the rucksack square draws its bar when the item lands
                 // on it, and went on showing a worn one when it was told afterwards.
-                let mut out: Vec<Vec<u8>> = if worn {
-                    self.sync_of(item, &["durability"], world).into_iter().collect()
-                } else {
-                    Vec::new()
-                };
+                let mut out = paid;
+
+                if worn {
+                    out.extend(self.sync_of(item, &["durability"], world));
+                }
 
                 out.extend(self.take_from_drop_slot(slot_type, world));
 
@@ -2945,7 +2972,7 @@ impl Session {
                     .encode(w)
                 }));
 
-                info!(item, worn, "repaired");
+                info!(item, worn, ?cost, "repaired");
 
                 out
             }
@@ -2961,20 +2988,7 @@ impl Session {
             return Vec::new();
         };
 
-        // The recipe that **builds** this item is what says what it is made of. Repair recipes
-        // (`RecipeType` 0) are excluded: their output is a repaired entity rather than a thing
-        // with materials in it.
-        let Some(recipe) = world
-            .geodata
-            .recipes()
-            .iter()
-            .find(|recipe| {
-                recipe.recipe_type == 1
-                    && recipe
-                        .output()
-                        .is_some_and(|(name, _)| skysaga_core::name_hash(name) == resource)
-            })
-            .cloned()
+        let Some(recipe) = Self::build_recipe(resource, world)
         else {
             debug!(item, "nothing makes that, so nothing takes it apart");
 
@@ -2982,6 +2996,9 @@ impl Session {
         };
 
         let (_, made) = recipe.output().unwrap_or(("", 1));
+
+        // Before the item is consumed: how worn it is decides how much comes back.
+        let returned = self.salvage(item, Salvage::Dismantle, world);
 
         let effects = self.inventories.consume_loose(item, made.max(1));
 
@@ -3000,9 +3017,7 @@ impl Session {
         // The materials, as new stacks in the rucksack. A full rucksack loses them, which is
         // the same trade-off a collected craft makes and the same place a check belongs when
         // one is added.
-        for (material, quantity) in recipe.materials() {
-            let material = material.to_owned();
-
+        for (material, quantity) in returned {
             let Some(stack) = self.give(&material, quantity) else {
                 warn!(item = %material, "dismantled, but the rucksack is full");
 
@@ -3025,6 +3040,72 @@ impl Session {
         out.extend(self.sync_drop_slots(world));
 
         out
+    }
+
+    /// The recipe that builds `resource`, which is what says what it is made of.
+    ///
+    /// Repair recipes (`RecipeType` 0) are excluded: their output is a repaired entity rather
+    /// than a thing with materials in it.
+    fn build_recipe(resource: u32, world: &World) -> Option<skysaga_world::geodata::Recipe> {
+        world
+            .geodata
+            .recipes()
+            .iter()
+            .find(|recipe| {
+                recipe.recipe_type == 1
+                    && recipe
+                        .output()
+                        .is_some_and(|(name, _)| skysaga_core::name_hash(name) == resource)
+            })
+            .cloned()
+    }
+
+    /// The components a repair of `item` takes, or a dismantle of it returns, as the client
+    /// counts them. Empty for an item nothing builds.
+    fn salvage(&self, item: u32, what: Salvage, world: &World) -> Vec<(String, u32)> {
+        let Some(recipe) = self
+            .inventories
+            .name(item)
+            .and_then(|resource| Self::build_recipe(resource, world))
+        else {
+            return Vec::new();
+        };
+
+        let ingredients: Vec<(&str, u32)> = recipe.materials().collect();
+        let quantities: Vec<u32> = ingredients.iter().map(|(_, quantity)| *quantity).collect();
+        let total: u32 = quantities.iter().sum();
+
+        // An item that does not wear counts as new.
+        let (durability, max) = self
+            .durability_of(item, world)
+            .map_or((0, 0), |worn| (worn.durability, worn.durability_max));
+
+        let seed = self
+            .inventories
+            .item(item)
+            .map_or(0, |stack| stack.slot_data.unknown5);
+
+        let drawn = match what {
+            Salvage::Repair => salvage::draw(
+                seed,
+                &quantities,
+                salvage::repair_count(total, durability, max),
+                None,
+            ),
+            Salvage::Dismantle => salvage::draw(
+                seed,
+                &quantities,
+                salvage::dismantle_count(total, durability, max),
+                ingredients
+                    .iter()
+                    .position(|(name, _)| *name == salvage::ALWAYS_RETURNED),
+            ),
+        };
+
+        drawn
+            .into_iter()
+            .map(|(index, quantity)| (ingredients[index].0.to_owned(), quantity))
+            .collect()
     }
 
     /// Which square a `slotType` names, or `None` for one that does not exist.
@@ -3330,20 +3411,16 @@ impl Session {
 
         let mut out = Vec::new();
 
-        if let Some(definition) = world.item_definition() {
-            for item in self
-                .inventories
-                .slots(container)
-                .iter()
-                .copied()
-                .filter(|item| *item != 0)
-            {
-                let Some(component) = self.inventories.item(item) else {
-                    continue;
-                };
-
-                let stack = Entity::new(item, vec![Component::InventoryItem(component.clone())]);
-
+        // Each as the kind of item it is, which only `item_entity` knows: a mailed pickaxe
+        // still wears and a mailed plate is still made of something.
+        for item in self
+            .inventories
+            .slots(container)
+            .iter()
+            .copied()
+            .filter(|item| *item != 0)
+        {
+            if let Some((stack, definition)) = self.item_entity(item, world) {
                 out.push(encode(|w| stack.to_entity_add(definition).encode(w)));
             }
         }

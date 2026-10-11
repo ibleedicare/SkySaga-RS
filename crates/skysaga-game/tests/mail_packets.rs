@@ -640,3 +640,40 @@ fn a_restored_message_announces_its_container() {
         "a restored container was never announced: {added:?}",
     );
 }
+
+/// **A mailed tool is still a tool.** The attachments were announced from the basic item
+/// definition whatever they were, the same mistake the admin `give` made: a pickaxe out of a
+/// message had no durability, a plate out of one had no material and carried a uuid, and so
+/// neither could be repaired or used to repair (`skysaga_game::Session::uuid_on_the_wire`).
+#[test]
+fn a_mailed_item_is_announced_as_the_kind_it_is() {
+    skysaga_game::set_durable_items(true);
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("Tools", "", &[("Metal_Pickaxe", 1), ("Metal_Plate", 4), ("Dirt", 3)]);
+
+    let kinds: Vec<u32> = session
+        .announce_attachments(&uuid, &world)
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntityAdd::ID)
+                .then(|| EntityAdd::decode(&mut reader).ok())
+                .flatten()
+        })
+        .filter_map(|entity| entity.name_hash)
+        .collect();
+
+    assert_eq!(
+        kinds,
+        vec![
+            skysaga_core::name_hash("MaterialDurableInventoryItem"),
+            skysaga_core::name_hash("MaterialBasedInventoryItem"),
+            skysaga_core::name_hash("BasicInventoryItem"),
+            skysaga_core::name_hash("MailItem"),
+        ],
+    );
+}

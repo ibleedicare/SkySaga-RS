@@ -111,6 +111,22 @@ fn bedrock_cannot_be_dug() {
     assert!(geo.is_diggable(0), "dirt");
 }
 
+/// **A tool does not stack.** Two pickaxes are two amounts of wear, and merging them into
+/// one stack throws one of those away: a pickaxe taken back off the repair square joined a
+/// new one in the rucksack and the square read "2/1" (seen 2026-10-11). The data sets no
+/// limit for most tools, so they got the default of a block of stone. Where the data does set
+/// one (`Mining_Pick`, 10) it is kept.
+#[test]
+fn something_that_wears_does_not_stack_unless_the_data_says_so() {
+    let Some(geo) = geodata() else { return };
+
+    let limits = geo.stack_limits();
+
+    assert_eq!(limits.get(skysaga_core::name_hash("Metal_Pickaxe")), 1);
+    assert_eq!(limits.get(skysaga_core::name_hash("Metal_Sword")), 1);
+    assert_eq!(limits.get(skysaga_core::name_hash("Mining_Pick")), 10, "the data's own figure");
+}
+
 #[test]
 fn the_stack_limits_come_from_the_data_rather_than_a_guess() {
     let Some(geo) = geodata() else { return };
