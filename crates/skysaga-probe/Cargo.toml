@@ -18,6 +18,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+skysaga-core = { workspace = true }
 skysaga-game = { workspace = true }
 skysaga-state = { workspace = true }
 skysaga-world = { workspace = true }

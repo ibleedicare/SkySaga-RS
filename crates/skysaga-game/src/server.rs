@@ -62,6 +62,22 @@ mod relayed {
     pub const SET_PLAYER_STATE: u16 = 35;
 }
 
+/// Everyone in the same world as `from`, without `from`.
+///
+/// One process hosts several worlds, and a player must only hear about the people standing
+/// in theirs: an arrival, a step or a swing sent across worlds draws a body where nobody is.
+fn neighbours(sessions: &HashMap<Guid, Session>, from: Guid) -> Vec<Guid> {
+    let Some(world) = sessions.get(&from).map(Session::world_key) else {
+        return Vec::new();
+    };
+
+    sessions
+        .iter()
+        .filter(|(guid, session)| **guid != from && session.world_key() == world)
+        .map(|(guid, _)| *guid)
+        .collect()
+}
+
 /// The world a connection is in: the one its key names, or home.
 ///
 /// A function over the two fields rather than a method, so it can be called while `sessions`
@@ -452,6 +468,10 @@ impl GameServer {
                 message_id::DISCONNECTION_NOTIFICATION | message_id::CONNECTION_LOST => {
                     info!(guid = guid.0, "client gone");
 
+                    // Asked before the session goes: afterwards nothing says which world it
+                    // was in.
+                    let left_behind = neighbours(&self.sessions, guid);
+
                     self.sessions.remove(&guid);
 
                     // Without this the departed player stands motionless in everyone else's
@@ -464,7 +484,9 @@ impl GameServer {
                             .encode(w)
                         });
 
-                        self.announce(guid, &removed);
+                        for other in left_behind {
+                            self.peer.send(other, &removed);
+                        }
                     }
                 }
 
@@ -479,11 +501,9 @@ impl GameServer {
                     // Drop the borrow of `packet` before touching anything else.
                     drop(packet);
 
-                    let others: Vec<EntityAdd> = self
-                        .bodies
+                    let others: Vec<EntityAdd> = neighbours(&self.sessions, guid)
                         .iter()
-                        .filter(|(other, _)| **other != guid)
-                        .map(|(_, body)| body.clone())
+                        .filter_map(|other| self.bodies.get(other).cloned())
                         .collect();
 
                     let Some(session) = self.sessions.get_mut(&guid) else {
@@ -575,11 +595,11 @@ impl GameServer {
                         .map(Session::take_broadcasts)
                         .unwrap_or_default();
 
+                    let nearby = neighbours(&self.sessions, guid);
+
                     for packet in broadcasts {
-                        for other in self.sessions.keys() {
-                            if *other != guid {
-                                self.peer.send(*other, &packet);
-                            }
+                        for other in &nearby {
+                            self.peer.send(*other, &packet);
                         }
                     }
                 }
@@ -1009,15 +1029,13 @@ impl GameServer {
         info!(%account, subject, uuid = %mail.uuid, "sent mail");
     }
 
-    /// Send to every connection except `from`.
+    /// Send to everyone in `from`'s world except `from`.
     ///
-    /// Used for the things other players need to know: someone arrived, someone left, someone
-    /// moved. The sender is skipped because it already knows.
+    /// Used for the things other players need to know: someone arrived, someone moved. The
+    /// sender is skipped because it already knows.
     fn announce(&self, from: Guid, data: &[u8]) {
-        for guid in self.sessions.keys() {
-            if *guid != from {
-                self.peer.send(*guid, data);
-            }
+        for guid in neighbours(&self.sessions, from) {
+            self.peer.send(guid, data);
         }
     }
 
@@ -1072,5 +1090,40 @@ impl GameServer {
 
     pub fn connection_count(&self) -> usize {
         self.sessions.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_in(world: Option<&str>) -> Session {
+        let mut session = Session::new(1);
+
+        session.set_world_key(world.map(str::to_owned));
+
+        session
+    }
+
+    #[test]
+    fn neighbours_are_the_players_in_the_same_world() {
+        let sessions = HashMap::from([
+            (Guid(1), session_in(None)),
+            (Guid(2), session_in(None)),
+            (Guid(3), session_in(Some("Forest/Castle_Adventure"))),
+            (Guid(4), session_in(Some("Forest/Castle_Adventure"))),
+            (Guid(5), session_in(Some("Desert"))),
+        ]);
+
+        assert_eq!(neighbours(&sessions, Guid(1)), [Guid(2)]);
+        assert_eq!(neighbours(&sessions, Guid(3)), [Guid(4)]);
+        assert!(neighbours(&sessions, Guid(5)).is_empty());
+    }
+
+    #[test]
+    fn a_connection_nobody_knows_has_no_neighbours() {
+        let sessions = HashMap::from([(Guid(1), session_in(None))]);
+
+        assert!(neighbours(&sessions, Guid(9)).is_empty());
     }
 }
