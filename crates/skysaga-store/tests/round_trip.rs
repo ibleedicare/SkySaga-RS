@@ -338,6 +338,37 @@ async fn a_placed_device_survives_a_restart() {
     assert_eq!(snapshot.devices, vec![anvil, barrel]);
 }
 
+/// The island's title is one value for the world: the last one given is the one that returns.
+#[tokio::test]
+async fn the_islands_title_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    {
+        let store = open(&url).await;
+
+        assert_eq!(store.load().await.expect("loads").home_title, None);
+
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.set_home_title("Castle");
+        state.set_home_title("Bastion");
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(snapshot.home_title.as_deref(), Some("Bastion"));
+
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    state.import_home_title(snapshot.home_title);
+
+    assert_eq!(state.home_title().as_deref(), Some("Bastion"));
+}
+
 #[tokio::test]
 async fn a_device_replaced_in_the_same_place_is_stored_once() {
     let (_guard, url) = database_url();

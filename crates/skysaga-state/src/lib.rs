@@ -138,6 +138,9 @@ struct Inner {
     /// minted per run, and one square holds one device.
     devices: HashMap<[u32; 3], StoredDevice>,
 
+    /// What the home island calls itself, once a deed has given it a title.
+    home_title: Option<String>,
+
     /// Every block the players have changed, by its place in the world.
     ///
     /// The world itself lives on the game thread; this is the copy that outlives it, kept here
@@ -235,6 +238,9 @@ pub enum Change {
     /// Per device rather than per world, for the same reason as a block: a workshop is built
     /// one anvil at a time and rewriting the lot on each placement would grow with the world.
     Device(StoredDevice),
+
+    /// The home island was given a title, a `HomeIslandTitles` name.
+    HomeTitle(String),
 }
 
 /// One device a player put down, as it is stored.
@@ -603,6 +609,31 @@ impl AppState {
         devices.sort_by_key(|device| device.position);
 
         devices
+    }
+
+    /// Load the island's title at startup. Silent, as the rest of `import` is.
+    pub fn import_home_title(&self, title: Option<String>) {
+        self.write().home_title = title;
+    }
+
+    /// What the home island calls itself, if it has been given a title.
+    pub fn home_title(&self) -> Option<String> {
+        self.read().home_title.clone()
+    }
+
+    /// Record the island's title. Nothing is written when it has not changed.
+    pub fn set_home_title(&self, title: &str) {
+        {
+            let mut inner = self.write();
+
+            if inner.home_title.as_deref() == Some(title) {
+                return;
+            }
+
+            inner.home_title = Some(title.to_owned());
+        }
+
+        self.record(Change::HomeTitle(title.to_owned()));
     }
 
     /// Record a device a player placed.

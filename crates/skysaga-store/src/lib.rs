@@ -62,6 +62,8 @@ pub struct Snapshot {
     pub blocks: Vec<StoredBlock>,
     /// Every device the players have put down.
     pub devices: Vec<StoredDevice>,
+    /// What the home island calls itself, if it has a title.
+    pub home_title: Option<String>,
     /// What each account had in its inbox, by lowercased account name.
     pub mail: Vec<(String, Vec<StoredMail>)>,
     /// What each account had bound to its hotbar, by lowercased account name.
@@ -106,6 +108,9 @@ pub trait Store: Send + Sync + 'static {
 
     /// Record one device a player placed, replacing whatever stood in that place.
     async fn save_device(&self, device: &StoredDevice) -> Result<(), StoreError>;
+
+    /// Record the home island's title, replacing the one before it.
+    async fn save_home_title(&self, title: &str) -> Result<(), StoreError>;
 
     /// Record an account's whole inbox, replacing whatever was stored for it.
     async fn save_mail(&self, account: &str, mail: &[StoredMail]) -> Result<(), StoreError>;

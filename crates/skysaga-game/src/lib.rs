@@ -4911,8 +4911,8 @@ impl Session {
     /// destination. The portal is the last teleporter put in front of this player, which is
     /// as much as there is until portals belong to the world.
     ///
-    /// Not done: the stone is not used up, and walking into the open portal goes nowhere. The
-    /// client sends nothing when it does (seen 2026-10-11), so that is the server's to notice.
+    /// The stone in the hand that used it is spent. Walking into the open portal is noticed
+    /// in [`Self::step_through_a_portal`]: the client sends nothing when it does.
     fn perform_always_action(
         &mut self,
         packet: PerformAlwaysActions,
@@ -4963,13 +4963,26 @@ impl Session {
             },
         );
 
-        self.set_portal(
+        // Opening a portal costs the stone that opened it. `Adventures > Cost` is 1 for every
+        // adventure a stone leads to, and the teleporter carries two cost parameters; that the
+        // price is the stone is read from those, not seen.
+        let spent = self
+            .held_stack(packet.location)
+            .and_then(|stone| self.slot_of(stone))
+            .map(|slot| self.inventories.destroy(self.player_entity_id, slot, 1))
+            .unwrap_or_default();
+
+        let mut out = self.apply(spent, world);
+
+        out.extend(self.set_portal(
             portal,
             PORTAL_OPEN,
             Some(skysaga_core::name_hash(&biome)),
             adventure.as_deref().map(skysaga_core::name_hash),
             world,
-        )
+        ));
+
+        out
     }
 
     /// A title deed was used: the island takes a new title, and the deed is spent.
