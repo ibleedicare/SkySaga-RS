@@ -998,6 +998,9 @@ pub struct Session {
     /// rucksack is restored and emptied by it.
     pending_details: std::collections::HashMap<u32, skysaga_state::StoredItemDetail>,
 
+    /// Stored materials waiting for their stacks, by square, as `pending_details` is.
+    pending_materials: std::collections::HashMap<u32, Vec<Option<u32>>>,
+
     /// What was last written down of the above, so an unchanged tick writes nothing.
     recorded_progress: Option<skysaga_state::StoredProgress>,
 
@@ -1071,6 +1074,7 @@ impl Session {
             made_of: std::collections::HashMap::new(),
             taught: std::collections::HashMap::new(),
             pending_details: std::collections::HashMap::new(),
+            pending_materials: std::collections::HashMap::new(),
             recorded_progress: None,
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
@@ -1439,6 +1443,8 @@ impl Session {
             .map(|detail| (detail.slot, *detail))
             .collect();
 
+        self.pending_materials = progress.item_materials.iter().cloned().collect();
+
         if progress.recipes.is_empty() || !self.learned_recipes.is_empty() {
             return Vec::new();
         }
@@ -1477,8 +1483,16 @@ impl Session {
             })
             .collect();
 
+        let item_materials = self
+            .inventory()
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entity)| Some((slot as u32, self.made_of.get(entity)?.clone())))
+            .collect();
+
         skysaga_state::StoredProgress {
             item_details,
+            item_materials,
             recipes: self.learned_recipes.clone(),
         }
     }
@@ -1544,10 +1558,15 @@ impl Session {
                 }
             }
 
+            if let Some(materials) = self.pending_materials.remove(&item.slot) {
+                self.made_of.insert(entity, materials);
+            }
+
             effects.push(Effect::ItemCreated { entity });
         }
 
         self.pending_details.clear();
+        self.pending_materials.clear();
 
         if effects.is_empty() {
             return Vec::new();

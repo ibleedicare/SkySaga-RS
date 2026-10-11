@@ -300,6 +300,7 @@ fn wear_titles_and_recipes_come_back_with_the_rucksack() {
 
     let pick = before.give("Metal_Pickaxe", 1).expect("a pick");
     before.wear_to(pick, 700, &world);
+    before.make_of(pick, &["Metal_Orange".to_owned(), "Dark_Wood".to_owned()]);
 
     let deed = before.give("HomeIslandTitleDeed", 1).expect("a deed");
     let title = deed_title(world.geodata.home_titles(), deed).map(skysaga_core::name_hash);
@@ -347,6 +348,11 @@ fn wear_titles_and_recipes_come_back_with_the_rucksack() {
 
     assert_ne!(restored_deed, deed, "a new entity");
     assert_eq!(after.durability_of(restored_pick, &world).unwrap().durability, 700);
+    assert_eq!(
+        after.materials_of(restored_pick, &world),
+        before.materials_of(pick, &world),
+        "still copper",
+    );
 
     let detail = after
         .progress(&world)

@@ -506,6 +506,9 @@ pub struct StoredItemDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoredProgress {
     pub item_details: Vec<StoredItemDetail>,
+    /// The materials of each stack that is not made of its item's usual ones: the square,
+    /// then one material per category, primary first, with `None` for a gap.
+    pub item_materials: Vec<(u32, Vec<Option<u32>>)>,
     /// Name hashes of the recipes learned, in the order they were learned.
     pub recipes: Vec<u32>,
 }
