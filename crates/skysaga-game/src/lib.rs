@@ -278,8 +278,24 @@ pub const PORTAL_OPEN: u32 = 3;
 const LEARN_HOME_TITLE: &str = "Learn_HomeIslandTitle";
 const HOME_TITLE_DEED: &str = "HomeIslandTitleDeed";
 
+/// The action a recipe scroll arms, and the scroll.
+const LEARN_RECIPE: &str = "Learn_Recipe";
+const RECIPE_SCROLL: &str = "Recipe_Teacher";
+
 /// What the client calls an island that has no title.
 const DEFAULT_HOME_TITLE: &str = "Home";
+
+/// The recipe the scroll in stack `stack` teaches: one a new player does not already know.
+///
+/// Picked by the stack's id, as a deed's title is.
+pub fn scroll_recipe(recipes: &[skysaga_world::geodata::Recipe], stack: u32) -> Option<u32> {
+    let unknown: Vec<&skysaga_world::geodata::Recipe> = recipes
+        .iter()
+        .filter(|recipe| !recipe.available_to_new_players)
+        .collect();
+
+    (!unknown.is_empty()).then(|| unknown[stack as usize % unknown.len()].id())
+}
 
 /// The title the deed in stack `stack` names.
 ///
@@ -967,6 +983,9 @@ pub struct Session {
     /// because nothing yet activates a job challenge, which is what would auto-add a row.
     todo_tasks: Vec<TodoTask>,
 
+    /// Recipes read from scrolls, beside the ones every player starts with.
+    learned_recipes: Vec<u32>,
+
     /// Where loot rolls come from.
     ///
     /// Seeded from the player's entity id rather than a clock, so this crate keeps its
@@ -1033,6 +1052,7 @@ impl Session {
             recorded_items: None,
             clock_ms: None,
             todo_tasks: Vec::new(),
+            learned_recipes: Vec::new(),
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
@@ -3880,6 +3900,12 @@ impl Session {
                         todo.tasks = self.todo_tasks.clone();
                     }
 
+                    // What scrolls have taught, on top of what every player starts with.
+                    Component::RecipeBook(book) => {
+                        book.recipes.extend(self.learned_recipes.iter().copied());
+                        book.scrolls_used = self.learned_recipes.len() as u32;
+                    }
+
                     // The hotbar the client told us about, as the client keeps it.
                     Component::UiSettings(ui_settings) => {
                         ui_settings.active_slot = self.active_slot;
@@ -4836,9 +4862,10 @@ impl Session {
         anonymous.slot_data.item_uuid.clear();
         let component = &anonymous;
 
-        // A deed says which title it gives, and the client names the item after it.
-        if self.inventories.name(entity) == Some(skysaga_core::name_hash(HOME_TITLE_DEED)) {
-            let teaches = deed_title(world.geodata.home_titles(), entity).map(skysaga_core::name_hash);
+        // A deed says which title it gives and a scroll which recipe, and the client names the
+        // item after it.
+        if let Some(teaches) = self.teaches(entity, world) {
+            let teaches = Some(teaches);
 
             if let Some(definition) = world.definitions.get("TeacherInventoryItem") {
                 return Some((
@@ -4949,6 +4976,10 @@ impl Session {
             return self.learn_home_title(packet.location, world);
         }
 
+        if action == LEARN_RECIPE {
+            return self.learn_recipe(packet.location, world);
+        }
+
         let Some((biome, adventure)) = world.geodata.portal_destination(&action) else {
             debug!(%action, "an always-action that is not a portal stone");
 
@@ -5005,6 +5036,84 @@ impl Session {
         out
     }
 
+    /// What the stack `entity` teaches, if it is an item that teaches: a deed its title, a
+    /// scroll its recipe.
+    ///
+    /// **Not optional for a scroll.** The client reads the `teachitemcrc` of every
+    /// `Recipe_Teacher` it draws in a bag without checking that the stack has a teacher
+    /// component (`FUN_007e7240`), so one sent as a plain item crashes it the moment the
+    /// rucksack opens: a read of `0x20` at `0x007E7276`, seen 2026-10-11.
+    ///
+    /// Neither is stored with what it teaches yet; the stack's id picks. See [`deed_title`].
+    fn teaches(&self, entity: u32, world: &World) -> Option<u32> {
+        let name = self.inventories.name(entity)?;
+
+        if name == skysaga_core::name_hash(HOME_TITLE_DEED) {
+            return deed_title(world.geodata.home_titles(), entity).map(skysaga_core::name_hash);
+        }
+
+        if name == skysaga_core::name_hash(RECIPE_SCROLL) {
+            return scroll_recipe(world.geodata.recipes(), entity);
+        }
+
+        None
+    }
+
+    /// The stack of `item` in the hand that acted; failing that, any the player carries.
+    fn held_or_carried(&self, location: ActionLocation, item: &str) -> Option<u32> {
+        let item = skysaga_core::name_hash(item);
+        let is_it = |stack: &u32| *stack != 0 && self.inventories.name(*stack) == Some(item);
+
+        self.held_stack(location)
+            .filter(|stack| is_it(stack))
+            .or_else(|| self.inventory().iter().copied().find(|stack| is_it(stack)))
+    }
+
+    /// A recipe scroll was read: the player knows its recipe, and the scroll is spent.
+    ///
+    /// A scroll for a recipe already known is kept.
+    fn learn_recipe(&mut self, location: ActionLocation, world: &World) -> Vec<Vec<u8>> {
+        let Some(scroll) = self.held_or_carried(location, RECIPE_SCROLL) else {
+            debug!("a recipe was asked for with no scroll in the rucksack");
+
+            return Vec::new();
+        };
+
+        let Some(recipe) = self.teaches(scroll, world) else {
+            return Vec::new();
+        };
+
+        if self.learned_recipes.contains(&recipe) {
+            debug!(recipe, "that recipe is already known");
+
+            return Vec::new();
+        }
+
+        let spent = self
+            .slot_of(scroll)
+            .map(|slot| self.inventories.destroy(self.player_entity_id, slot, 1))
+            .unwrap_or_default();
+
+        let mut out = self.apply(spent, world);
+
+        self.learned_recipes.push(recipe);
+
+        info!(recipe, known = self.learned_recipes.len(), "learned a recipe");
+
+        out.extend(self.sync_of(
+            self.player_entity_id,
+            &["recipelist", "numberofrecipescrollsused"],
+            world,
+        ));
+
+        out
+    }
+
+    /// The recipes this player has read from scrolls.
+    pub fn learned_recipes(&self) -> &[u32] {
+        &self.learned_recipes
+    }
+
     /// A title deed was used: the island takes the title the deed names, and the deed is spent.
     ///
     /// The packets name no title (seen 2026-10-11: `EquippedItemUsed` with
@@ -5019,15 +5128,7 @@ impl Session {
             return Vec::new();
         }
 
-        let deed = skysaga_core::name_hash(HOME_TITLE_DEED);
-        let is_deed = |stack: &u32| *stack != 0 && self.inventories.name(*stack) == Some(deed);
-
-        // The one in the hand that used it; failing that, any the player carries.
-        let Some(stack) = self
-            .held_stack(location)
-            .filter(|stack| is_deed(stack))
-            .or_else(|| self.inventory().iter().copied().find(|stack| is_deed(stack)))
-        else {
+        let Some(stack) = self.held_or_carried(location, HOME_TITLE_DEED) else {
             debug!("a title was asked for with no deed in the rucksack");
 
             return Vec::new();
