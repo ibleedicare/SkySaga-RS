@@ -172,6 +172,9 @@ pub struct WorldChanges {
     /// Items lying on the floor, oldest first.
     drops: Vec<FloorDrop>,
 
+    /// What the island calls itself, and the entity that says so. None reads "Home".
+    title: Option<(u32, String)>,
+
     /// Creatures somebody has already killed.
     ///
     /// Kept rather than deleted, because "this one is dead" has to outlive the entity: a
@@ -337,11 +340,6 @@ impl World {
         world.server_info.is_my_world = world_type == 1;
         world.map.biome = Some(skysaga_core::name_hash(&map_biome));
         world.adventure = adventure.unwrap_or(biome).to_owned();
-
-        // The island's title stays on the island.
-        let title = skysaga_core::name_hash("HomeIslandCustomisation");
-
-        world.entities.retain(|entity| entity.name_hash != Some(title));
 
         // Outside a home island the banner is composed from an `AdventureName` entity, and
         // only on entering gameplay. Without one the client leaves the banner as it was,
@@ -758,17 +756,6 @@ impl World {
         // path reachable -- without it, every interaction assertion is vacuous and the client
         // has nothing to press E on.
         //
-        if let Some(title) = &config.home_title {
-            add(
-                "HomeIslandCustomisation",
-                vec![Component::HomeIslandCustomisation(
-                    skysaga_world::HomeIslandCustomisationComponent {
-                        title: Some(skysaga_core::name_hash(title)),
-                    },
-                )],
-            );
-        }
-
         // Kept un-encoded as well as encoded, for the same reason as the player: what is in it
         // and whether its lid is shut both change while the server runs.
         let mut containers = Vec::new();
@@ -878,7 +865,11 @@ impl World {
             mail_item_definition: definitions.get("MailItem").cloned(),
             geodata,
             definitions: definitions.clone(),
-            changes: Arc::new(Mutex::new(WorldChanges::default())),
+            changes: Arc::new(Mutex::new(WorldChanges {
+                // Numbered after everything the island was built with.
+                title: config.home_title.clone().map(|title| (next_id, title)),
+                ..Default::default()
+            })),
             creatures,
             spawn_voxel: {
                 let spawn = config.terrain.spawn();
@@ -1531,6 +1522,46 @@ impl World {
         Some(changes.drops.remove(at))
     }
 
+    /// The island's title and the id of the entity carrying it, once it has one.
+    pub fn home_title(&self) -> Option<(u32, String)> {
+        self.changes.lock().expect("world lock").title.clone()
+    }
+
+    /// Call the island `title`. `entity` is used only if this is its first title.
+    ///
+    /// Answers the entity carrying it and whether that entity is new, which decides whether
+    /// the players already here are sent an `EntityAdd` or an `EntitySync`.
+    pub fn set_home_title(&self, title: &str, entity: u32) -> (u32, bool) {
+        let mut changes = self.changes.lock().expect("world lock");
+
+        match &mut changes.title {
+            Some((id, name)) => {
+                *name = title.to_owned();
+
+                (*id, false)
+            }
+            None => {
+                changes.title = Some((entity, title.to_owned()));
+
+                (entity, true)
+            }
+        }
+    }
+
+    /// The `HomeIslandCustomisation` entity as it stands, if the island has a title.
+    pub fn home_title_entity(&self) -> Option<(Entity, &EntityDefinition)> {
+        let (id, title) = self.home_title()?;
+        let definition = self.definitions.get("HomeIslandCustomisation")?;
+
+        let component = Component::HomeIslandCustomisation(
+            skysaga_world::HomeIslandCustomisationComponent {
+                title: Some(skysaga_core::name_hash(&title)),
+            },
+        );
+
+        Some((Entity::new(id, vec![component]), definition))
+    }
+
     /// The first entity id nothing is using.
     ///
     /// Past the props the island was built with **and** past the devices restored on top of
@@ -1550,7 +1581,9 @@ impl World {
             .max()
             .unwrap_or(0);
 
-        props.max(devices).max(creatures).max(drops) + 1
+        let title = changes.title.as_ref().map_or(0, |(id, _)| *id);
+
+        props.max(devices).max(creatures).max(drops).max(title) + 1
     }
 
     /// What the terrain generator produced, before anybody touched it.

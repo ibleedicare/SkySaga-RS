@@ -185,6 +185,9 @@ pub struct GeoData {
     /// `Jobs`: the twenty job names, which are what a recipe's `RequiredJob` refers to.
     jobs: Vec<String>,
 
+    /// `HomeIslandTitles`: what a home island may call itself, `Home` among them.
+    home_titles: Vec<String>,
+
     /// `name_hash(recipe name)` to a position in [`Self::recipes`].
     ///
     /// The recipe's *own* name is the key because that is what arrives: `QueueRecipeOnEntity`
@@ -562,6 +565,7 @@ impl GeoData {
             recipes,
             by_id,
             jobs: file.jobs.into_iter().map(|job| job.name).collect(),
+            home_titles: file.home_titles.into_iter().map(|title| title.name).collect(),
         })
     }
 
@@ -618,6 +622,11 @@ impl GeoData {
     /// Every job the game defines, by name.
     pub fn jobs(&self) -> &[String] {
         &self.jobs
+    }
+
+    /// The titles a home island can carry on its banner.
+    pub fn home_titles(&self) -> &[String] {
+        &self.home_titles
     }
 
     /// Every recipe the game knows.
@@ -916,6 +925,9 @@ struct File {
 
     #[serde(rename = "Jobs", default)]
     jobs: Vec<RawNamed>,
+
+    #[serde(rename = "HomeIslandTitles", default)]
+    home_titles: Vec<RawNamed>,
 
     #[serde(rename = "LootTables", default)]
     loot_tables: Vec<RawLootTable>,
