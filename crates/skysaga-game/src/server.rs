@@ -210,6 +210,7 @@ impl GameServer {
         self.record_mailboxes();
         self.record_blocks();
         self.record_devices();
+        self.record_title();
 
         // After draining, so a client that connected this tick is already visible.
         self.publish_snapshot();
@@ -344,6 +345,14 @@ impl GameServer {
                 voxel: edit.voxel,
                 material: edit.material,
             });
+        }
+    }
+
+    /// Write down what the island is called. The state ignores a title it already holds, so
+    /// asking every tick costs a comparison.
+    fn record_title(&mut self) {
+        if let Some((_, title)) = self.world.home_title() {
+            self.state.set_home_title(&title);
         }
     }
 

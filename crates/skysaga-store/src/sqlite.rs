@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS devices (
     PRIMARY KEY (x, y, z)
 );
 
+CREATE TABLE IF NOT EXISTS world_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mail (
     account  TEXT NOT NULL
              REFERENCES accounts(key) ON DELETE CASCADE,
@@ -141,6 +146,9 @@ impl SqliteStore {
         Ok(found.is_some())
     }
 }
+
+/// The `world_settings` row holding the home island's title.
+const HOME_TITLE: &str = "home_title";
 
 #[async_trait]
 impl Store for SqliteStore {
@@ -336,12 +344,20 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
+        let home_title = sqlx::query("SELECT value FROM world_settings WHERE key = ?")
+            .bind(HOME_TITLE)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| row.try_get("value"))
+            .transpose()?;
+
         Ok(Snapshot {
             accounts,
             photos,
             inventories,
             blocks,
             devices,
+            home_title,
             mail,
             hotbars,
         })
@@ -527,6 +543,19 @@ impl Store for SqliteStore {
         }
 
         transaction.commit().await?;
+
+        Ok(())
+    }
+
+    async fn save_home_title(&self, title: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO world_settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(HOME_TITLE)
+        .bind(title)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

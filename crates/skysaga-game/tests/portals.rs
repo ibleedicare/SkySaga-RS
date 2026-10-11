@@ -257,3 +257,43 @@ fn a_destination_carries_its_name() {
         "a home island is named from its owner, not from this entity",
     );
 }
+
+/// Opening a portal uses the stone up.
+#[test]
+fn the_stone_that_opens_a_portal_is_spent() {
+    use skysaga_proto::packets::crafting::ItemSpec;
+    use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
+
+    let world = world();
+    let mut session = playing(&world);
+
+    session.spawn_chest(&world, "HomeTeleporter", &[]).expect("defined");
+
+    session.give("Portal_Castle_Adv", 2).expect("the stone is an item");
+
+    let mut writer = BitWriter::new();
+
+    RequestUiSettingsSlotChange {
+        slot: 0,
+        hand: 0,
+        item_spec: ItemSpec {
+            resource: Some(skysaga_core::name_hash("Portal_Castle_Adv")),
+            ..Default::default()
+        },
+    }
+    .encode(&mut writer);
+
+    session.handle(ClientPacket::parse(&writer.into_bytes()), &world);
+
+    arm(&mut session, &world, "ActivatePortal_ForestCastleAdventure");
+    session.handle(ClientPacket::parse(&STONE_USED), &world);
+
+    let left: u32 = session
+        .carried_items()
+        .iter()
+        .filter(|item| item.item == skysaga_core::name_hash("Portal_Castle_Adv"))
+        .map(|item| item.count)
+        .sum();
+
+    assert_eq!(left, 1, "one of the two is gone");
+}

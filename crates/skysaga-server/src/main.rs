@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
             inventories = snapshot.inventories.len(),
             blocks = snapshot.blocks.len(),
             devices = snapshot.devices.len(),
+            home_title = ?snapshot.home_title,
             inboxes = snapshot.mail.len(),
             hotbars = snapshot.hotbars.len(),
             "loaded stored state",
@@ -97,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         state.import(snapshot.accounts, snapshot.photos, snapshot.inventories);
         state.import_blocks(snapshot.blocks);
         state.import_devices(snapshot.devices);
+        state.import_home_title(snapshot.home_title);
         state.import_mail(snapshot.mail);
         state.import_hotbars(snapshot.hotbars);
 
@@ -159,7 +161,14 @@ async fn main() -> anyhow::Result<()> {
     let definitions = EntityDefinitions::load(default_entities_path())
         .with_context(|| "loading entity definitions")?;
 
-    let world = World::home_island(&definitions, &WorldConfig::from_env());
+    // A title a deed gave the island outlives the one the environment starts it with.
+    let mut world_config = WorldConfig::from_env();
+
+    if let Some(title) = state.home_title() {
+        world_config.home_title = Some(title);
+    }
+
+    let world = World::home_island(&definitions, &world_config);
 
     // Put back what players have dug and built. The island is generated from a seed, so the
     // terrain is the same every start; these are the changes on top of it.
