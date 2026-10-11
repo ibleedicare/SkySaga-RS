@@ -294,6 +294,52 @@ fn claiming_an_attachment_moves_it_into_the_rucksack() {
 }
 
 #[test]
+fn claiming_an_attachment_re_syncs_the_container_it_left() {
+    // The container is an entity the client is drawing, exactly as a chest is. Syncing only
+    // the rucksack moves the item on the server and leaves the mail panel showing it, which
+    // is what a live client did.
+    let world = world();
+    let mut session = playing(&world);
+
+    let uuid = session.compose("A parcel", "body", &[("Dirt", 10)]);
+
+    let container = session.mail(&uuid).unwrap().attachment_entity();
+    let item = session.inventories().slot(container, 9).unwrap();
+    let item_uuid = session.uuid_on_the_wire(item, &world);
+
+    let burst = session.handle(
+        ClientPacket::parse(&encode(|w| {
+            TakeMailAttachment {
+                message_uuid: uuid.clone(),
+                item_uuid,
+            }
+            .encode(w)
+        })),
+        &world,
+    );
+
+    let synced: Vec<u32> = burst
+        .iter()
+        .filter_map(|bytes| {
+            let mut reader = BitReader::from_bytes(bytes);
+
+            (reader.read_packet_id().ok()? == EntitySync::ID)
+                .then(|| EntitySync::decode(&mut reader).ok())
+                .flatten()
+        })
+        .map(|sync| sync.id)
+        .collect();
+
+    assert!(
+        synced.contains(&container),
+        "the container {container} was never re-synced: {synced:?}",
+    );
+
+    // Never a second `EntityAdd`: the client would destroy the container and rebuild it.
+    assert!(!ids(&burst).contains(&EntityAdd::ID), "{:?}", ids(&burst));
+}
+
+#[test]
 fn claiming_an_item_that_is_not_attached_changes_nothing() {
     let world = world();
     let mut session = playing(&world);
