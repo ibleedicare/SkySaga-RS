@@ -281,16 +281,18 @@ const HOME_TITLE_DEED: &str = "HomeIslandTitleDeed";
 /// What the client calls an island that has no title.
 const DEFAULT_HOME_TITLE: &str = "Home";
 
-/// A title other than `current`, or none if there is no other.
+/// The title the deed in stack `stack` names.
 ///
-/// The same seed gives the same title, so a test can say which.
-pub fn pick_home_title(titles: &[String], current: &str, seed: u32) -> Option<String> {
-    let others: Vec<&String> = titles
+/// **A deed is not stored with its title yet**, so the stack's id picks one: the same deed
+/// names the same title for as long as it exists, and that is all that is promised. `Home`
+/// is left out, being what an island is called before any deed.
+pub fn deed_title(titles: &[String], stack: u32) -> Option<&str> {
+    let named: Vec<&String> = titles
         .iter()
-        .filter(|title| !title.eq_ignore_ascii_case(current))
+        .filter(|title| !title.eq_ignore_ascii_case(DEFAULT_HOME_TITLE))
         .collect();
 
-    (!others.is_empty()).then(|| others[seed as usize % others.len()].clone())
+    (!named.is_empty()).then(|| named[stack as usize % named.len()].as_str())
 }
 
 /// Which of the two drop squares is counting components.
@@ -4834,6 +4836,24 @@ impl Session {
         anonymous.slot_data.item_uuid.clear();
         let component = &anonymous;
 
+        // A deed says which title it gives, and the client names the item after it.
+        if self.inventories.name(entity) == Some(skysaga_core::name_hash(HOME_TITLE_DEED)) {
+            let teaches = deed_title(world.geodata.home_titles(), entity).map(skysaga_core::name_hash);
+
+            if let Some(definition) = world.definitions.get("TeacherInventoryItem") {
+                return Some((
+                    Entity::new(
+                        entity,
+                        vec![
+                            Component::InventoryItem(component.clone()),
+                            Component::Teacher(skysaga_world::TeacherComponent { teaches }),
+                        ],
+                    ),
+                    definition,
+                ));
+            }
+        }
+
         // Made of something and never worn: a plate, a rod, a plank. Gated with the durable
         // items because the two are one feature, what the repair panel is handed.
         let materials = self.materials_of(entity, world);
@@ -4926,7 +4946,7 @@ impl Session {
         };
 
         if action == LEARN_HOME_TITLE {
-            return self.learn_home_title(world);
+            return self.learn_home_title(packet.location, world);
         }
 
         let Some((biome, adventure)) = world.geodata.portal_destination(&action) else {
@@ -4985,41 +5005,42 @@ impl Session {
         out
     }
 
-    /// A title deed was used: the island takes a new title, and the deed is spent.
+    /// A title deed was used: the island takes the title the deed names, and the deed is spent.
     ///
-    /// The client names no title (seen 2026-10-11: `EquippedItemUsed` with
-    /// `Learn_HomeIslandTitle`, then `PerformAlwaysActions`), so which one is the server's to
-    /// decide. One the island does not already carry, drawn from `HomeIslandTitles`.
+    /// The packets name no title (seen 2026-10-11: `EquippedItemUsed` with
+    /// `Learn_HomeIslandTitle`, then `PerformAlwaysActions`); it is the deed's own, the one
+    /// its tooltip shows. See [`deed_title`].
     ///
     /// Only on a home island: elsewhere there is no title to change and the deed is kept.
-    fn learn_home_title(&mut self, world: &World) -> Vec<Vec<u8>> {
+    fn learn_home_title(&mut self, location: ActionLocation, world: &World) -> Vec<Vec<u8>> {
         if !world.server_info.is_home_world {
             debug!("a title deed used away from home");
 
             return Vec::new();
         }
 
-        let current = world
-            .home_title()
-            .map_or_else(|| DEFAULT_HOME_TITLE.to_owned(), |(_, title)| title);
+        let deed = skysaga_core::name_hash(HOME_TITLE_DEED);
+        let is_deed = |stack: &u32| *stack != 0 && self.inventories.name(*stack) == Some(deed);
 
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.subsec_nanos());
-
-        let Some(title) = pick_home_title(world.geodata.home_titles(), &current, seed) else {
-            debug!("no other title to give");
+        // The one in the hand that used it; failing that, any the player carries.
+        let Some(stack) = self
+            .held_stack(location)
+            .filter(|stack| is_deed(stack))
+            .or_else(|| self.inventory().iter().copied().find(|stack| is_deed(stack)))
+        else {
+            debug!("a title was asked for with no deed in the rucksack");
 
             return Vec::new();
         };
 
-        let spent = self.take_one(skysaga_core::name_hash(HOME_TITLE_DEED));
-
-        if spent.is_empty() {
-            debug!("a title was asked for with no deed in the rucksack");
-
+        let Some(title) = deed_title(world.geodata.home_titles(), stack).map(str::to_owned) else {
             return Vec::new();
-        }
+        };
+
+        let spent = self
+            .slot_of(stack)
+            .map(|slot| self.inventories.destroy(self.player_entity_id, slot, 1))
+            .unwrap_or_default();
 
         let mut out = self.apply(spent, world);
 
