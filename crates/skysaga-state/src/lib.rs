@@ -160,6 +160,9 @@ struct Inner {
     /// What each account has bound to its hotbar, by lowercased account name.
     hotbars: HashMap<String, Vec<StoredBinding>>,
 
+    /// What each account has learned and what its items carry, by lowercased account name.
+    progress: HashMap<String, StoredProgress>,
+
     /// The most recent snapshot from the game thread. See [`ServerSnapshot`].
     snapshot: ServerSnapshot,
 
@@ -241,6 +244,12 @@ pub enum Change {
 
     /// The home island was given a title, a `HomeIslandTitles` name.
     HomeTitle(String),
+
+    /// What an account has learned and what its items carry, in full.
+    Progress {
+        account: String,
+        progress: StoredProgress,
+    },
 }
 
 /// One device a player put down, as it is stored.
@@ -473,6 +482,29 @@ pub struct StoredItem {
     pub slot: u32,
     pub item: u32,
     pub count: u32,
+}
+
+/// What one carried stack has beyond its name and count.
+///
+/// Kept beside [`StoredItem`] rather than in it: most stacks have neither, and a rucksack of
+/// dirt is then no rows here at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredItemDetail {
+    /// The square the stack sits in, as [`StoredItem::slot`].
+    pub slot: u32,
+    /// How much wear a tool has left, when it is not new.
+    pub durability: Option<u32>,
+    /// What a deed or a scroll teaches: the name hash of a title or of a recipe.
+    pub teaches: Option<u32>,
+}
+
+/// What a player keeps that is not an item: the recipes read from scrolls, and the details of
+/// the items carried.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StoredProgress {
+    pub item_details: Vec<StoredItemDetail>,
+    /// Name hashes of the recipes learned, in the order they were learned.
+    pub recipes: Vec<u32>,
 }
 
 /// One hand of one hotbar square, and the item bound to it.
@@ -738,6 +770,37 @@ impl AppState {
         }
 
         self.record(Change::Inventory { account: key, items });
+    }
+
+    /// Load what each account has learned at startup. Silent, as the rest of `import` is.
+    pub fn import_progress(&self, progress: Vec<(String, StoredProgress)>) {
+        self.write().progress.extend(progress);
+    }
+
+    /// What `account` has learned and what its items carry, as last recorded.
+    pub fn progress(&self, account: &str) -> StoredProgress {
+        self.read()
+            .progress
+            .get(&account.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record it. Returns early when nothing differs, as [`Self::set_inventory`] does.
+    pub fn set_progress(&self, account: &str, progress: StoredProgress) {
+        let key = account.trim().to_ascii_lowercase();
+
+        {
+            let mut inner = self.write();
+
+            if inner.progress.get(&key).is_some_and(|held| *held == progress) {
+                return;
+            }
+
+            inner.progress.insert(key.clone(), progress.clone());
+        }
+
+        self.record(Change::Progress { account: key, progress });
     }
 
     /// What `account` has bound to its hotbar, as last recorded.

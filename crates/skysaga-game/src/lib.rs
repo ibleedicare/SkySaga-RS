@@ -986,6 +986,18 @@ pub struct Session {
     /// Recipes read from scrolls, beside the ones every player starts with.
     learned_recipes: Vec<u32>,
 
+    /// What each deed or scroll teaches, by stack, once that has been settled: restored from
+    /// storage, or written down for it. A stack not here is named by [`deed_title`] or
+    /// [`scroll_recipe`].
+    taught: std::collections::HashMap<u32, u32>,
+
+    /// Stored details waiting for the stacks they describe, by square. Filled before the
+    /// rucksack is restored and emptied by it.
+    pending_details: std::collections::HashMap<u32, skysaga_state::StoredItemDetail>,
+
+    /// What was last written down of the above, so an unchanged tick writes nothing.
+    recorded_progress: Option<skysaga_state::StoredProgress>,
+
     /// Where loot rolls come from.
     ///
     /// Seeded from the player's entity id rather than a clock, so this crate keeps its
@@ -1053,6 +1065,9 @@ impl Session {
             clock_ms: None,
             todo_tasks: Vec::new(),
             learned_recipes: Vec::new(),
+            taught: std::collections::HashMap::new(),
+            pending_details: std::collections::HashMap::new(),
+            recorded_progress: None,
             loot_rolls: Seeded::new(u64::from(player_entity_id)),
             broadcasts: Vec::new(),
             mailbox: Vec::new(),
@@ -1403,6 +1418,84 @@ impl Session {
             .collect()
     }
 
+    /// Take back what this player had learned, and hold the details of their items for the
+    /// rucksack restore that follows. **Call it first**: a stack is announced with its wear
+    /// and what it teaches, so both have to be known before [`Self::restore_items`] runs.
+    ///
+    /// The recipe book went out in the join burst without the learned recipes, so it is sent
+    /// again when there are any.
+    pub fn restore_progress(
+        &mut self,
+        progress: &skysaga_state::StoredProgress,
+        world: &World,
+    ) -> Vec<Vec<u8>> {
+        self.pending_details = progress
+            .item_details
+            .iter()
+            .map(|detail| (detail.slot, *detail))
+            .collect();
+
+        if progress.recipes.is_empty() || !self.learned_recipes.is_empty() {
+            return Vec::new();
+        }
+
+        self.learned_recipes = progress.recipes.clone();
+
+        info!(recipes = self.learned_recipes.len(), "restored the recipes the player had learned");
+
+        self.sync_of(
+            self.player_entity_id,
+            &["recipelist", "numberofrecipescrollsused"],
+            world,
+        )
+        .into_iter()
+        .collect()
+    }
+
+    /// What this player has learned and what their items carry, for writing down.
+    pub fn progress(&self, world: &World) -> skysaga_state::StoredProgress {
+        let item_details = self
+            .inventory()
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| **entity != 0)
+            .filter_map(|(slot, entity)| {
+                let durability = self.wear.get(entity).copied();
+                let teaches = self.teaches(*entity, world);
+
+                (durability.is_some() || teaches.is_some()).then_some(
+                    skysaga_state::StoredItemDetail {
+                        slot: slot as u32,
+                        durability,
+                        teaches,
+                    },
+                )
+            })
+            .collect();
+
+        skysaga_state::StoredProgress {
+            item_details,
+            recipes: self.learned_recipes.clone(),
+        }
+    }
+
+    /// What to write down, or `None` when nothing has changed. As [`Self::items_to_record`].
+    pub fn progress_to_record(&mut self, world: &World) -> Option<skysaga_state::StoredProgress> {
+        if !self.items_restored {
+            return None;
+        }
+
+        let progress = self.progress(world);
+
+        if self.recorded_progress.as_ref() == Some(&progress) {
+            return None;
+        }
+
+        self.recorded_progress = Some(progress.clone());
+
+        Some(progress)
+    }
+
     /// Put a stored rucksack back, and say what the client must be told.
     ///
     /// **Each stack is announced before the slot list that names it.** The handshake burst
@@ -1435,8 +1528,22 @@ impl Session {
 
             self.inventories.reserve_ids_from(self.inventories.next_entity_id());
 
+            // Before the stack is announced: its wear and what it teaches are part of the
+            // entity the client is about to be sent.
+            if let Some(detail) = self.pending_details.remove(&item.slot) {
+                if let Some(left) = detail.durability {
+                    self.wear.insert(entity, left);
+                }
+
+                if let Some(teaches) = detail.teaches {
+                    self.taught.insert(entity, teaches);
+                }
+            }
+
             effects.push(Effect::ItemCreated { entity });
         }
+
+        self.pending_details.clear();
 
         if effects.is_empty() {
             return Vec::new();
@@ -5047,6 +5154,15 @@ impl Session {
     /// Neither is stored with what it teaches yet; the stack's id picks. See [`deed_title`].
     fn teaches(&self, entity: u32, world: &World) -> Option<u32> {
         let name = self.inventories.name(entity)?;
+
+        let teacher = [HOME_TITLE_DEED, RECIPE_SCROLL]
+            .iter()
+            .any(|item| skysaga_core::name_hash(item) == name);
+
+        // What it was stored with outlives the id it happens to have this session.
+        if let Some(taught) = self.taught.get(&entity).filter(|_| teacher) {
+            return Some(*taught);
+        }
 
         if name == skysaga_core::name_hash(HOME_TITLE_DEED) {
             return deed_title(world.geodata.home_titles(), entity).map(skysaga_core::name_hash);

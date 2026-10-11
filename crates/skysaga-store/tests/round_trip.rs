@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use skysaga_proto::customisation::{Attachment, CustomisationData, Gender};
 use skysaga_state::{
-    AppState, CredentialPolicy, StoredBinding, StoredBlock, StoredDevice, StoredItem, StoredMail,
+    AppState, CredentialPolicy, StoredBinding, StoredBlock, StoredDevice, StoredItem,
+    StoredItemDetail, StoredMail, StoredProgress,
 };
 use skysaga_store::{Persistence, SqliteStore, Store};
 
@@ -336,6 +337,43 @@ async fn a_placed_device_survives_a_restart() {
     let snapshot = store.load().await.expect("loads");
 
     assert_eq!(snapshot.devices, vec![anvil, barrel]);
+}
+
+/// A worn tool, a deed's title and the recipes read from scrolls come back as they were.
+#[tokio::test]
+async fn what_a_player_has_learned_survives_a_restart() {
+    let (_guard, url) = database_url();
+
+    let progress = StoredProgress {
+        item_details: vec![
+            StoredItemDetail { slot: 9, durability: Some(700), teaches: None },
+            StoredItemDetail { slot: 11, durability: None, teaches: Some(0xdead_beef) },
+        ],
+        recipes: vec![0x3333_3333, 0x1111_1111],
+    };
+
+    {
+        let store = open(&url).await;
+        let state = AppState::new(CredentialPolicy::AnyNonEmpty)
+            .with_sink(Arc::new(Persistence::start(store.clone())));
+
+        state.authenticate("Alice", "x").unwrap();
+        state.set_progress("Alice", StoredProgress { recipes: vec![1, 2, 3], ..Default::default() });
+        state.set_progress("Alice", progress.clone());
+
+        settle().await;
+    }
+
+    let store = open(&url).await;
+    let snapshot = store.load().await.expect("loads");
+
+    assert_eq!(snapshot.progress, vec![("alice".to_owned(), progress.clone())]);
+
+    let state = AppState::new(CredentialPolicy::AnyNonEmpty);
+
+    state.import_progress(snapshot.progress);
+
+    assert_eq!(state.progress("ALICE"), progress, "recipes keep the order they were learned in");
 }
 
 /// The island's title is one value for the world: the last one given is the one that returns.

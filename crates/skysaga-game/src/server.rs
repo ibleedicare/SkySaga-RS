@@ -207,6 +207,7 @@ impl GameServer {
         self.restore_mailboxes();
         self.record_inventories();
         self.record_hotbars();
+        self.record_progress();
         self.record_mailboxes();
         self.record_blocks();
         self.record_devices();
@@ -222,7 +223,7 @@ impl GameServer {
     /// item entities, so the stacks have to be created and announced afterwards. See
     /// [`Session::restore_items`].
     fn restore_inventories(&mut self) {
-        let restores: Vec<(Guid, Vec<skysaga_state::StoredItem>)> = self
+        let restores: Vec<_> = self
             .sessions
             .iter()
             .filter(|(_, session)| session.stage() == crate::Stage::Playing)
@@ -230,14 +231,19 @@ impl GameServer {
             .filter_map(|(guid, session)| {
                 let account = session.account()?;
 
-                Some((*guid, self.state.inventory(account)))
+                Some((*guid, self.state.inventory(account), self.state.progress(account)))
             })
             .collect();
 
-        for (guid, items) in restores {
+        for (guid, items, progress) in restores {
             let Some(session) = self.sessions.get_mut(&guid) else {
                 continue;
             };
+
+            // First: a restored stack is announced with its wear and with what it teaches.
+            for packet in session.restore_progress(&progress, &self.world) {
+                self.peer.send(guid, &packet);
+            }
 
             for packet in session.restore_items(&items, &self.world) {
                 self.peer.send(guid, &packet);
@@ -387,6 +393,25 @@ impl GameServer {
 
         for (account, items) in changed {
             self.state.set_inventory(&account, items);
+        }
+    }
+
+    /// Write down what each player has learned and what their items carry, when it changes.
+    fn record_progress(&mut self) {
+        let world = &self.world;
+
+        let changed: Vec<(String, skysaga_state::StoredProgress)> = self
+            .sessions
+            .values_mut()
+            .filter_map(|session| {
+                let progress = session.progress_to_record(world)?;
+
+                Some((session.account()?.to_owned(), progress))
+            })
+            .collect();
+
+        for (account, progress) in changed {
+            self.state.set_progress(&account, progress);
         }
     }
 
