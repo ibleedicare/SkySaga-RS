@@ -318,7 +318,8 @@ enum Salvage {
     Dismantle,
 }
 
-/// What breaking one block costs the tool that broke it.
+/// What breaking one block costs the tool that broke it, and what landing one blow costs the
+/// weapon that struck.
 ///
 /// **This server's choice.** The client only draws the number it is sent, and no capture shows
 /// a tool wearing, so there is nothing to copy.
@@ -4498,7 +4499,15 @@ impl Session {
             }
         }
 
-        self.hit(&creature, &action, packet.position, world)
+        let mut out = self.hit(&creature, &action, packet.position, world);
+
+        // A blow that lands costs the weapon what a block costs a pick: one use, one point.
+        // Nothing for a bare hand, and nothing for a swing that was refused above.
+        if let Some(hand) = ActionLocation::ALL.get(packet.location as usize) {
+            out.extend(self.wear_held(*hand, wear_per_block(), world));
+        }
+
+        out
     }
 
     /// Take one swing's damage off `creature` and say what to send.
