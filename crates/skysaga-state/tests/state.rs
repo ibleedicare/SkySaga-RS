@@ -1008,6 +1008,7 @@ mod commands {
             account: account.to_owned(),
             item: "Dirt".into(),
             count: 64,
+            durability: None,
         }
     }
 

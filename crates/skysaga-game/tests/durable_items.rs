@@ -277,3 +277,20 @@ fn a_running_server_mints_durable_items_unless_switched_off() {
     assert!(durable_items_from(Some("1")));
     assert!(!durable_items_from(Some("0")), "the one way to turn it off");
 }
+
+/// **Only a tool has a uuid as far as the client is told.** See `Session::uuid_on_the_wire`:
+/// the repair panel refuses a plate that carries one.
+#[test]
+fn a_stack_is_sent_without_a_uuid_and_a_tool_with_its_own() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let plates = session.give("Metal_Plate", 12).expect("a free square");
+    let pick = session.give("Metal_Pickaxe", 1).expect("a free square");
+
+    let own = session.inventories().item(pick).expect("the stack").slot_data.item_uuid.clone();
+
+    assert_eq!(session.uuid_on_the_wire(plates, &world), "");
+    assert_eq!(session.uuid_on_the_wire(pick, &world), own);
+    assert!(!own.is_empty());
+}

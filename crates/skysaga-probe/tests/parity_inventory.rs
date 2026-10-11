@@ -128,6 +128,7 @@ impl Local {
             account: self.account.clone(),
             item: item.to_owned(),
             count,
+            durability: None,
         });
 
         assert!(

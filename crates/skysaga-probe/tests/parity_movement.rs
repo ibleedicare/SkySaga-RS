@@ -162,6 +162,7 @@ fn the_rust_server_answers_movement_with_nothing_and_stays_up() {
         account: server.account.clone(),
         item: "Dirt".to_owned(),
         count: 1,
+        durability: None,
     });
 
     assert!(

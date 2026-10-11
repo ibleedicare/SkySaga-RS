@@ -30,6 +30,7 @@ fn a_known_item_is_queued() {
             account: "Alice".to_owned(),
             item: "Wooden_Plank".to_owned(),
             count: 10,
+            durability: None,
         }],
     );
 }

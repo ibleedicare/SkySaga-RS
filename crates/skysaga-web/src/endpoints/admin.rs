@@ -196,6 +196,9 @@ pub struct Give {
     item: String,
     #[serde(default = "one")]
     count: u32,
+    /// What a tool has left, to hand over a worn one. Ignored for anything that does not wear.
+    #[serde(default)]
+    durability: Option<u32>,
 }
 
 fn one() -> u32 {
@@ -237,6 +240,7 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         account: give.account.clone(),
         item: give.item.clone(),
         count: give.count,
+        durability: give.durability,
     });
 
     Json(Queued {
