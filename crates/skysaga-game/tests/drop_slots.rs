@@ -426,3 +426,47 @@ fn pressing_an_empty_square_is_harmless() {
     assert!(press(&mut session, &world, DISMANTLE).is_empty());
     assert!(take_back(&mut session, &world, REPAIR).is_empty());
 }
+
+/// A tool left on the repair square was gone after a reconnect (seen 2026-10-11): it had left
+/// the rucksack, and only the rucksack was written down. It is recorded in the first free
+/// rucksack square, worn as it was, and comes back there.
+#[test]
+fn a_tool_left_on_the_repair_square_is_not_forgotten() {
+    let world = world();
+    let mut before = playing(&world);
+
+    before.give("Dirt", 5).expect("dirt in the first square");
+
+    let pick = before.give("Metal_Pickaxe", 1).expect("a pick in the second");
+
+    before.wear_to(pick, 700, &world);
+
+    let square = before.slot_of(pick).expect("the pick is in the rucksack");
+
+    drop_onto(&mut before, &world, REPAIR, square);
+
+    assert_eq!(before.slot_of(pick), None, "the pick has left the rucksack");
+
+    let items = before.carried_items();
+    let progress = before.progress(&world);
+
+    let pickaxe = skysaga_core::name_hash("Metal_Pickaxe");
+
+    assert_eq!(items.len(), 2, "the dirt and the pick");
+    assert!(
+        items.iter().any(|item| item.item == pickaxe && item.slot == square),
+        "written down where it came from, the first free square",
+    );
+    assert_eq!(progress.item_details.len(), 1);
+    assert_eq!(progress.item_details[0].durability, Some(700));
+    assert_eq!(progress.item_details[0].slot, square);
+
+    let mut after = playing(&world);
+
+    after.restore_progress(&progress, &world);
+    after.restore_items(&items, &world);
+
+    let restored = after.slot(square).filter(|entity| *entity != 0).expect("the pick is back");
+
+    assert_eq!(after.durability_of(restored, &world).unwrap().durability, 700);
+}
