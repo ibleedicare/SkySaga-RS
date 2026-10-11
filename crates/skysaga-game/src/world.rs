@@ -307,6 +307,40 @@ impl World {
         self.durable_item_definition.as_ref()
     }
 
+    /// This world again, as the destination of a portal.
+    ///
+    /// **The same island under another name.** The terrain and the props are copied, and only
+    /// what the client resolves the world from changes: the adventure in `ServerInfo`, the
+    /// biome in `MapDefinition`, and the home flags, which follow the adventure's kind. Nothing
+    /// an adventure is made of exists yet, so this is an empty stage with the right sky. Its
+    /// edits are its own, so digging there leaves the home island alone.
+    pub fn for_adventure(&self, adventure: Option<&str>, biome: &str) -> World {
+        let mut world = self.clone();
+
+        world.changes = Arc::new(Mutex::new(WorldChanges::default()));
+
+        // A quest world, unless the adventure says otherwise.
+        let world_type = adventure
+            .and_then(|adventure| self.geodata.world_type_for_adventure(adventure))
+            .unwrap_or(2);
+
+        // The client looks an adventure up inside a biome, so the map's biome is the one that
+        // holds it; a portal onto a bare biome names that biome.
+        let map_biome = adventure
+            .and_then(|adventure| self.geodata.biome_for_adventure(adventure))
+            .unwrap_or(biome)
+            .to_owned();
+
+        world.server_info.biome = biome.to_owned();
+        world.server_info.adventure = adventure.map(skysaga_core::name_hash);
+        world.server_info.is_home_world = world_type == 1;
+        world.server_info.is_my_world = world_type == 1;
+        world.map.biome = Some(skysaga_core::name_hash(&map_biome));
+        world.adventure = adventure.unwrap_or(biome).to_owned();
+
+        world
+    }
+
     /// The definition for a stack that wears out and names its materials.
     pub fn material_durable_item_definition(&self) -> Option<&EntityDefinition> {
         self.material_durable_item_definition.as_ref()

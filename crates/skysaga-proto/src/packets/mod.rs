@@ -45,7 +45,7 @@ pub use mail::{
 pub use movement::{EntityMoved, LookAtMode, SetLookAtDirection};
 pub use photo::{NotifyPhotoCaptured, PhotoValidated};
 pub use todo_list::{ItemObjective, TodoListTaskAdd, TodoListTaskRef, TodoTask, ValueObjective};
-pub use transfer::TransferToServer;
+pub use transfer::{TeleportBegins, TransferToServer};
 pub use voxel::{
     ActionLocation, BlockSide, ChunkEdit, PartialChunkEditsSync, PerformAlwaysActions,
     PerformVoxelActions,

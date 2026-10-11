@@ -115,3 +115,126 @@ fn something_that_is_not_a_stone_opens_nothing() {
     assert!(session.handle(ClientPacket::parse(&STONE_USED), &world).is_empty());
     assert!(session.portal(portal).is_none());
 }
+
+// --- going through ------------------------------------------------------------------------
+
+use skysaga_game::Destination;
+use skysaga_proto::packets::movement::EntityMoved;
+use skysaga_proto::packets::{TeleportBegins, TransferToServer};
+
+fn ids(burst: &[Vec<u8>]) -> Vec<u16> {
+    burst
+        .iter()
+        .filter_map(|bytes| BitReader::from_bytes(bytes).read_packet_id().ok())
+        .collect()
+}
+
+/// Report the player at `position`, as its own client does many times a second.
+fn walk_to(session: &mut Session, world: &World, position: [u32; 3]) -> Vec<Vec<u8>> {
+    let mut writer = BitWriter::new();
+
+    EntityMoved {
+        entity_id: session.player_entity_id(),
+        position,
+        ..EntityMoved::default()
+    }
+    .encode(&mut writer);
+
+    session.handle(ClientPacket::parse(&writer.into_bytes()), world)
+}
+
+fn an_open_portal(session: &mut Session, world: &World) -> [u32; 3] {
+    let spawned = session.spawn_chest(world, "HomeTeleporter", &[]).expect("defined");
+
+    arm(session, world, "ActivatePortal_ForestCastleAdventure");
+    session.handle(ClientPacket::parse(&STONE_USED), world);
+
+    spawned.position
+}
+
+/// **Walking into an open portal sends nothing** (four seconds of it on 2026-10-11, and only
+/// movement in the log), so the server starts the transfer when the player's own position
+/// report puts them inside. `TeleportBegins` first: the client clears its connection record
+/// on that one and fills it from `TransferToServer`.
+#[test]
+fn stepping_into_an_open_portal_starts_a_transfer() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let portal = an_open_portal(&mut session, &world);
+
+    assert_eq!(ids(&walk_to(&mut session, &world, portal)), vec![TeleportBegins::ID, TransferToServer::ID]);
+
+    assert_eq!(
+        session.take_departure(),
+        Some(Destination::Adventure {
+            biome: "Forest".to_owned(),
+            adventure: Some("Castle_Adventure".to_owned()),
+        }),
+    );
+}
+
+#[test]
+fn standing_in_front_of_it_does_not() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let portal = an_open_portal(&mut session, &world);
+
+    // Three voxels back, which is where a portal is put down in front of the player.
+    let outside = [portal[0], portal[1], portal[2] - 192];
+
+    assert!(walk_to(&mut session, &world, outside).is_empty());
+    assert_eq!(session.take_departure(), None);
+}
+
+#[test]
+fn a_shut_portal_is_a_wall() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let portal = session.spawn_chest(&world, "HomeTeleporter", &[]).expect("defined").position;
+
+    assert!(walk_to(&mut session, &world, portal).is_empty());
+}
+
+/// The client goes on reporting its position while it unloads the world.
+#[test]
+fn a_player_already_leaving_is_not_sent_off_twice() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let portal = an_open_portal(&mut session, &world);
+
+    walk_to(&mut session, &world, portal);
+
+    assert!(walk_to(&mut session, &world, portal).is_empty());
+}
+
+/// `JoinHomeWorld` (84) has no body: it is the pause menu's way back.
+#[test]
+fn asking_to_go_home_starts_a_transfer_home() {
+    let world = world();
+    let mut session = playing(&world);
+
+    // The wire id is the ordinal plus 134.
+    let burst = session.handle(ClientPacket::parse(&[84 + 134]), &world);
+
+    assert_eq!(ids(&burst), vec![TeleportBegins::ID, TransferToServer::ID]);
+    assert_eq!(session.take_departure(), Some(Destination::Home));
+}
+
+/// A destination's world is the home island under another name, for now: the adventure and
+/// the biome the client resolves it from, and no longer anybody's home.
+#[test]
+fn a_destination_is_the_island_as_another_adventure() {
+    let home = world();
+    let keep = home.for_adventure(Some("Castle_Adventure"), "Forest");
+
+    assert_eq!(keep.server_info.adventure, Some(skysaga_core::name_hash("Castle_Adventure")));
+    assert_eq!(keep.server_info.biome, "Forest");
+    assert!(!keep.server_info.is_home_world);
+    assert!(home.server_info.is_home_world);
+    assert_ne!(keep.map.biome, home.map.biome);
+    assert_eq!(keep.chunks.len(), home.chunks.len(), "the same ground, for now");
+}

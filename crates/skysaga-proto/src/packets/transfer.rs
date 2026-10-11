@@ -36,3 +36,18 @@ impl TransferToServer {
         writer.write_u32(self.port as u32);
     }
 }
+
+/// Server → client: a teleport is starting; forget where you are connected.
+///
+/// Empty. The client's handler (`FUN_007851d0`) sets its "teleporting" flag and clears the
+/// world-connection record that [`TransferToServer`] then fills, so this one goes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TeleportBegins;
+
+impl TeleportBegins {
+    pub const ID: u16 = 22;
+
+    pub fn encode(&self, writer: &mut BitWriter) {
+        writer.write_packet_id(Self::ID);
+    }
+}
