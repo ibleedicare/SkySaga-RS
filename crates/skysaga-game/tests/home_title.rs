@@ -5,7 +5,7 @@
 //! sends `EquippedItemUsed` naming `Learn_HomeIslandTitle` and then `PerformAlwaysActions`;
 //! neither names a title, so the server chooses.
 
-use skysaga_game::{pick_home_title, ClientPacket, Session, World, WorldConfig};
+use skysaga_game::{deed_title, ClientPacket, Session, World, WorldConfig};
 use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::packets::combat::EquippedItemUsed;
 use skysaga_proto::packets::{EntityAdd, EntitySync};
@@ -123,8 +123,12 @@ fn a_deed_gives_the_island_a_title_and_is_spent() {
 
     let (entity, title) = world.home_title().expect("the island was given a title");
 
-    assert_ne!(title, "Home", "a deed changes what the island is called");
-    assert!(world.geodata.home_titles().contains(&title));
+    assert_eq!(
+        Some(title.as_str()),
+        deed_title(world.geodata.home_titles(), deed),
+        "the island takes the title the deed named",
+    );
+    assert_ne!(title, "Home");
 
     // New to the client, and synced as well: the sync is what redraws the banner.
     assert!(about(&burst, EntityAdd::ID).contains(&entity));
@@ -145,14 +149,14 @@ fn a_second_deed_changes_the_title_without_a_second_entity() {
     let (mut session, _) = join(&world);
     let (entity, _) = world.home_title().unwrap();
 
-    session.give(DEED, 1);
+    let deed = session.give(DEED, 1).expect("the deed is an item");
 
     let burst = use_a_deed(&mut session, &world);
 
     let (after, title) = world.home_title().unwrap();
 
     assert_eq!(after, entity);
-    assert_ne!(title, "Castle");
+    assert_eq!(Some(title.as_str()), deed_title(world.geodata.home_titles(), deed));
     assert!(!about(&burst, EntityAdd::ID).contains(&entity));
     assert!(about(&burst, EntitySync::ID).contains(&entity));
 }
@@ -186,14 +190,40 @@ fn a_title_does_not_follow_the_player_through_a_portal() {
 }
 
 #[test]
-fn the_title_picked_is_never_the_one_already_held() {
+fn a_deed_names_one_title_and_never_home() {
     let titles: Vec<String> = ["Home", "Castle", "Fort"].map(str::to_owned).to_vec();
 
-    for seed in 0..20 {
-        assert_ne!(pick_home_title(&titles, "Castle", seed).as_deref(), Some("Castle"));
-    }
+    assert_eq!(deed_title(&titles, 10), Some("Castle"));
+    assert_eq!(deed_title(&titles, 11), Some("Fort"));
+    assert_eq!(deed_title(&titles, 10), deed_title(&titles, 10), "the same deed, the same title");
+    assert_eq!(deed_title(&["Home".to_owned()], 3), None);
+}
 
-    assert_eq!(pick_home_title(&titles, "Home", 0).as_deref(), Some("Castle"));
-    assert_eq!(pick_home_title(&titles, "Home", 1).as_deref(), Some("Fort"));
-    assert_eq!(pick_home_title(&["Home".to_owned()], "Home", 0), None);
+/// "'%S' Title Deed" with the name left blank is a deed sent as a plain item (seen
+/// 2026-10-11). The title is the `teachitemcrc` of a `TeacherInventoryItem`.
+#[test]
+fn a_deed_is_announced_as_an_item_that_teaches_its_title() {
+    let world = island(None);
+    let (mut session, _) = join(&world);
+
+    let deed = session.give(DEED, 1).expect("the deed is an item");
+    let dirt = session.give("Dirt", 1).expect("dirt is an item");
+
+    let kind = |session: &mut Session, stack: u32| {
+        session
+            .announce_item(stack, &world)
+            .iter()
+            .find_map(|bytes| {
+                let mut reader = BitReader::from_bytes(bytes);
+
+                (reader.read_packet_id().ok()? == EntityAdd::ID)
+                    .then(|| EntityAdd::decode(&mut reader).ok())
+                    .flatten()
+                    .filter(|add| add.id == stack)
+                    .and_then(|add| add.name_hash)
+            })
+    };
+
+    assert_eq!(kind(&mut session, deed), Some(skysaga_core::name_hash("TeacherInventoryItem")));
+    assert_ne!(kind(&mut session, dirt), Some(skysaga_core::name_hash("TeacherInventoryItem")));
 }
