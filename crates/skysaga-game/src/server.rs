@@ -630,6 +630,36 @@ impl GameServer {
 
                 info!(%account, raise_on_close, "lid mode");
             }
+
+            AdminCommand::Portal {
+                account,
+                state,
+                biome,
+                adventure,
+            } => {
+                let Some((guid, session)) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|(_, session)| session.account() == Some(account.as_str()))
+                else {
+                    warn!(%account, "cannot set a portal: that player is not connected");
+
+                    return;
+                };
+
+                let packets = session.set_last_portal(
+                    state,
+                    biome.as_deref().map(skysaga_core::name_hash),
+                    adventure.as_deref().map(skysaga_core::name_hash),
+                    &self.world,
+                );
+
+                info!(%account, state, ?biome, ?adventure, packets = packets.len(), "portal");
+
+                for packet in packets {
+                    self.peer.send(*guid, &packet);
+                }
+            }
         }
     }
 

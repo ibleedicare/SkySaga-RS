@@ -416,3 +416,16 @@ fn the_durable_items_are_tools_and_armour() {
         durable.len(),
     );
 }
+
+/// A portal stone's action names where it leads. 23 rows; twelve name only a biome.
+#[test]
+fn a_portal_action_names_its_destination() {
+    let Some(geo) = geodata() else { return };
+
+    assert_eq!(
+        geo.portal_destination("ActivatePortal_ForestCastleAdventure"),
+        Some(("Forest", Some("Castle_Adventure"))),
+    );
+    assert_eq!(geo.portal_destination("ActivatePortal_Forest"), Some(("Forest", None)));
+    assert_eq!(geo.portal_destination("Basic_Chop_Pick"), None);
+}

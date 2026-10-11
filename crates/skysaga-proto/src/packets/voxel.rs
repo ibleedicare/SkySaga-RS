@@ -85,6 +85,11 @@ impl ActionLocation {
         }
     }
 
+    /// The slot's number, as other packets key it (`EquippedItemUsed.location`).
+    pub fn bits(self) -> u32 {
+        self.to_bits()
+    }
+
     fn to_bits(self) -> u32 {
         match self {
             Self::LeftHand => 0,
@@ -316,5 +321,58 @@ impl PartialChunkEditsSync {
         writer.write_bits_le(Self::DEFAULT_COUNT - 1, width);
         writer.write_bit(true);
         writer.write_u32(count);
+    }
+}
+
+/// `PerformAlwaysActions` (19): the item in a hand was used on nothing in particular.
+///
+/// What a portal stone sends when it is used: the client names no target, only where the
+/// player's hand was and which way it pointed. Sender `FUN_007e9ad0`, four fields, each
+/// written by a helper another packet already uses:
+///
+/// ```text
+/// location   4 bits     FUN_00793160
+/// position   3 x 17     FUN_00791ab0, 1/64 voxel
+/// direction  3 x 8      FUN_00791c20, (v - 64) / 64
+/// power      6 bits     FUN_007e9290
+/// ```
+///
+/// Seen once, 2026-10-11, from a `Portal_Castle_Adv` in the left hand:
+/// `00 01 02 98 20 00 40 80 81 01 00` after the id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerformAlwaysActions {
+    pub location: ActionLocation,
+    pub position: [u32; 3],
+    /// Each axis as the client wrote it, 0 to 128 with 64 meaning zero.
+    pub direction: [u32; 3],
+    pub power: u32,
+}
+
+impl PerformAlwaysActions {
+    pub const ID: u16 = 19;
+
+    pub fn decode(reader: &mut BitReader) -> Result<Self, BitError> {
+        let location = ActionLocation::from_bits(reader.read_bits_le(ActionLocation::BITS)?);
+
+        let mut position = [0u32; 3];
+
+        for axis in &mut position {
+            *axis = reader.read_bits_le(POSITION_BITS)?;
+        }
+
+        let mut direction = [0u32; 3];
+
+        for axis in &mut direction {
+            *axis = reader.read_bits_le(DIRECTION_BITS)?;
+        }
+
+        let power = reader.read_bits_le(COORDINATE_BITS)?;
+
+        Ok(Self {
+            location,
+            position,
+            direction,
+            power,
+        })
     }
 }
