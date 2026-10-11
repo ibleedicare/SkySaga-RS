@@ -314,7 +314,7 @@ impl World {
     /// biome in `MapDefinition`, and the home flags, which follow the adventure's kind. Nothing
     /// an adventure is made of exists yet, so this is an empty stage with the right sky. Its
     /// edits are its own, so digging there leaves the home island alone.
-    pub fn for_adventure(&self, adventure: Option<&str>, biome: &str) -> World {
+    pub fn for_adventure(&self, adventure: Option<&str>, biome: &str, name_entity: u32) -> World {
         let mut world = self.clone();
 
         world.changes = Arc::new(Mutex::new(WorldChanges::default()));
@@ -337,6 +337,20 @@ impl World {
         world.server_info.is_my_world = world_type == 1;
         world.map.biome = Some(skysaga_core::name_hash(&map_biome));
         world.adventure = adventure.unwrap_or(biome).to_owned();
+
+        // Outside a home island the banner is composed from an `AdventureName` entity, and
+        // only on entering gameplay. Without one the client leaves the banner as it was,
+        // which after a portal still reads "<name>'s Home".
+        if let Some(definition) = self.definitions.get("AdventureName") {
+            let name = Component::AdventureName(skysaga_world::AdventureNameComponent {
+                seed: skysaga_core::name_hash(&world.adventure),
+                template: vec![skysaga_world::NamePart::Prefix, skysaga_world::NamePart::Biome],
+            });
+
+            world
+                .entities
+                .push(Entity::new(name_entity, vec![name]).to_entity_add(definition));
+        }
 
         world
     }
