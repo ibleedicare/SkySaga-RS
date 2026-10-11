@@ -921,3 +921,50 @@ fn falling_until_the_health_runs_out_raises_the_death_screen() {
 
     assert_eq!(session.player_health(), session.player_max_health());
 }
+
+/// A blow that lands wears the weapon that struck, one point as a dug block wears a pick.
+#[test]
+fn a_landed_blow_wears_the_sword_that_struck() {
+    use skysaga_proto::packets::crafting::ItemSpec;
+    use skysaga_proto::packets::inventory::RequestUiSettingsSlotChange;
+
+    let world = world();
+    let mut session = playing(&world);
+
+    let knight = creature_in_front(&mut session, &world, "Knight");
+    let sword = session.give("Metal_Sword", 1).expect("a sword");
+    let new = session.durability_of(sword, &world).expect("a sword wears").durability;
+
+    // Bare-handed first: nothing to wear, and the sword in the rucksack is left alone.
+    swing_at(&mut session, &world, "Basic_Diagonal", knight, in_front());
+
+    assert_eq!(session.durability_of(sword, &world).unwrap().durability, new);
+
+    let item_uuid = session.inventories().item(sword).expect("the stack").slot_data.item_uuid.clone();
+
+    session.handle(
+        ClientPacket::parse(&encode(|w| {
+            RequestUiSettingsSlotChange {
+                slot: 0,
+                hand: 0,
+                item_spec: ItemSpec {
+                    resource: Some(skysaga_core::name_hash("Metal_Sword")),
+                    item_uuid,
+                    ..ItemSpec::default()
+                },
+            }
+            .encode(w)
+        })),
+        &world,
+    );
+
+    let replies = swing_at(&mut session, &world, "Basic_Diagonal", knight, in_front());
+
+    assert_eq!(session.durability_of(sword, &world).unwrap().durability, new - 1);
+    assert!(synced(&replies).contains(&sword), "the client is told the sword wore");
+
+    // A swing that hits nothing costs nothing.
+    arm(&mut session, &world, "Basic_Diagonal");
+
+    assert_eq!(session.durability_of(sword, &world).unwrap().durability, new - 1);
+}
