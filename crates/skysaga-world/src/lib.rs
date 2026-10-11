@@ -12,7 +12,7 @@ pub mod loot;
 pub mod terrain;
 
 pub use components::{
-    AdventureNameComponent, CharacterCustomisationComponent, Component, NamePart, CraftingComponent, CraftingDropSlotsComponent,
+    AdventureNameComponent, HomeIslandCustomisationComponent, CharacterCustomisationComponent, Component, NamePart, CraftingComponent, CraftingDropSlotsComponent,
     CraftingSlot, Currency, DurabilityComponent,
     FeatureUnlockComponent, HealthComponent, InteractionComponent, InventoryComponent,
     InventoryItemComponent, JobRank, JobRankComponent, MailBoxComponent, MailItem, MaterialCompositionComponent, TeleporterComponent, OwnerComponent, PhysicsComponent,

@@ -338,6 +338,11 @@ impl World {
         world.map.biome = Some(skysaga_core::name_hash(&map_biome));
         world.adventure = adventure.unwrap_or(biome).to_owned();
 
+        // The island's title stays on the island.
+        let title = skysaga_core::name_hash("HomeIslandCustomisation");
+
+        world.entities.retain(|entity| entity.name_hash != Some(title));
+
         // Outside a home island the banner is composed from an `AdventureName` entity, and
         // only on entering gameplay. Without one the client leaves the banner as it was,
         // which after a portal still reads "<name>'s Home".
@@ -477,6 +482,10 @@ pub struct WorldConfig {
     pub owner_guid: String,
     pub owner_name: String,
 
+    /// A `HomeIslandTitles` name, such as `Castle`: the banner then reads "<owner>'s Castle".
+    /// The client says "Home" when the island has none.
+    pub home_title: Option<String>,
+
     /// The biome **name** `ServerInfo` carries.
     ///
     /// Cosmetic: the client has no cross-reference to this string at all. It is sent because
@@ -564,6 +573,7 @@ impl WorldConfig {
 
         Self {
             owner_name: std::env::var("SKYSAGA_PLAYER_NAME").unwrap_or(defaults.owner_name),
+            home_title: std::env::var("SKYSAGA_HOME_TITLE").ok().filter(|title| !title.is_empty()),
             adventure: std::env::var("SKYSAGA_ADVENTURE").unwrap_or(defaults.adventure),
             biome: std::env::var("SKYSAGA_BIOME").unwrap_or(defaults.biome),
             spawn_clearance: parse("SKYSAGA_SPAWN_CLEARANCE", defaults.spawn_clearance),
@@ -591,6 +601,7 @@ impl Default for WorldConfig {
             owner_guid: String::new(),
             // The C#'s defaults, so a comparison against its capture is like for like.
             owner_name: "Adventurer".to_owned(),
+            home_title: None,
             biome: "Desert".to_owned(),
             map_biome: "Sky_Island".to_owned(),
             chat_host: "127.0.0.1".to_owned(),
@@ -747,6 +758,17 @@ impl World {
         // path reachable -- without it, every interaction assertion is vacuous and the client
         // has nothing to press E on.
         //
+        if let Some(title) = &config.home_title {
+            add(
+                "HomeIslandCustomisation",
+                vec![Component::HomeIslandCustomisation(
+                    skysaga_world::HomeIslandCustomisationComponent {
+                        title: Some(skysaga_core::name_hash(title)),
+                    },
+                )],
+            );
+        }
+
         // Kept un-encoded as well as encoded, for the same reason as the player: what is in it
         // and whether its lid is shut both change while the server runs.
         let mut containers = Vec::new();
