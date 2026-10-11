@@ -128,7 +128,8 @@ pub struct InventorySlotData {
     pub unknown3: bool,
     /// Unnamed in the C#. Zero in everything observed.
     pub unknown4: u32,
-    /// Unnamed in the C#. Zero in everything observed.
+    /// Unnamed in the C#. The client seeds its choice of repair and dismantle components with
+    /// it (`InventoryItemComponent +0x40`, read by `FUN_008d7370`); this server sends 0.
     pub unknown5: u32,
 
     /// This stack's own identity, so the client can tell two piles of dirt apart.
