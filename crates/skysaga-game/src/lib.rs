@@ -69,7 +69,7 @@ use skysaga_proto::packets::{
     BeginSync, EntityAdd, EntityRemoved, EntitySync, CharacterCreationResponse,
     ClientEntitiesSyncFinished, CreateHomeworld, DebugRequestFinishTutorial, NotifyPhotoCaptured,
     PhotoValidated, SaveCharacterName, SetCharacterCustomisationData, SetClientEntity,
-    TimeSync, TransferToServer,
+    TeleportBegins, TimeSync, TransferToServer,
 };
 use skysaga_world::geodata::EquippedAction;
 use skysaga_world::loot::Seeded;
@@ -234,6 +234,39 @@ pub const UNHANDLED_SAMPLES: usize = 8;
 /// that one line stays one line.
 pub const UNKNOWN_PAYLOAD_BYTES: usize = 24;
 
+/// `JoinHomeWorld`'s ordinal. The packet has no body, so it has no type of its own.
+const JOIN_HOME_WORLD: u16 = 84;
+
+/// How close to an open portal's middle counts as inside it, in position units (1/64 voxel).
+///
+/// `portalbounds` is `[3, 8, 3]` voxels in the data file, so half its width, and all of its
+/// height.
+const PORTAL_REACH: i64 = 96;
+const PORTAL_HEIGHT: i64 = 512;
+
+/// Where a player has just set off for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    Home,
+    /// A biome, and an adventure for the portals that open onto a particular one.
+    Adventure {
+        biome: String,
+        adventure: Option<String>,
+    },
+}
+
+impl Destination {
+    /// A name for the world this leads to, the same for every player going there.
+    pub fn key(&self) -> Option<String> {
+        match self {
+            Self::Home => None,
+            Self::Adventure { biome, adventure } => {
+                Some(format!("{}/{}", biome, adventure.as_deref().unwrap_or("")))
+            }
+        }
+    }
+}
+
 /// The `teleporterstate` that opens a portal.
 ///
 /// Swept in front of the client on 2026-10-11. From shut, 3 parts the frame and within a few
@@ -373,6 +406,8 @@ pub enum ClientPacket {
 
     /// 151 — a block was placed or broken. Every build action ends up here.
     PerformVoxelActions(PerformVoxelActions),
+    /// 84 -- "take me home", from the pause menu or an adventure's results screen. No body.
+    JoinHomeWorld,
     /// 19 -- the item in a hand was used on nothing in particular: a portal stone.
     PerformAlwaysActions(PerformAlwaysActions),
 
@@ -571,6 +606,8 @@ impl ClientPacket {
             InteractWithEntity::ID => InteractWithEntity::decode(&mut reader)
                 .map(Self::InteractWithEntity)
                 .unwrap_or(Self::unknown(wire_id, bytes)),
+
+            JOIN_HOME_WORLD => Self::JoinHomeWorld,
 
             PerformAlwaysActions::ID => PerformAlwaysActions::decode(&mut reader)
                 .map(Self::PerformAlwaysActions)
@@ -801,6 +838,18 @@ pub struct Session {
     /// The state of each portal this session has changed, by entity.
     portals: std::collections::HashMap<u32, skysaga_world::TeleporterComponent>,
 
+    /// Where each open portal leads, by entity: the names the hashes above were made from.
+    portal_destinations: std::collections::HashMap<u32, Destination>,
+
+    /// Where this player has just set off for, until the server takes note of it.
+    departure: Option<Destination>,
+
+    /// Whether the server has been told about `departure`.
+    departure_reported: bool,
+
+    /// Which world this connection is in: `None` for the home island.
+    world_key: Option<String>,
+
     /// What is left of each tool that has been used, by item entity.
     ///
     /// Only the worn ones: a stack that is not here is as new as its data says.
@@ -947,6 +996,10 @@ impl Session {
             dig_damage: std::collections::HashMap::new(),
             wear: std::collections::HashMap::new(),
             portals: std::collections::HashMap::new(),
+            portal_destinations: std::collections::HashMap::new(),
+            departure: None,
+            departure_reported: false,
+            world_key: None,
             spawned: Vec::new(),
             player_damage: 0,
             armed: std::collections::HashMap::new(),
@@ -1839,9 +1892,19 @@ impl Session {
                 if packet.entity_id == self.player_entity_id {
                     self.position = Some(packet.position);
                     self.facing_yaw = Some(packet.yaw);
+
+                    // Walking into an open portal sends nothing of its own, so this is where
+                    // the server notices.
+                    return self.step_through_a_portal(world);
                 }
 
                 Vec::new()
+            }
+
+            (ClientPacket::JoinHomeWorld, _) => {
+                info!("going home");
+
+                self.depart(Destination::Home, world)
             }
 
             (ClientPacket::SetLookAtDirection(packet), _) => {
@@ -4860,6 +4923,14 @@ impl Session {
 
         info!(portal, %biome, ?adventure, "portal opened");
 
+        self.portal_destinations.insert(
+            portal,
+            Destination::Adventure {
+                biome: biome.clone(),
+                adventure: adventure.clone(),
+            },
+        );
+
         self.set_portal(
             portal,
             PORTAL_OPEN,
@@ -4867,6 +4938,96 @@ impl Session {
             adventure.as_deref().map(skysaga_core::name_hash),
             world,
         )
+    }
+
+    /// Send the player through, if they are standing in an open portal.
+    ///
+    /// Once: the first step inside starts the transfer and nothing more is sent until the
+    /// client has gone.
+    fn step_through_a_portal(&mut self, world: &World) -> Vec<Vec<u8>> {
+        if self.departure.is_some() {
+            return Vec::new();
+        }
+
+        let Some(position) = self.position else {
+            return Vec::new();
+        };
+
+        let entered = self.spawned.iter().find_map(|container| {
+            let destination = self.portal_destinations.get(&container.id)?;
+
+            let open = self
+                .portals
+                .get(&container.id)
+                .is_some_and(|portal| (PORTAL_OPEN..=5).contains(&portal.state));
+
+            let at = container.entity.components.iter().find_map(|component| match component {
+                Component::Transform(transform) => Some(transform.position),
+                _ => None,
+            })?;
+
+            let apart = |axis: usize| (i64::from(position[axis]) - i64::from(at[axis])).abs();
+
+            (open && apart(0) <= PORTAL_REACH && apart(2) <= PORTAL_REACH && apart(1) <= PORTAL_HEIGHT)
+                .then(|| destination.clone())
+        });
+
+        match entered {
+            Some(destination) => {
+                info!(?destination, "stepped through a portal");
+
+                self.depart(destination, world)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Start a transfer: tell the client a teleport is beginning and where to reconnect.
+    ///
+    /// There is one server, so the address is this one; which world the player finds there is
+    /// the server's to arrange from [`Self::take_departure`]. `TeleportBegins` goes first: the
+    /// client clears its connection record on it and fills it from `TransferToServer`.
+    fn depart(&mut self, destination: Destination, world: &World) -> Vec<Vec<u8>> {
+        self.departure = Some(destination);
+
+        vec![
+            encode(|w| TeleportBegins.encode(w)),
+            encode(|w| {
+                TransferToServer {
+                    server_uuid: uuid::Uuid::new_v4().to_string(),
+                    world_uuid: uuid::Uuid::new_v4().to_string(),
+                    ip: world.transfer_ip.clone(),
+                    port: world.transfer_port,
+                }
+                .encode(w)
+            }),
+        ]
+    }
+
+    /// Where this player has set off for since the last time this was asked.
+    ///
+    /// The server reads it after each packet: the destination decides which world the player's
+    /// next connection is given.
+    pub fn take_departure(&mut self) -> Option<Destination> {
+        if self.departure_reported {
+            return None;
+        }
+
+        // `departure` itself stays set, so a player already leaving is not sent off twice;
+        // the session ends with the connection.
+        self.departure_reported = self.departure.is_some();
+
+        self.departure.clone()
+    }
+
+    /// The world this connection was put in: `None` for the home island.
+    pub fn world_key(&self) -> Option<&str> {
+        self.world_key.as_deref()
+    }
+
+    /// Say which world this connection is in.
+    pub fn set_world_key(&mut self, key: Option<String>) {
+        self.world_key = key;
     }
 
     /// Set the state and destination of the last entity spawned in front of the player, and

@@ -14,7 +14,7 @@ use skysaga_world::Component;
 use skysaga_state::{AdminCommand, AppState, PlayerSummary, ServerSnapshot, WorldSummary};
 use tracing::{info, warn};
 
-use crate::{encode, ClientPacket, Session, World};
+use crate::{encode, ClientPacket, Destination, Session, World};
 
 /// The port the client is told to connect to by `game-conductor/retrieve`.
 pub const DEFAULT_PORT: u16 = 42069;
@@ -62,9 +62,34 @@ mod relayed {
     pub const SET_PLAYER_STATE: u16 = 35;
 }
 
+/// The world a connection is in: the one its key names, or home.
+///
+/// A function over the two fields rather than a method, so it can be called while `sessions`
+/// is borrowed mutably.
+fn world_of<'a>(
+    home: &'a World,
+    adventures: &'a HashMap<String, World>,
+    key: Option<&str>,
+) -> &'a World {
+    key.and_then(|key| adventures.get(key)).unwrap_or(home)
+}
+
 pub struct GameServer {
     peer: Peer,
     world: World,
+
+    /// The worlds portals lead to, by [`Destination::key`], made the first time one is needed.
+    ///
+    /// One process hosts them all: a player going through a portal is sent back to this same
+    /// address and finds a different world there.
+    adventures: HashMap<String, World>,
+
+    /// Where each account is headed, for the connection it is about to make.
+    ///
+    /// A connection carries no account and no destination; both are joined to it when it
+    /// arrives. An account not listed here goes home.
+    destinations: HashMap<String, Destination>,
+
     sessions: HashMap<Guid, Session>,
 
     /// Each connection's player body, by connection.
@@ -120,6 +145,8 @@ impl GameServer {
         Ok(Self {
             peer,
             world,
+            adventures: HashMap::new(),
+            destinations: HashMap::new(),
             sessions: HashMap::new(),
             bodies: HashMap::new(),
             next_entity_id,
@@ -388,7 +415,30 @@ impl GameServer {
                     // world as the character they created rather than as the defaults.
                     session.restore(Self::stored_profile(&self.state, account.as_deref()));
 
-                    let body = self.world.player_body(session.character(), entity_id, &[]);
+                    // Which world: wherever this account set off for, or home.
+                    let destination = account
+                        .as_deref()
+                        .and_then(|account| self.destinations.remove(account));
+
+                    if let Some(Destination::Adventure { biome, adventure }) = &destination {
+                        let key = destination.as_ref().and_then(Destination::key).unwrap_or_default();
+
+                        if !self.adventures.contains_key(&key) {
+                            info!(%key, "opening a world");
+
+                            self.adventures.insert(
+                                key.clone(),
+                                self.world.for_adventure(adventure.as_deref(), biome),
+                            );
+                        }
+
+                        info!(guid = guid.0, %key, "arriving through a portal");
+
+                        session.set_world_key(Some(key));
+                    }
+
+                    let body = world_of(&self.world, &self.adventures, session.world_key())
+                        .player_body(session.character(), entity_id, &[]);
 
                     self.sessions.insert(guid, session);
                     self.bodies.insert(guid, body.clone());
@@ -454,7 +504,14 @@ impl GameServer {
                     // another's body. Hand the session the allocator, then take it back.
                     session.reserve_ids_from(self.next_entity_id);
 
-                    let replies = session.handle_with(incoming, &self.world, &others);
+                    let world = world_of(&self.world, &self.adventures, session.world_key());
+
+                    let replies = session.handle_with(incoming, world, &others);
+
+                    // A player who has just set off reconnects without asking the conductor,
+                    // exactly as after creating a homeworld: the slot is reserved here, and
+                    // the destination is kept for the connection that claims it.
+                    let departure = session.take_departure();
 
                     self.next_entity_id = self.next_entity_id.max(session.next_entity_id());
 
@@ -468,11 +525,18 @@ impl GameServer {
                         }
                     }
 
+                    if let (Some(destination), Some(account)) = (departure, &account) {
+                        info!(%account, ?destination, "setting off");
+
+                        self.state.reserve_slot(account);
+                        self.destinations.insert(account.clone(), destination);
+                    }
+
                     // The body other players see is built from the profile, and the profile
                     // has just changed. Rebuilding it here keeps them from seeing whatever
                     // this player looked like when they first connected.
                     if let Some(body) = self.bodies.get_mut(&guid) {
-                        *body = self.world.player_body(&profile, body.id, &inventory);
+                        *body = world.player_body(&profile, body.id, &inventory);
                     }
 
                     // Movement is not interpreted, only passed on: the sender has already
