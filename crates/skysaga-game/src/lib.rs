@@ -274,6 +274,25 @@ impl Destination {
 /// shut one parts the frame and shows nothing. 0, 1, 2, 6, 7 and 8 leave it shut.
 pub const PORTAL_OPEN: u32 = 3;
 
+/// The action a title deed arms, and the item that is spent on it.
+const LEARN_HOME_TITLE: &str = "Learn_HomeIslandTitle";
+const HOME_TITLE_DEED: &str = "HomeIslandTitleDeed";
+
+/// What the client calls an island that has no title.
+const DEFAULT_HOME_TITLE: &str = "Home";
+
+/// A title other than `current`, or none if there is no other.
+///
+/// The same seed gives the same title, so a test can say which.
+pub fn pick_home_title(titles: &[String], current: &str, seed: u32) -> Option<String> {
+    let others: Vec<&String> = titles
+        .iter()
+        .filter(|title| !title.eq_ignore_ascii_case(current))
+        .collect();
+
+    (!others.is_empty()).then(|| others[seed as usize % others.len()].clone())
+}
+
 /// Which of the two drop squares is counting components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Salvage {
@@ -1603,6 +1622,11 @@ impl Session {
                     if let Some((built, definition)) = self.entity_now(id, world) {
                         out.push(encode(|w| built.to_entity_add(definition).encode(w)));
                     }
+                }
+
+                // What the island calls itself, if it has been given a title.
+                if let Some((title, definition)) = world.home_title_entity() {
+                    out.push(encode(|w| title.to_entity_add(definition).encode(w)));
                 }
 
                 // ...and anything lying on the floor. Two entities each, **the stack before the
@@ -3825,6 +3849,10 @@ impl Session {
         entity: u32,
         world: &'a World,
     ) -> Option<(Entity, &'a skysaga_world::EntityDefinition)> {
+        if world.home_title().is_some_and(|(id, _)| id == entity) {
+            return world.home_title_entity();
+        }
+
         if entity == self.player_entity_id {
             let (mut player, definition) =
                 world.player_entity(&self.character, entity, self.inventory())?;
@@ -4897,6 +4925,10 @@ impl Session {
             return Vec::new();
         };
 
+        if action == LEARN_HOME_TITLE {
+            return self.learn_home_title(world);
+        }
+
         let Some((biome, adventure)) = world.geodata.portal_destination(&action) else {
             debug!(%action, "an always-action that is not a portal stone");
 
@@ -4938,6 +4970,70 @@ impl Session {
             adventure.as_deref().map(skysaga_core::name_hash),
             world,
         )
+    }
+
+    /// A title deed was used: the island takes a new title, and the deed is spent.
+    ///
+    /// The client names no title (seen 2026-10-11: `EquippedItemUsed` with
+    /// `Learn_HomeIslandTitle`, then `PerformAlwaysActions`), so which one is the server's to
+    /// decide. One the island does not already carry, drawn from `HomeIslandTitles`.
+    ///
+    /// Only on a home island: elsewhere there is no title to change and the deed is kept.
+    fn learn_home_title(&mut self, world: &World) -> Vec<Vec<u8>> {
+        if !world.server_info.is_home_world {
+            debug!("a title deed used away from home");
+
+            return Vec::new();
+        }
+
+        let current = world
+            .home_title()
+            .map_or_else(|| DEFAULT_HOME_TITLE.to_owned(), |(_, title)| title);
+
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+
+        let Some(title) = pick_home_title(world.geodata.home_titles(), &current, seed) else {
+            debug!("no other title to give");
+
+            return Vec::new();
+        };
+
+        let spent = self.take_one(skysaga_core::name_hash(HOME_TITLE_DEED));
+
+        if spent.is_empty() {
+            debug!("a title was asked for with no deed in the rucksack");
+
+            return Vec::new();
+        }
+
+        let mut out = self.apply(spent, world);
+
+        let fresh = self.inventories.next_entity_id();
+        let (entity, new) = world.set_home_title(&title, fresh);
+
+        if new {
+            self.inventories.reserve_ids_from(fresh + 1);
+        }
+
+        info!(%title, entity, "the island has a new title");
+
+        // The banner is redrawn by the entity's sync, so one follows even a fresh add.
+        let mut announced = Vec::new();
+
+        if new {
+            if let Some((built, definition)) = world.home_title_entity() {
+                announced.push(encode(|w| built.to_entity_add(definition).encode(w)));
+            }
+        }
+
+        announced.extend(self.sync_of(entity, &["title"], world));
+
+        self.broadcasts.extend(announced.iter().cloned());
+        out.extend(announced);
+
+        out
     }
 
     /// Send the player through, if they are standing in an open portal.

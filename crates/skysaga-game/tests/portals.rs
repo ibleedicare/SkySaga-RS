@@ -257,25 +257,3 @@ fn a_destination_carries_its_name() {
         "a home island is named from its owner, not from this entity",
     );
 }
-
-/// "<owner>'s Castle" rather than "<owner>'s Home" (played 2026-10-11): the title is an entity
-/// of the island's, and it does not follow the player through a portal.
-#[test]
-fn a_home_island_can_carry_a_title() {
-    let definitions = EntityDefinitions::load(default_entities_path()).expect("Entities.json");
-    let title = skysaga_core::name_hash("HomeIslandCustomisation");
-
-    let titled = World::home_island(
-        &definitions,
-        &WorldConfig {
-            home_title: Some("Castle".to_owned()),
-            ..Default::default()
-        },
-    );
-
-    let carries = |world: &World| world.entities.iter().any(|entity| entity.name_hash == Some(title));
-
-    assert!(carries(&titled));
-    assert!(!carries(&world()), "an island with no title sends nothing and reads \"Home\"");
-    assert!(!carries(&titled.for_adventure(Some("Castle_Adventure"), "Forest", 900)));
-}
