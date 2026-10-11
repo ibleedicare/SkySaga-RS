@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         state.import_home_title(snapshot.home_title);
         state.import_mail(snapshot.mail);
         state.import_hotbars(snapshot.hotbars);
+        state.import_progress(snapshot.progress);
 
         state
     };

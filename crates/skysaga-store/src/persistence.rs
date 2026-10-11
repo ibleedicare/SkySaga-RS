@@ -84,6 +84,8 @@ async fn apply(store: &dyn Store, change: &Change) -> Result<(), crate::StoreErr
 
         Change::HomeTitle(title) => store.save_home_title(title).await,
 
+        Change::Progress { account, progress } => store.save_progress(account, progress).await,
+
         Change::Mail { account, mail } => store.save_mail(account, mail).await,
     }
 }

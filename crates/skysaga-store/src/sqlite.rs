@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use skysaga_state::{
     AccountRecord, Character, Photo, StoredBinding, StoredBlock, StoredDevice, StoredItem,
+    StoredItemDetail, StoredProgress,
     StoredMail,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -65,6 +66,23 @@ CREATE TABLE IF NOT EXISTS devices (
     z    INTEGER NOT NULL,
     name TEXT NOT NULL,
     PRIMARY KEY (x, y, z)
+);
+
+CREATE TABLE IF NOT EXISTS item_details (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    slot        INTEGER NOT NULL,
+    durability  INTEGER,
+    teaches     INTEGER,
+    PRIMARY KEY (account, slot)
+);
+
+CREATE TABLE IF NOT EXISTS learned_recipes (
+    account     TEXT NOT NULL
+                REFERENCES accounts(key) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    recipe      INTEGER NOT NULL,
+    PRIMARY KEY (account, position)
 );
 
 CREATE TABLE IF NOT EXISTS world_settings (
@@ -344,6 +362,49 @@ impl Store for SqliteStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
+        let mut progress: Vec<(String, StoredProgress)> = Vec::new();
+
+        // Both lists arrive sorted by account, so each lands on the entry it belongs to
+        // whichever table named the account first.
+        let entry = |progress: &mut Vec<(String, StoredProgress)>, account: String| -> usize {
+            match progress.iter().position(|(held, _)| *held == account) {
+                Some(at) => at,
+                None => {
+                    progress.push((account, StoredProgress::default()));
+
+                    progress.len() - 1
+                }
+            }
+        };
+
+        for row in sqlx::query(
+            "SELECT account, slot, durability, teaches FROM item_details ORDER BY account, slot",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let at = entry(&mut progress, row.try_get("account")?);
+
+            progress[at].1.item_details.push(StoredItemDetail {
+                slot: row.try_get::<i64, _>("slot")? as u32,
+                durability: row.try_get::<Option<i64>, _>("durability")?.map(|v| v as u32),
+                teaches: row.try_get::<Option<i64>, _>("teaches")?.map(|v| v as u32),
+            });
+        }
+
+        for row in sqlx::query(
+            "SELECT account, recipe FROM learned_recipes ORDER BY account, position",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let at = entry(&mut progress, row.try_get("account")?);
+
+            progress[at].1.recipes.push(row.try_get::<i64, _>("recipe")? as u32);
+        }
+
+        progress.sort_by(|a, b| a.0.cmp(&b.0));
+
         let home_title = sqlx::query("SELECT value FROM world_settings WHERE key = ?")
             .bind(HOME_TITLE)
             .fetch_optional(&self.pool)
@@ -360,6 +421,7 @@ impl Store for SqliteStore {
             home_title,
             mail,
             hotbars,
+            progress,
         })
     }
 
@@ -540,6 +602,50 @@ impl Store for SqliteStore {
                 .execute(&mut *transaction)
                 .await?;
             }
+        }
+
+        transaction.commit().await?;
+
+        Ok(())
+    }
+
+    /// Delete-then-insert in one transaction, as a rucksack is.
+    async fn save_progress(
+        &self,
+        account: &str,
+        progress: &StoredProgress,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM item_details WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        sqlx::query("DELETE FROM learned_recipes WHERE account = ?")
+            .bind(account)
+            .execute(&mut *transaction)
+            .await?;
+
+        for detail in &progress.item_details {
+            sqlx::query(
+                "INSERT INTO item_details (account, slot, durability, teaches) VALUES (?, ?, ?, ?)",
+            )
+            .bind(account)
+            .bind(detail.slot as i64)
+            .bind(detail.durability.map(|v| v as i64))
+            .bind(detail.teaches.map(|v| v as i64))
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        for (position, recipe) in progress.recipes.iter().enumerate() {
+            sqlx::query("INSERT INTO learned_recipes (account, position, recipe) VALUES (?, ?, ?)")
+                .bind(account)
+                .bind(position as i64)
+                .bind(*recipe as i64)
+                .execute(&mut *transaction)
+                .await?;
         }
 
         transaction.commit().await?;

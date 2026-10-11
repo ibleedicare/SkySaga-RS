@@ -24,6 +24,7 @@ use skysaga_proto::bitstream::{BitReader, BitWriter};
 use skysaga_proto::customisation::CustomisationData;
 use skysaga_state::{
     AccountRecord, Character, Photo, StoredBinding, StoredBlock, StoredDevice, StoredItem,
+    StoredProgress,
     StoredMail,
 };
 use uuid::Uuid;
@@ -68,6 +69,8 @@ pub struct Snapshot {
     pub mail: Vec<(String, Vec<StoredMail>)>,
     /// What each account had bound to its hotbar, by lowercased account name.
     pub hotbars: Vec<(String, Vec<StoredBinding>)>,
+    /// What each account had learned and what its items carried, by lowercased account name.
+    pub progress: Vec<(String, StoredProgress)>,
 }
 
 /// Durable storage for the things a player would be upset to lose.
@@ -108,6 +111,10 @@ pub trait Store: Send + Sync + 'static {
 
     /// Record one device a player placed, replacing whatever stood in that place.
     async fn save_device(&self, device: &StoredDevice) -> Result<(), StoreError>;
+
+    /// Record what an account has learned and what its items carry, replacing what was stored.
+    async fn save_progress(&self, account: &str, progress: &StoredProgress)
+        -> Result<(), StoreError>;
 
     /// Record the home island's title, replacing the one before it.
     async fn save_home_title(&self, title: &str) -> Result<(), StoreError>;

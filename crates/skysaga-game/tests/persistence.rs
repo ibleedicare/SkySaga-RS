@@ -286,3 +286,89 @@ fn restoring_mail_twice_does_not_duplicate() {
 
     assert_eq!(next.stored_mail().len(), 1);
 }
+
+/// A worn pick stays worn, a deed keeps the title it named and a recipe stays learned, though
+/// every stack is a new entity the next time the player joins.
+#[test]
+fn wear_titles_and_recipes_come_back_with_the_rucksack() {
+    use skysaga_game::deed_title;
+    use skysaga_proto::bitstream::BitWriter;
+    use skysaga_proto::packets::combat::EquippedItemUsed;
+
+    let world = world();
+    let mut before = playing(&world);
+
+    let pick = before.give("Metal_Pickaxe", 1).expect("a pick");
+    before.wear_to(pick, 700, &world);
+
+    let deed = before.give("HomeIslandTitleDeed", 1).expect("a deed");
+    let title = deed_title(world.geodata.home_titles(), deed).map(skysaga_core::name_hash);
+
+    // Read a scroll, so there is a recipe to keep.
+    before.give("Recipe_Teacher", 1).expect("a scroll");
+
+    let mut writer = BitWriter::new();
+
+    EquippedItemUsed {
+        location: 0,
+        equipped_action: Some(skysaga_core::name_hash("Learn_Recipe")),
+        action_type: 0,
+    }
+    .encode(&mut writer);
+
+    before.handle(ClientPacket::parse(&writer.into_bytes()), &world);
+    before.handle(
+        ClientPacket::parse(&[0x99, 0x00, 0x01, 0x02, 0x98, 0x20, 0x00, 0x40, 0x80, 0x81, 0x01, 0x00]),
+        &world,
+    );
+
+    let items = before.carried_items();
+    let progress = before.progress(&world);
+
+    assert_eq!(progress.recipes.len(), 1);
+    assert_eq!(progress.item_details.len(), 2, "the pick and the deed; the scroll was spent");
+
+    // The next session: its stacks get other ids, which would name another title.
+    let mut after = playing(&world);
+
+    after.reserve_ids_from(world.next_entity_id() + 57);
+
+    let resent = after.restore_progress(&progress, &world);
+
+    assert_eq!(ids(&resent, EntitySync::ID), 1, "the recipe book is sent again");
+
+    after.restore_items(&items, &world);
+
+    assert_eq!(after.progress(&world), progress);
+    assert_eq!(after.learned_recipes(), before.learned_recipes());
+
+    let restored_pick = after.slot(before.slot_of(pick).unwrap()).unwrap();
+    let restored_deed = after.slot(before.slot_of(deed).unwrap()).unwrap();
+
+    assert_ne!(restored_deed, deed, "a new entity");
+    assert_eq!(after.durability_of(restored_pick, &world).unwrap().durability, 700);
+
+    let detail = after
+        .progress(&world)
+        .item_details
+        .into_iter()
+        .find(|detail| Some(detail.slot) == after.slot_of(restored_deed))
+        .unwrap();
+
+    assert_eq!(detail.teaches, title, "the deed still names the title it named");
+}
+
+/// Nothing is written down before the rucksack is back, or the first tick of a session would
+/// erase what the player had learned.
+#[test]
+fn progress_is_not_recorded_before_the_restore() {
+    let world = world();
+    let mut session = playing(&world);
+
+    assert_eq!(session.progress_to_record(&world), None);
+
+    session.mark_items_restored();
+
+    assert!(session.progress_to_record(&world).is_some());
+    assert_eq!(session.progress_to_record(&world), None, "unchanged, so nothing to write");
+}
