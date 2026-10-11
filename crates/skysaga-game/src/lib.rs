@@ -1422,20 +1422,51 @@ impl Session {
     /// item is its name hash, because a stack's *entity* is minted per session and means
     /// nothing tomorrow. See [`skysaga_state::StoredItem`].
     pub fn carried_items(&self) -> Vec<skysaga_state::StoredItem> {
-        self.inventory()
-            .iter()
-            .enumerate()
-            .filter(|(_, entity)| **entity != 0)
+        self.stored_layout()
+            .into_iter()
             .filter_map(|(slot, entity)| {
-                let stack = self.inventories.item(*entity)?;
+                let stack = self.inventories.item(entity)?;
 
                 Some(skysaga_state::StoredItem {
-                    slot: slot as u32,
+                    slot,
                     item: stack.slot_data.name?,
                     count: stack.slot_data.count,
                 })
             })
             .collect()
+    }
+
+    /// Every stack that is the player's, with the square it is written down under.
+    ///
+    /// **Including what sits on the repair and dismantle squares.** Those stacks have left the
+    /// rucksack, so a list of the rucksack alone forgets them, and a tool left on the repair
+    /// square was gone after a reconnect (seen 2026-10-11). They are written down in the
+    /// first free rucksack squares, which is where they come back.
+    fn stored_layout(&self) -> Vec<(u32, u32)> {
+        let inventory = self.inventory();
+
+        let mut layout: Vec<(u32, u32)> = inventory
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| **entity != 0)
+            .map(|(slot, entity)| (slot as u32, *entity))
+            .collect();
+
+        let mut free = (crate::world::FIRST_RUCKSACK_SLOT..inventory.len())
+            .filter(|slot| inventory[*slot] == 0)
+            .map(|slot| slot as u32);
+
+        for parked in self.drop_slots.iter().copied().filter(|entity| *entity != 0) {
+            // A full rucksack has nowhere to write it down. Better lost from the record than
+            // written over something.
+            if let Some(slot) = free.next() {
+                layout.push((slot, parked));
+            }
+        }
+
+        layout.sort_unstable();
+
+        layout
     }
 
     /// Take back what this player had learned, and hold the details of their items for the
@@ -1477,18 +1508,17 @@ impl Session {
 
     /// What this player has learned and what their items carry, for writing down.
     pub fn progress(&self, world: &World) -> skysaga_state::StoredProgress {
-        let item_details = self
-            .inventory()
+        let layout = self.stored_layout();
+
+        let item_details = layout
             .iter()
-            .enumerate()
-            .filter(|(_, entity)| **entity != 0)
             .filter_map(|(slot, entity)| {
                 let durability = self.wear.get(entity).copied();
                 let teaches = self.teaches(*entity, world);
 
                 (durability.is_some() || teaches.is_some()).then_some(
                     skysaga_state::StoredItemDetail {
-                        slot: slot as u32,
+                        slot: *slot,
                         durability,
                         teaches,
                     },
@@ -1496,18 +1526,14 @@ impl Session {
             })
             .collect();
 
-        let item_materials = self
-            .inventory()
+        let item_materials = layout
             .iter()
-            .enumerate()
-            .filter_map(|(slot, entity)| Some((slot as u32, self.made_of.get(entity)?.clone())))
+            .filter_map(|(slot, entity)| Some((*slot, self.made_of.get(entity)?.clone())))
             .collect();
 
-        let item_minted = self
-            .inventory()
+        let item_minted = layout
             .iter()
-            .enumerate()
-            .filter_map(|(slot, entity)| Some((slot as u32, *self.minted.get(entity)?)))
+            .filter_map(|(slot, entity)| Some((*slot, *self.minted.get(entity)?)))
             .collect();
 
         skysaga_state::StoredProgress {
