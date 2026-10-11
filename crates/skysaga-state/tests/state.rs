@@ -1010,6 +1010,7 @@ mod commands {
             count: 64,
             durability: None,
             materials: Vec::new(),
+            age: None,
         }
     }
 

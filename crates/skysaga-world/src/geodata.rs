@@ -146,6 +146,9 @@ pub struct GeoData {
     /// Absent for an item that names no category. See [`Self::materials_of`].
     materials: HashMap<u32, Vec<Option<u32>>>,
 
+    /// Name hash to how many seconds the item lasts. See [`Self::lifetime_of`].
+    lifetimes: HashMap<u32, u32>,
+
     /// Every `Resources` name, lower-cased: the set of things a player may ask for by name.
     ///
     /// A name is hashed everywhere else, and a hash of a misspelling is a perfectly good number
@@ -297,6 +300,9 @@ impl Recipe {
 /// `Metal_Orange` "Copper", `Metal_Pink` "Rose Iron". Iron is the least rare of them.
 const NAMED_DEFAULTS: &[(&str, &str)] = &[("Metal", "Metal_Grey")];
 
+/// Seconds in each `LifetimeUnit`: seconds, minutes, hours, days.
+const LIFETIME_UNITS: [u32; 4] = [1, 60, 3600, 86_400];
+
 impl GeoData {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let path = path.as_ref();
@@ -380,6 +386,21 @@ impl GeoData {
 
                 (durability > 0)
                     .then(|| (skysaga_core::name_hash(&resource.name), durability))
+            })
+            .collect();
+
+        // --- what does not last --------------------------------------------------------------
+        //
+        // `Lifetime` counts `LifetimeUnit`s, and the client's table of units (`0x00d08984`,
+        // read by `FUN_00905e90`) is seconds, minutes, hours, days. Anything else is none.
+        let lifetimes: HashMap<u32, u32> = file
+            .resources
+            .iter()
+            .filter_map(|resource| {
+                let unit = *LIFETIME_UNITS.get(resource.lifetime_unit as usize)?;
+                let seconds = (resource.lifetime * unit as f32) as u32;
+
+                (seconds > 0).then(|| (skysaga_core::name_hash(&resource.name), seconds))
             })
             .collect();
 
@@ -556,6 +577,7 @@ impl GeoData {
                 })
                 .collect(),
             materials,
+            lifetimes,
             resource_names,
             places,
             actions,
@@ -610,6 +632,12 @@ impl GeoData {
     /// blank before one that is not.
     pub fn materials_of(&self, hash: u32) -> &[Option<u32>] {
         self.materials.get(&hash).map_or(&[], Vec::as_slice)
+    }
+
+    /// How many seconds the item `hash` lasts from the moment it is minted, for the few that
+    /// expire: the four daily portal stones.
+    pub fn lifetime_of(&self, hash: u32) -> Option<u32> {
+        self.lifetimes.get(&hash).copied()
     }
 
     /// Every item that wears out, as `(name hash, durability)`.
@@ -826,6 +854,11 @@ impl GeoData {
         // Something that wears is one of a kind: two of them are two amounts of wear, which a
         // single stack cannot hold. The data's own figure, where it gives one, still wins.
         for name in self.durability.keys() {
+            limits.set(*name, 1);
+        }
+
+        // Likewise something that expires: two of them are two ages.
+        for name in self.lifetimes.keys() {
             limits.set(*name, 1);
         }
 
@@ -1099,6 +1132,13 @@ struct RawResource {
 
     #[serde(rename = "QuaternaryMaterialCategory", default)]
     quaternary_material: String,
+
+    /// How long the item lasts once minted, in `lifetime_unit`s. Zero for nearly everything.
+    #[serde(rename = "Lifetime", default)]
+    lifetime: f32,
+
+    #[serde(rename = "LifetimeUnit", default)]
+    lifetime_unit: u32,
 }
 
 impl RawResource {

@@ -130,6 +130,7 @@ impl Local {
             count,
             durability: None,
             materials: Vec::new(),
+            age: None,
         });
 
         assert!(

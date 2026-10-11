@@ -45,6 +45,7 @@ pub mod recipe_book;
 pub mod resource_pickup;
 pub mod adventure_name;
 pub mod home_island;
+pub mod portal_stone;
 pub mod teacher;
 pub mod teleporter;
 pub mod time_of_day;
@@ -64,6 +65,7 @@ pub use job_rank::{JobRank, JobRankComponent};
 pub use material_composition::MaterialCompositionComponent;
 pub use adventure_name::{AdventureNameComponent, NamePart};
 pub use home_island::HomeIslandCustomisationComponent;
+pub use portal_stone::PortalStoneComponent;
 pub use teacher::TeacherComponent;
 pub use teleporter::TeleporterComponent;
 pub use misc::{
@@ -171,6 +173,8 @@ pub enum Component {
     AdventureName(AdventureNameComponent),
     /// `clienthomeislandcustomisationcomponent` -- the title on a home island's banner.
     HomeIslandCustomisation(HomeIslandCustomisationComponent),
+    /// `portalstonecomponent` -- a portal stone's seed.
+    PortalStone(PortalStoneComponent),
     /// `teachercomponent` -- what a deed or a recipe scroll teaches.
     Teacher(TeacherComponent),
     /// `clientteleportercomponent` -- whether a portal is open, and onto what.
@@ -212,6 +216,7 @@ impl Component {
             Self::SmoothedTransform(_) => "smoothedtransformcomponent",
             Self::AdventureName(_) => "clientadventurenamecomponent",
             Self::HomeIslandCustomisation(_) => "clienthomeislandcustomisationcomponent",
+            Self::PortalStone(_) => "portalstonecomponent",
             Self::Teacher(_) => "teachercomponent",
             Self::Teleporter(_) => "clientteleportercomponent",
             Self::TimeOfDay(_) => "clienttimeofdaycomponent",
@@ -252,6 +257,7 @@ impl Component {
             Self::SmoothedTransform(component) => component.sync(parameter, writer),
             Self::AdventureName(component) => component.sync(parameter, writer),
             Self::HomeIslandCustomisation(component) => component.sync(parameter, writer),
+            Self::PortalStone(component) => component.sync(parameter, writer),
             Self::Teacher(component) => component.sync(parameter, writer),
             Self::Teleporter(component) => component.sync(parameter, writer),
             Self::TimeOfDay(component) => component.sync(parameter, writer),

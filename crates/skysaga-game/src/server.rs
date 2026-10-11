@@ -182,6 +182,18 @@ impl GameServer {
             self.apply(command);
         }
 
+        // What expires is counted on RakNet's clock, and goes when its time is up whether or
+        // not anybody is doing anything.
+        let network_ms = raknet::time_ms();
+
+        for session in self.sessions.values_mut() {
+            session.set_network_clock(network_ms);
+
+            let world = world_of(&self.world, &self.adventures, session.world_key());
+
+            session.expire_items(world);
+        }
+
         // **Every tick, not only after a packet arrives.**
         //
         // A session queues packets nobody asked for -- the mail doorbell, and a craft
@@ -704,7 +716,8 @@ impl GameServer {
                 count,
                 durability,
                 materials,
-            } => self.give(&account, &item, count, durability, &materials),
+                age,
+            } => self.give(&account, &item, count, durability, &materials, age),
 
             AdminCommand::ClearInventory { account } => self.clear_inventory(&account),
 
@@ -927,6 +940,7 @@ impl GameServer {
         count: u32,
         durability: Option<u32>,
         materials: &[String],
+        age: Option<u32>,
     ) {
         let Some((guid, entity_id)) = self
             .sessions
@@ -966,6 +980,10 @@ impl GameServer {
 
         if !materials.is_empty() {
             session.make_of(item_entity, materials);
+        }
+
+        if let Some(seconds) = age {
+            session.age_by(item_entity, seconds);
         }
 
         let slot = session.slot_of(item_entity).unwrap_or_default();

@@ -44,6 +44,10 @@ pub const RELIABLE_ORDERED: c_int = 3;
 pub const RAKNET_STARTED: c_int = 0;
 
 extern "C" {
+    /// `RakNet::GetTime()`: milliseconds on the clock every RakNet timestamp is on, counted
+    /// from the first call in this process.
+    pub fn CSharp_GetTime() -> u64;
+
     // --- peer lifecycle ---------------------------------------------------------------
 
     pub fn CSharp_RakPeerInterface_GetInstance() -> *mut c_void;

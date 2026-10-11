@@ -51,6 +51,13 @@ pub struct DurabilityComponent {
 
     /// Whether it wears at all.
     pub indestructible: bool,
+
+    /// When the item began to expire and when it will be gone, for one that lasts a while
+    /// rather than wearing: milliseconds on **the server's RakNet clock**, which is what the
+    /// client compares them with after correcting for its own (`FUN_008a23a0`). With one of
+    /// these the client ignores the two durability numbers and shows the time left as the
+    /// percentage (`FUN_008d4760`), and removes the item itself at the end (`FUN_008d49d0`).
+    pub lifetime: Option<(u64, u64)>,
 }
 
 impl DurabilityComponent {
@@ -60,6 +67,7 @@ impl DurabilityComponent {
             durability: max,
             durability_max: max,
             indestructible: false,
+            lifetime: None,
         }
     }
 
@@ -71,7 +79,18 @@ impl DurabilityComponent {
             }
             "indestructible" => writer.write_bit(self.indestructible),
 
-            // Declined on purpose. See the module docs.
+            // One presence bit, then both instants, 64 bits each and big-endian as RakNet
+            // writes any integer. Declined when there is none: see the module docs.
+            "lifetimedata" => {
+                let Some((start, end)) = self.lifetime else {
+                    return false;
+                };
+
+                writer.write_bit(true);
+                writer.write_bits(&start.to_be_bytes(), 64);
+                writer.write_bits(&end.to_be_bytes(), 64);
+            }
+
             _ => return false,
         }
 

@@ -372,6 +372,8 @@ pub enum AdminCommand {
         /// `Materials` names, one per category the item is made of, primary first. Empty
         /// leaves the item its usual ones.
         materials: Vec<String>,
+        /// How many seconds ago to pretend the item was minted, for one that expires.
+        age: Option<u32>,
     },
 
     /// Put a message in a player's inbox.
@@ -509,6 +511,8 @@ pub struct StoredProgress {
     /// The materials of each stack that is not made of its item's usual ones: the square,
     /// then one material per category, primary first, with `None` for a gap.
     pub item_materials: Vec<(u32, Vec<Option<u32>>)>,
+    /// When each stack that expires was minted: the square, then Unix milliseconds.
+    pub item_minted: Vec<(u32, u64)>,
     /// Name hashes of the recipes learned, in the order they were learned.
     pub recipes: Vec<u32>,
 }
