@@ -199,6 +199,9 @@ pub struct Give {
     /// What a tool has left, to hand over a worn one. Ignored for anything that does not wear.
     #[serde(default)]
     durability: Option<u32>,
+    /// `Materials` names to make the item of, primary first: `["Metal_Grey"]`.
+    #[serde(default)]
+    materials: Vec<String>,
 }
 
 fn one() -> u32 {
@@ -241,6 +244,7 @@ async fn give(State(api): State<Api>, headers: HeaderMap, Json(give): Json<Give>
         item: give.item.clone(),
         count: give.count,
         durability: give.durability,
+        materials: give.materials.clone(),
     });
 
     Json(Queued {

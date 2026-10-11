@@ -1009,6 +1009,7 @@ mod commands {
             item: "Dirt".into(),
             count: 64,
             durability: None,
+            materials: Vec::new(),
         }
     }
 

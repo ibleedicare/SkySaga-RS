@@ -288,6 +288,15 @@ impl Recipe {
     }
 }
 
+/// The material a minted item is made of, for the categories whose first material the client
+/// has no name for.
+///
+/// Seen 2026-10-11 by hovering a `Metal_Pickaxe` of each metal: `Metal_Black`, the first in
+/// file order, reads "Pickaxe" with "a head of ." in its description, as do the other
+/// `Common` metals. Four have names: `Metal_Grey` is "Iron", `Metal_Blue` "Blue Steel",
+/// `Metal_Orange` "Copper", `Metal_Pink` "Rose Iron". Iron is the least rare of them.
+const NAMED_DEFAULTS: &[(&str, &str)] = &[("Metal", "Metal_Grey")];
+
 impl GeoData {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let path = path.as_ref();
@@ -386,6 +395,13 @@ impl GeoData {
             first_of_category
                 .entry(material.category.as_str())
                 .or_insert_with(|| skysaga_core::name_hash(&material.name));
+        }
+
+        // Where the first of a category has no name of its own, one that has takes its place.
+        for (category, material) in NAMED_DEFAULTS {
+            if file.materials.iter().any(|known| known.name == *material) {
+                first_of_category.insert(category, skysaga_core::name_hash(material));
+            }
         }
 
         let materials: HashMap<u32, Vec<Option<u32>>> = file

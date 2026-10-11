@@ -986,6 +986,9 @@ pub struct Session {
     /// Recipes read from scrolls, beside the ones every player starts with.
     learned_recipes: Vec<u32>,
 
+    /// The materials a stack was given, where they are not its item's usual ones.
+    made_of: std::collections::HashMap<u32, Vec<Option<u32>>>,
+
     /// What each deed or scroll teaches, by stack, once that has been settled: restored from
     /// storage, or written down for it. A stack not here is named by [`deed_title`] or
     /// [`scroll_recipe`].
@@ -1065,6 +1068,7 @@ impl Session {
             clock_ms: None,
             todo_tasks: Vec::new(),
             learned_recipes: Vec::new(),
+            made_of: std::collections::HashMap::new(),
             taught: std::collections::HashMap::new(),
             pending_details: std::collections::HashMap::new(),
             recorded_progress: None,
@@ -5507,10 +5511,23 @@ impl Session {
     /// Like the durability, straight from the data. An item crafted from a chosen metal would
     /// carry that metal instead, which needs the materials stored on the stack.
     pub fn materials_of(&self, entity: u32, world: &World) -> Vec<Option<u32>> {
+        if let Some(chosen) = self.made_of.get(&entity) {
+            return chosen.clone();
+        }
+
         self.inventories
             .name(entity)
             .map(|name| world.geodata.materials_of(name).to_vec())
             .unwrap_or_default()
+    }
+
+    /// Make the stack `entity` of the named `Materials`, primary first, rather than of the
+    /// first of each category. Say so before the stack is announced.
+    pub fn make_of(&mut self, entity: u32, materials: &[String]) {
+        self.made_of.insert(
+            entity,
+            materials.iter().map(|name| Some(skysaga_core::name_hash(name))).collect(),
+        );
     }
 
     /// The `EntityAdd` for one stack the player already holds, as the kind of item it is.

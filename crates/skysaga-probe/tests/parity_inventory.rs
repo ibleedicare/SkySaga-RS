@@ -129,6 +129,7 @@ impl Local {
             item: item.to_owned(),
             count,
             durability: None,
+            materials: Vec::new(),
         });
 
         assert!(

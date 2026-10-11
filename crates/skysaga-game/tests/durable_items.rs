@@ -118,7 +118,7 @@ fn a_given_tool_is_made_of_the_first_material_of_each_category() {
     assert_eq!(
         session.materials_of(sword, &world),
         vec![
-            Some(skysaga_core::name_hash("Metal_Black")),
+            Some(skysaga_core::name_hash("Metal_Grey")),
             Some(skysaga_core::name_hash("Dark_Wood")),
         ],
     );
@@ -293,4 +293,26 @@ fn a_stack_is_sent_without_a_uuid_and_a_tool_with_its_own() {
     assert_eq!(session.uuid_on_the_wire(plates, &world), "");
     assert_eq!(session.uuid_on_the_wire(pick, &world), own);
     assert!(!own.is_empty());
+}
+
+/// An item can be handed over in a chosen material, which is how the named metals were found.
+#[test]
+fn a_stack_can_be_made_of_a_chosen_material() {
+    let world = world();
+    let mut session = playing(&world);
+
+    let pick = session.give("Metal_Pickaxe", 1).expect("a pick");
+
+    assert_eq!(
+        session.materials_of(pick, &world).first().copied().flatten(),
+        Some(skysaga_core::name_hash("Metal_Grey")),
+        "iron by default: the first metal in the file has no name in the client",
+    );
+
+    session.make_of(pick, &["Metal_Orange".to_owned()]);
+
+    assert_eq!(
+        session.materials_of(pick, &world),
+        vec![Some(skysaga_core::name_hash("Metal_Orange"))],
+    );
 }
